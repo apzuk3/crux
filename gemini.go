@@ -11,6 +11,9 @@ import (
 
 const geminiPartOpaqueKey = "gemini.content.part"
 
+// Candidate metadata is retained for sources/display, not replayed as a part.
+const geminiGroundingMetadataOpaqueKey = "gemini.candidate.grounding_metadata"
+
 func (a *Agent) newGeminiClient(ctx context.Context) (*genai.Client, error) {
 	config := &genai.ClientConfig{Backend: genai.BackendGeminiAPI}
 	if a.apikey != "" {
@@ -33,6 +36,9 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 		return nil, err
 	}
 	config := &genai.GenerateContentConfig{Tools: tools}
+	if a.enableWebsearch {
+		config.Tools = append(config.Tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
+	}
 	if a.instructions != "" {
 		config.SystemInstruction = &genai.Content{Parts: []*genai.Part{genai.NewPartFromText(a.instructions)}}
 	}
@@ -59,10 +65,35 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gemini generate content: %w", err)
 	}
+	if feedback := response.PromptFeedback; feedback != nil {
+		switch feedback.BlockReason {
+		case genai.BlockedReasonSafety, genai.BlockedReasonBlocklist,
+			genai.BlockedReasonProhibitedContent, genai.BlockedReasonImageSafety,
+			genai.BlockedReasonModelArmor, genai.BlockedReasonJailbreak:
+			return nil, &RefusalError{
+				Provider: a.provider,
+				Model:    a.model,
+				Reason:   string(feedback.BlockReason),
+				Message:  feedback.BlockReasonMessage,
+			}
+		}
+	}
 	if len(response.Candidates) == 0 {
 		return nil, errors.New("gemini returned no candidates")
 	}
 	candidate := response.Candidates[0]
+	switch candidate.FinishReason {
+	case genai.FinishReasonSafety, genai.FinishReasonBlocklist,
+		genai.FinishReasonProhibitedContent, genai.FinishReasonSPII,
+		genai.FinishReasonRecitation, genai.FinishReasonImageSafety,
+		genai.FinishReasonImageProhibitedContent, genai.FinishReasonImageRecitation:
+		return nil, &RefusalError{
+			Provider: a.provider,
+			Model:    a.model,
+			Reason:   string(candidate.FinishReason),
+			Message:  candidate.FinishMessage,
+		}
+	}
 	if candidate.FinishReason != genai.FinishReasonStop {
 		return nil, fmt.Errorf("gemini response did not complete: finish reason %q", candidate.FinishReason)
 	}
@@ -81,6 +112,13 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 			entry.ToolCall.ID = fmt.Sprintf("gemini-call-%d-%d", len(log), i)
 		}
 		produced = append(produced, entry)
+	}
+	if candidate.GroundingMetadata != nil {
+		raw, err := json.Marshal(candidate.GroundingMetadata)
+		if err != nil {
+			return nil, fmt.Errorf("marshal Gemini grounding metadata: %w", err)
+		}
+		produced[len(produced)-1].Opaque[geminiGroundingMetadataOpaqueKey] = raw
 	}
 	if usage := response.UsageMetadata; usage != nil {
 		produced[len(produced)-1].Usage = &Usage{
@@ -144,6 +182,9 @@ func toGeminiContents(log []Entry) ([]*genai.Content, error) {
 	var contents []*genai.Content
 	calls := make(map[string]*genai.FunctionCall)
 	for _, e := range log {
+		if e.Kind == KindProviderTool && len(e.Opaque[geminiPartOpaqueKey]) == 0 {
+			continue
+		}
 		if e.Kind == KindStateDelta {
 			continue
 		}

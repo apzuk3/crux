@@ -25,6 +25,8 @@ type Agent struct {
 	apikey       string
 	outputSchema *jsonschema.Schema
 
+	enableWebsearch bool
+
 	toolsRegistry *ToolsRegistry
 
 	openai    *openai.Client
@@ -40,6 +42,12 @@ func WithAllowedTools(tools []string) AgentOption {
 
 func WithInstructions(instructions string) AgentOption {
 	return func(a *Agent) { a.instructions = instructions }
+}
+
+// WithWebsearchEnabled enables provider-executed search on supported OpenAI,
+// Anthropic, and Gemini models. The model decides when to search.
+func WithWebsearchEnabled() AgentOption {
+	return func(a *Agent) { a.enableWebsearch = true }
 }
 
 func WithProvider(provider Provider) AgentOption {
@@ -121,6 +129,8 @@ func NewAgent(model string, opts ...AgentOption) *Agent {
 	return agent
 }
 
+// Run executes the agent. Explicit model refusals and provider content-policy
+// blocks return *RefusalError before local tools from that response are run.
 func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 	// The user turn is part of the log, so every provider sees one shape and a
 	// resumed session needs nothing but its history.
@@ -133,15 +143,21 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 	// ---> Notify start
 	for range a.maxTurns {
 		var produced []Entry
+		var continueTurn bool
 
 		switch a.provider {
 		case ProviderAnthropic:
-			produced, err = a.anthropicStep(ctx, log)
+			produced, continueTurn, err = a.anthropicStep(ctx, log)
 			if err != nil {
 				return "", err
 			}
-		case ProviderOpenAI, ProviderOpenrouter:
+		case ProviderOpenAI:
 			produced, err = a.openAIstep(ctx, log)
+			if err != nil {
+				return "", err
+			}
+		case ProviderOpenrouter:
+			produced, err = a.openrouterStep(ctx, log)
 			if err != nil {
 				return "", err
 			}
@@ -158,8 +174,8 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 		results := a.dispatchCalls(ctx, produced)
 		log = append(log, results...)
 
-		// Local tool results require another model turn.
-		if len(results) == 0 {
+		// Local tool results and paused server-side turns require continuation.
+		if len(results) == 0 && !continueTurn {
 			// ---> Notify end
 			return finalText(produced), nil
 		}
@@ -170,6 +186,7 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 
 // Run executes the agent and decodes its final text response into Out. Anything
 // that is not text is read back as JSON.
+// A *RefusalError is returned before output decoding if the provider refuses.
 func Run[Out any](ctx context.Context, a *Agent, input any) (Out, error) {
 	text, err := a.Run(ctx, input)
 	if err != nil {
