@@ -26,15 +26,16 @@ func (a *Agent) newAnthropicClient() *anthropic.Client {
 	return &client
 }
 
-// anthropicStep returns the model's ordered blocks with usage attached.
-func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error) {
+// anthropicStep returns ordered blocks with usage and whether a paused server
+// turn needs continuation.
+func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, bool, error) {
 	messages, err := toAnthropicMessages(log)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	tools, err := anthropicTools(a.toolsRegistry, a.allowedTools)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	params := anthropic.MessageNewParams{
 		Model: a.model, Messages: messages, Tools: tools,
@@ -43,14 +44,19 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 	if a.instructions != "" {
 		params.System = []anthropic.TextBlockParam{{Text: a.instructions}}
 	}
+	if a.enableWebsearch {
+		params.Tools = append(params.Tools, anthropic.ToolUnionParam{
+			OfWebSearchTool20250305: &anthropic.WebSearchTool20250305Param{},
+		})
+	}
 	if a.outputSchema != nil {
 		raw, err := json.Marshal(a.outputSchema)
 		if err != nil {
-			return nil, fmt.Errorf("marshal output schema: %w", err)
+			return nil, false, fmt.Errorf("marshal output schema: %w", err)
 		}
 		var schema map[string]any
 		if err := json.Unmarshal(raw, &schema); err != nil {
-			return nil, fmt.Errorf("decode output schema: %w", err)
+			return nil, false, fmt.Errorf("decode output schema: %w", err)
 		}
 		params.OutputConfig = anthropic.OutputConfigParam{
 			Format: anthropic.JSONOutputFormatParam{Schema: schema},
@@ -58,31 +64,40 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 	}
 	response, err := a.anthropic.Messages.New(ctx, params)
 	if err != nil {
-		return nil, fmt.Errorf("anthropic messages: %w", err)
+		return nil, false, fmt.Errorf("anthropic messages: %w", err)
 	}
 	switch response.StopReason {
-	case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence, anthropic.StopReasonToolUse:
+	case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence, anthropic.StopReasonToolUse, anthropic.StopReasonPauseTurn:
 	case anthropic.StopReasonRefusal:
-		return nil, errors.New("anthropic refused the request")
+		reason := string(response.StopDetails.Category)
+		if reason == "" {
+			reason = "refusal"
+		}
+		return nil, false, &RefusalError{
+			Provider: a.provider,
+			Model:    a.model,
+			Reason:   reason,
+			Message:  response.StopDetails.Explanation,
+		}
 	default:
-		return nil, fmt.Errorf("anthropic response did not complete: stop reason %q", response.StopReason)
+		return nil, false, fmt.Errorf("anthropic response did not complete: stop reason %q", response.StopReason)
 	}
 	produced := make([]Entry, 0, len(response.Content))
 	for _, block := range response.Content {
 		entry, err := fromAnthropicContentBlock(block)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		produced = append(produced, entry)
 	}
 	if len(produced) == 0 {
-		return nil, errors.New("anthropic returned no content")
+		return nil, false, errors.New("anthropic returned no content")
 	}
 	produced[len(produced)-1].Usage = &Usage{
 		InputTokens:  int(response.Usage.InputTokens + response.Usage.CacheCreationInputTokens + response.Usage.CacheReadInputTokens),
 		OutputTokens: int(response.Usage.OutputTokens),
 	}
-	return produced, nil
+	return produced, response.StopReason == anthropic.StopReasonPauseTurn, nil
 }
 
 func anthropicTools(registry *ToolsRegistry, allowedTools []string) ([]anthropic.ToolUnionParam, error) {
@@ -123,6 +138,8 @@ func fromAnthropicContentBlock(block anthropic.ContentBlockUnion) (Entry, error)
 		return Entry{Kind: KindReasoning, Reasoning: &Reasoning{Summary: v.Thinking}, Opaque: opaque}, nil
 	case anthropic.RedactedThinkingBlock:
 		return Entry{Kind: KindReasoning, Reasoning: &Reasoning{}, Opaque: opaque}, nil
+	case anthropic.ServerToolUseBlock, anthropic.WebSearchToolResultBlock:
+		return Entry{Kind: KindProviderTool, Opaque: opaque}, nil
 	case anthropic.ToolUseBlock:
 		return Entry{Kind: KindToolCall, ToolCall: &ToolCall{
 			ID: v.ID, Name: v.Name, Args: v.Input,
@@ -146,6 +163,9 @@ func toAnthropicMessages(log []Entry) ([]anthropic.MessageParam, error) {
 		last.Content = append(last.Content, blocks...)
 	}
 	for _, e := range log {
+		if e.Kind == KindProviderTool && len(e.Opaque[anthropicContentBlockOpaqueKey]) == 0 {
+			continue
+		}
 		if e.Kind == KindStateDelta {
 			continue
 		}

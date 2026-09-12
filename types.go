@@ -36,6 +36,7 @@ const (
 	KindToolResult
 	KindStateDelta
 	KindCompaction
+	KindProviderTool // server-executed tool event retained in Opaque
 )
 
 type ContentKind string

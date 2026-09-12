@@ -15,6 +15,21 @@ import (
 
 const openAIOutputItemOpaqueKey = "openai.response.output_item"
 
+// openAIResponseError retains unsuccessful response metadata for adapters that
+// interpret provider-specific fields after the shared step returns.
+type openAIResponseError struct {
+	Provider Provider
+	Response *responses.Response
+}
+
+func (e *openAIResponseError) Error() string {
+	response := e.Response
+	if response.Error.Code != "" || response.Status == responses.ResponseStatusFailed {
+		return fmt.Sprintf("%s response failed: %s: %s", e.Provider, response.Error.Code, response.Error.Message)
+	}
+	return fmt.Sprintf("%s response did not complete: status %q, reason %q", e.Provider, response.Status, response.IncompleteDetails.Reason)
+}
+
 func (a *Agent) newOpenAIClient() *openai.Client {
 	var opts []option.RequestOption
 	if a.apikey != "" {
@@ -46,6 +61,9 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 	if a.instructions != "" {
 		params.Instructions = openai.String(a.instructions)
 	}
+	if a.enableWebsearch {
+		params.Tools = append(params.Tools, responses.ToolParamOfWebSearch(responses.WebSearchToolTypeWebSearch))
+	}
 	if a.outputSchema != nil {
 		raw, err := json.Marshal(a.outputSchema)
 		if err != nil {
@@ -71,6 +89,25 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 	response, err := a.openai.Responses.New(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("openai responses: %w", err)
+	}
+	// Scan all messages before converting items or executing any local tools.
+	for _, item := range response.Output {
+		if message, ok := item.AsAny().(responses.ResponseOutputMessage); ok {
+			for _, part := range message.Content {
+				if refusal, ok := part.AsAny().(responses.ResponseOutputRefusal); ok {
+					return nil, &RefusalError{
+						Provider: a.provider, Model: a.model,
+						Reason: "refusal", Message: refusal.Refusal,
+					}
+				}
+			}
+		}
+	}
+	if response.Status == responses.ResponseStatusIncomplete && response.IncompleteDetails.Reason == "content_filter" {
+		return nil, &RefusalError{Provider: a.provider, Model: a.model, Reason: "content_filter"}
+	}
+	if response.Error.Code != "" || response.Status != responses.ResponseStatusCompleted {
+		return nil, &openAIResponseError{Provider: a.provider, Response: response}
 	}
 
 	produced := make([]Entry, 0, len(response.Output))
@@ -149,6 +186,8 @@ func fromOpenAIResponseOutputItemUnion(item responses.ResponseOutputItemUnion) (
 			},
 			Opaque: opaque,
 		}, nil
+	case responses.ResponseFunctionWebSearch:
+		return Entry{Kind: KindProviderTool, Opaque: opaque}, nil
 	case responses.ResponseFunctionToolCall:
 		return Entry{
 			Kind: KindToolCall,
@@ -170,6 +209,9 @@ func toOpenAIResponseInput(log []Entry) (responses.ResponseInputParam, error) {
 	input := make(responses.ResponseInputParam, 0, len(log))
 
 	for _, e := range log {
+		if e.Kind == KindProviderTool && len(e.Opaque[openAIOutputItemOpaqueKey]) == 0 {
+			continue
+		}
 		if e.Kind == KindStateDelta {
 			continue // tool-written state, never shown to the model
 		}
@@ -295,6 +337,9 @@ func openAIInputItemFromOutputItem(raw []byte) (responses.ResponseInputItemUnion
 	case responses.ResponseFunctionToolCall:
 		p := v.ToParam()
 		return responses.ResponseInputItemUnionParam{OfFunctionCall: &p}, nil
+	case responses.ResponseFunctionWebSearch:
+		p := v.ToParam()
+		return responses.ResponseInputItemUnionParam{OfWebSearchCall: &p}, nil
 	default:
 		return responses.ResponseInputItemUnionParam{}, fmt.Errorf("unsupported OpenAI output item type %T", v)
 	}
