@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go mod *)",
+      "Bash(go build *)",
+      "Bash(go run *)",
+      "WebFetch(domain:google.github.io)",
+      "WebSearch",
+      "WebFetch(domain:adk.dev)",
+      "WebFetch(domain:docs.claude.com)"
+    ]
+  }
+}
