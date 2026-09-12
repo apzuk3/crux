@@ -106,9 +106,14 @@ func NewAgent(model string, opts ...AgentOption) *Agent {
 		agent.apikey = discoverAPIKey(agent.provider)
 	}
 
-	if agent.provider == ProviderOpenAI {
+	if agent.provider == ProviderOpenrouter && agent.baseURL == "" {
+		agent.baseURL = "https://api.openrouter.ai"
+	}
+
+	if agent.provider == ProviderOpenAI || agent.provider == ProviderOpenrouter {
 		agent.openai = agent.newOpenAIClient()
 	}
+
 	if agent.provider == ProviderAnthropic {
 		agent.anthropic = agent.newAnthropicClient()
 	}
@@ -135,7 +140,7 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 			if err != nil {
 				return "", err
 			}
-		case ProviderOpenAI:
+		case ProviderOpenAI, ProviderOpenrouter:
 			produced, err = a.openAIstep(ctx, log)
 			if err != nil {
 				return "", err
