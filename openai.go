@@ -15,21 +15,6 @@ import (
 
 const openAIOutputItemOpaqueKey = "openai.response.output_item"
 
-// openAIResponseError retains unsuccessful response metadata for adapters that
-// interpret provider-specific fields after the shared step returns.
-type openAIResponseError struct {
-	Provider Provider
-	Response *responses.Response
-}
-
-func (e *openAIResponseError) Error() string {
-	response := e.Response
-	if response.Error.Code != "" || response.Status == responses.ResponseStatusFailed {
-		return fmt.Sprintf("%s response failed: %s: %s", e.Provider, response.Error.Code, response.Error.Message)
-	}
-	return fmt.Sprintf("%s response did not complete: status %q, reason %q", e.Provider, response.Status, response.IncompleteDetails.Reason)
-}
-
 func (a *Agent) newOpenAIClient() *openai.Client {
 	var opts []option.RequestOption
 	if a.apikey != "" {
@@ -95,19 +80,19 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 		if message, ok := item.AsAny().(responses.ResponseOutputMessage); ok {
 			for _, part := range message.Content {
 				if refusal, ok := part.AsAny().(responses.ResponseOutputRefusal); ok {
-					return nil, &RefusalError{
-						Provider: a.provider, Model: a.model,
-						Reason: "refusal", Message: refusal.Refusal,
+					if refusal.Refusal != "" {
+						return nil, fmt.Errorf("%s refused the request: %s", a.provider, refusal.Refusal)
 					}
+					return nil, fmt.Errorf("%s refused the request", a.provider)
 				}
 			}
 		}
 	}
-	if response.Status == responses.ResponseStatusIncomplete && response.IncompleteDetails.Reason == "content_filter" {
-		return nil, &RefusalError{Provider: a.provider, Model: a.model, Reason: "content_filter"}
+	if response.Error.Code != "" || response.Status == responses.ResponseStatusFailed {
+		return nil, fmt.Errorf("%s response failed: %s: %s", a.provider, response.Error.Code, response.Error.Message)
 	}
-	if response.Error.Code != "" || response.Status != responses.ResponseStatusCompleted {
-		return nil, &openAIResponseError{Provider: a.provider, Response: response}
+	if response.Status != responses.ResponseStatusCompleted {
+		return nil, fmt.Errorf("%s response did not complete: status %q, reason %q", a.provider, response.Status, response.IncompleteDetails.Reason)
 	}
 
 	produced := make([]Entry, 0, len(response.Output))
