@@ -65,35 +65,10 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gemini generate content: %w", err)
 	}
-	if feedback := response.PromptFeedback; feedback != nil {
-		switch feedback.BlockReason {
-		case genai.BlockedReasonSafety, genai.BlockedReasonBlocklist,
-			genai.BlockedReasonProhibitedContent, genai.BlockedReasonImageSafety,
-			genai.BlockedReasonModelArmor, genai.BlockedReasonJailbreak:
-			return nil, &RefusalError{
-				Provider: a.provider,
-				Model:    a.model,
-				Reason:   string(feedback.BlockReason),
-				Message:  feedback.BlockReasonMessage,
-			}
-		}
-	}
 	if len(response.Candidates) == 0 {
 		return nil, errors.New("gemini returned no candidates")
 	}
 	candidate := response.Candidates[0]
-	switch candidate.FinishReason {
-	case genai.FinishReasonSafety, genai.FinishReasonBlocklist,
-		genai.FinishReasonProhibitedContent, genai.FinishReasonSPII,
-		genai.FinishReasonRecitation, genai.FinishReasonImageSafety,
-		genai.FinishReasonImageProhibitedContent, genai.FinishReasonImageRecitation:
-		return nil, &RefusalError{
-			Provider: a.provider,
-			Model:    a.model,
-			Reason:   string(candidate.FinishReason),
-			Message:  candidate.FinishMessage,
-		}
-	}
 	if candidate.FinishReason != genai.FinishReasonStop {
 		return nil, fmt.Errorf("gemini response did not complete: finish reason %q", candidate.FinishReason)
 	}

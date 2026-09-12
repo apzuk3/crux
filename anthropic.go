@@ -69,16 +69,7 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, bool, 
 	switch response.StopReason {
 	case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence, anthropic.StopReasonToolUse, anthropic.StopReasonPauseTurn:
 	case anthropic.StopReasonRefusal:
-		reason := string(response.StopDetails.Category)
-		if reason == "" {
-			reason = "refusal"
-		}
-		return nil, false, &RefusalError{
-			Provider: a.provider,
-			Model:    a.model,
-			Reason:   reason,
-			Message:  response.StopDetails.Explanation,
-		}
+		return nil, false, errors.New("anthropic refused the request")
 	default:
 		return nil, false, fmt.Errorf("anthropic response did not complete: stop reason %q", response.StopReason)
 	}

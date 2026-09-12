@@ -129,8 +129,7 @@ func NewAgent(model string, opts ...AgentOption) *Agent {
 	return agent
 }
 
-// Run executes the agent. Explicit model refusals and provider content-policy
-// blocks return *RefusalError before local tools from that response are run.
+// Run executes the agent and returns its final text response.
 func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 	// The user turn is part of the log, so every provider sees one shape and a
 	// resumed session needs nothing but its history.
@@ -186,7 +185,6 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 
 // Run executes the agent and decodes its final text response into Out. Anything
 // that is not text is read back as JSON.
-// A *RefusalError is returned before output decoding if the provider refuses.
 func Run[Out any](ctx context.Context, a *Agent, input any) (Out, error) {
 	text, err := a.Run(ctx, input)
 	if err != nil {
