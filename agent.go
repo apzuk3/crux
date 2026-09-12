@@ -11,6 +11,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/invopop/jsonschema"
 	"github.com/openai/openai-go/v3"
+	"google.golang.org/genai"
 )
 
 type Agent struct {
@@ -28,6 +29,7 @@ type Agent struct {
 
 	openai    *openai.Client
 	anthropic *anthropic.Client
+	gemini    *genai.Client
 }
 
 type AgentOption func(*Agent)
@@ -65,6 +67,8 @@ func WithTools(registry *ToolsRegistry) AgentOption {
 // additionalProperties: false on every object.
 // For Anthropic, the schema must satisfy its supported JSON Schema subset;
 // it is sent unchanged through output_config.format.
+// For Gemini, the schema must satisfy its supported JSON Schema subset;
+// it is sent unchanged through responseJsonSchema.
 func WithOutputSchema(schema *jsonschema.Schema) AgentOption {
 	return func(a *Agent) { a.outputSchema = schema }
 }
@@ -133,6 +137,11 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 			}
 		case ProviderOpenAI:
 			produced, err = a.openAIstep(ctx, log)
+			if err != nil {
+				return "", err
+			}
+		case ProviderGoogle:
+			produced, err = a.geminiStep(ctx, log)
 			if err != nil {
 				return "", err
 			}
