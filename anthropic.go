@@ -77,11 +77,12 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 			Format: anthropic.JSONOutputFormatParam{Schema: schema},
 		}
 	}
+	client := a.newAnthropicClient()
 	// Bound server-side continuation independently of the agent's tool turns.
 	const maxContinuations = 10
 	var produced []Entry
 	for continuations := 0; ; continuations++ {
-		response, err := a.anthropic.Messages.New(ctx, params)
+		response, err := client.Messages.New(ctx, params)
 		if err != nil {
 			return nil, fmt.Errorf("anthropic messages: %w", err)
 		}
