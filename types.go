@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -18,22 +17,6 @@ type UserLocation struct {
 	Latitude  *float64 // Degrees in [-90, 90]; supply together with Longitude
 	Longitude *float64 // Degrees in [-180, 180]; pointers preserve valid zero coordinates
 }
-
-type Session struct {
-	ID string
-
-	mu  sync.Mutex
-	log []Entry
-}
-
-func (c *Session) Append(expect uint64, e ...Entry) (uint64, error) { panic("not implemented") }
-func (c *Session) Seq() uint64                                      { panic("not implemented") }
-func (c *Session) Log() []Entry                                     { panic("not implemented") }
-func (c *Session) Messages() []Entry                                { panic("not implemented") } // Kind User..Reasoning only
-func (c *Session) State() map[string]any                            { panic("not implemented") } // fold of all deltas
-func (c *Session) StateAt(seq uint64) map[string]any                { panic("not implemented") }
-func (c *Session) Pending() []ToolCall                              { panic("not implemented") } // calls with no result
-func (c *Session) Fork(atSeq uint64) *Session                       { panic("not implemented") }
 
 // ---------- log entries ----------
 
