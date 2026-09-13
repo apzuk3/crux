@@ -13,6 +13,8 @@ const (
 	ProviderGoogle     Provider = "google"
 	ProviderOpenrouter Provider = "openrouter"
 	ProviderDeepSeek   Provider = "deepseek"
+	ProviderXAI        Provider = "xai"
+	ProviderOllama     Provider = "ollama"
 )
 
 type Model struct {
@@ -26,14 +28,20 @@ var (
 )
 
 func inferProvider(modelName string) Provider {
+	providerMu.RLock()
+	defer providerMu.RUnlock()
+	var matched Provider
 	for provider, models := range providers {
 		for _, model := range models {
 			if model.Name == modelName {
-				return provider
+				if matched != "" && matched != provider {
+					return "" // Ambiguous IDs require WithProvider.
+				}
+				matched = provider
 			}
 		}
 	}
-	return ""
+	return matched
 }
 
 func discoverAPIKey(provider Provider) string {
@@ -48,6 +56,12 @@ func discoverAPIKey(provider Provider) string {
 		envVars = []string{"GOOGLE_API_KEY", "GOOGLE_APIKEY", "GOOGLE_KEY", "GEMINI_API_KEY", "GEMINI_APIKEY", "GEMINI_KEY"}
 	case ProviderOpenrouter:
 		envVars = []string{"OPENROUTER_API_KEY", "OPENROUTER_APIKEY", "OPENROUTER_KEY"}
+	case ProviderXAI:
+		envVars = []string{"XAI_API_KEY", "XAI_APIKEY", "XAI_KEY"}
+	case ProviderDeepSeek:
+		envVars = []string{"DEEPSEEK_API_KEY", "DEEPSEEK_APIKEY", "DEEPSEEK_KEY"}
+	case ProviderOllama:
+		envVars = []string{"OLLAMA_API_KEY", "OLLAMA_APIKEY", "OLLAMA_KEY"}
 	}
 
 	for _, envVar := range envVars {

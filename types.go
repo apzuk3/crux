@@ -8,6 +8,17 @@ import (
 	"time"
 )
 
+// UserLocation provides optional geographic context for provider searches.
+// Providers use the fields they support; empty strings and nil coordinates are unset.
+type UserLocation struct {
+	Country   string   // ISO 3166-1 alpha-2 country code, e.g. "GB"
+	City      string   // City name, e.g. "London"
+	Region    string   // State, province, or region name
+	Timezone  string   // IANA timezone, e.g. "Europe/London"
+	Latitude  *float64 // Degrees in [-90, 90]; supply together with Longitude
+	Longitude *float64 // Degrees in [-180, 180]; pointers preserve valid zero coordinates
+}
+
 type Session struct {
 	ID string
 
