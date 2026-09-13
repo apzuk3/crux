@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
@@ -23,6 +24,12 @@ func (a *Agent) newOpenAIClient() *openai.Client {
 	if a.baseURL != "" {
 		opts = append(opts, option.WithBaseURL(a.baseURL))
 	}
+	if a.provider != ProviderOpenAI {
+		// Construct the Responses service directly to avoid inheriting OpenAI
+		// credentials, organization, project, or custom headers from the environment.
+		opts = append(opts, option.WithHTTPClient(http.DefaultClient))
+		return &openai.Client{Options: opts, Responses: responses.NewResponseService(opts...)}
+	}
 
 	client := openai.NewClient(opts...)
 	return &client
@@ -39,15 +46,37 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 		Model: openai.ResponsesModel(a.model),
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: input},
 		Tools: openAITools(a.toolsRegistry, a.allowedTools),
-		// Nothing is kept server side, so reasoning has to travel with the log.
-		Store:   openai.Bool(false),
-		Include: []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent},
+		Store: openai.Bool(false),
+	}
+
+	switch a.provider {
+	case ProviderOpenAI, ProviderOpenrouter, ProviderXAI:
+		// Nothing is kept server side, so reasoning travels with the log.
+		params.Include = []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent}
 	}
 	if a.instructions != "" {
 		params.Instructions = openai.String(a.instructions)
 	}
-	if a.enableWebsearch {
-		params.Tools = append(params.Tools, responses.ToolParamOfWebSearch(responses.WebSearchToolTypeWebSearch))
+	if a.searchOptions != nil {
+		tool := responses.ToolParamOfWebSearch(responses.WebSearchToolTypeWebSearch)
+		if location := a.searchOptions.UserLocation; location != nil && a.provider == ProviderOpenAI {
+			if location.Country != "" {
+				tool.OfWebSearch.UserLocation.Country = openai.String(location.Country)
+			}
+			if location.City != "" {
+				tool.OfWebSearch.UserLocation.City = openai.String(location.City)
+			}
+			if location.Region != "" {
+				tool.OfWebSearch.UserLocation.Region = openai.String(location.Region)
+			}
+			if location.Timezone != "" {
+				tool.OfWebSearch.UserLocation.Timezone = openai.String(location.Timezone)
+			}
+			if location.Country != "" || location.City != "" || location.Region != "" || location.Timezone != "" {
+				tool.OfWebSearch.UserLocation.Type = "approximate"
+			}
+		}
+		params.Tools = append(params.Tools, tool)
 	}
 	if a.outputSchema != nil {
 		raw, err := json.Marshal(a.outputSchema)
@@ -73,7 +102,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 
 	response, err := a.openai.Responses.New(ctx, params)
 	if err != nil {
-		return nil, fmt.Errorf("openai responses: %w", err)
+		return nil, fmt.Errorf("%s responses: %w", a.provider, err)
 	}
 	// Scan all messages before converting items or executing any local tools.
 	for _, item := range response.Output {

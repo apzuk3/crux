@@ -36,8 +36,15 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 		return nil, err
 	}
 	config := &genai.GenerateContentConfig{Tools: tools}
-	if a.enableWebsearch {
+	if a.searchOptions != nil {
 		config.Tools = append(config.Tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
+		if location := a.searchOptions.UserLocation; location != nil && location.Latitude != nil && location.Longitude != nil {
+			config.ToolConfig = &genai.ToolConfig{
+				RetrievalConfig: &genai.RetrievalConfig{
+					LatLng: &genai.LatLng{Latitude: location.Latitude, Longitude: location.Longitude},
+				},
+			}
+		}
 	}
 	if a.instructions != "" {
 		config.SystemInstruction = &genai.Content{Parts: []*genai.Part{genai.NewPartFromText(a.instructions)}}

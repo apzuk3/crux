@@ -25,7 +25,7 @@ type Agent struct {
 	apikey       string
 	outputSchema *jsonschema.Schema
 
-	enableWebsearch bool
+	searchOptions *SearchOptions // nil disables web search
 
 	toolsRegistry *ToolsRegistry
 
@@ -44,10 +44,42 @@ func WithInstructions(instructions string) AgentOption {
 	return func(a *Agent) { a.instructions = instructions }
 }
 
-// WithWebsearchEnabled enables provider-executed search on supported OpenAI,
-// Anthropic, and Gemini models. The model decides when to search.
-func WithWebsearchEnabled() AgentOption {
-	return func(a *Agent) { a.enableWebsearch = true }
+// SearchOptions configures provider-executed web search.
+type SearchOptions struct {
+	UserLocation *UserLocation // nil means no location is supplied
+}
+
+type SearchOption func(*SearchOptions)
+
+// WithUserLocation supplies geographic context using the fields supported by
+// the provider. Gemini uses paired coordinates; OpenAI and Anthropic use the
+// named location fields. Providers without location support ignore it.
+func WithUserLocation(location UserLocation) SearchOption {
+	return func(opts *SearchOptions) {
+		value := location
+		if location.Latitude != nil {
+			latitude := *location.Latitude
+			value.Latitude = &latitude
+		}
+		if location.Longitude != nil {
+			longitude := *location.Longitude
+			value.Longitude = &longitude
+		}
+		opts.UserLocation = &value
+	}
+}
+
+// WithWebSearch enables provider-executed search on supported OpenAI,
+// Anthropic, Gemini, and xAI models. The model decides when to search.
+// Each call replaces the search configuration; no options means no location.
+func WithWebSearch(opts ...SearchOption) AgentOption {
+	return func(a *Agent) {
+		search := &SearchOptions{}
+		for _, opt := range opts {
+			opt(search)
+		}
+		a.searchOptions = search
+	}
 }
 
 func WithProvider(provider Provider) AgentOption {
@@ -77,6 +109,9 @@ func WithTools(registry *ToolsRegistry) AgentOption {
 // it is sent unchanged through output_config.format.
 // For Gemini, the schema must satisfy its supported JSON Schema subset;
 // it is sent unchanged through responseJsonSchema.
+// xAI, DeepSeek, and local Ollama use the OpenAI Responses schema format.
+// Local Ollama support is verified in v0.34.0. Ollama Cloud does not currently
+// support structured outputs.
 func WithOutputSchema(schema *jsonschema.Schema) AgentOption {
 	return func(a *Agent) { a.outputSchema = schema }
 }
@@ -114,11 +149,25 @@ func NewAgent(model string, opts ...AgentOption) *Agent {
 		agent.apikey = discoverAPIKey(agent.provider)
 	}
 
-	if agent.provider == ProviderOpenrouter && agent.baseURL == "" {
-		agent.baseURL = "https://api.openrouter.ai"
+	if agent.baseURL == "" {
+		switch agent.provider {
+		case ProviderOpenrouter:
+			agent.baseURL = "https://api.openrouter.ai"
+		case ProviderXAI:
+			agent.baseURL = "https://api.x.ai/v1"
+		case ProviderDeepSeek:
+			agent.baseURL = "https://api.deepseek.com"
+		case ProviderOllama:
+			agent.baseURL = "http://localhost:11434/v1"
+		}
 	}
 
-	if agent.provider == ProviderOpenAI || agent.provider == ProviderOpenrouter {
+	if agent.provider == ProviderOllama && agent.apikey == "" {
+		agent.apikey = "ollama" // Local Ollama ignores authentication.
+	}
+
+	switch agent.provider {
+	case ProviderOpenAI, ProviderOpenrouter, ProviderXAI, ProviderDeepSeek, ProviderOllama:
 		agent.openai = agent.newOpenAIClient()
 	}
 
@@ -162,6 +211,21 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 			}
 		case ProviderGoogle:
 			produced, err = a.geminiStep(ctx, log)
+			if err != nil {
+				return "", err
+			}
+		case ProviderXAI:
+			produced, err = a.xaiStep(ctx, log)
+			if err != nil {
+				return "", err
+			}
+		case ProviderDeepSeek:
+			produced, err = a.deepseekStep(ctx, log)
+			if err != nil {
+				return "", err
+			}
+		case ProviderOllama:
+			produced, err = a.ollamaStep(ctx, log)
 			if err != nil {
 				return "", err
 			}

@@ -96,7 +96,7 @@ func run() int {
 		opts := []crux.AgentOption{
 			crux.WithProvider(c.provider),
 			crux.WithAPIKey(key),
-			crux.WithWebsearchEnabled(),
+			crux.WithWebSearch(),
 			crux.WithInstructions("Use the provider's web search tool to answer the user's question. Cite source URLs and clearly state if search is unavailable."),
 		}
 		if *baseURL != "" {

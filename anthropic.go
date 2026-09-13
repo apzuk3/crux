@@ -44,9 +44,24 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, bool, 
 	if a.instructions != "" {
 		params.System = []anthropic.TextBlockParam{{Text: a.instructions}}
 	}
-	if a.enableWebsearch {
+	if a.searchOptions != nil {
+		tool := &anthropic.WebSearchTool20250305Param{}
+		if location := a.searchOptions.UserLocation; location != nil {
+			if location.Country != "" {
+				tool.UserLocation.Country = anthropic.String(location.Country)
+			}
+			if location.City != "" {
+				tool.UserLocation.City = anthropic.String(location.City)
+			}
+			if location.Region != "" {
+				tool.UserLocation.Region = anthropic.String(location.Region)
+			}
+			if location.Timezone != "" {
+				tool.UserLocation.Timezone = anthropic.String(location.Timezone)
+			}
+		}
 		params.Tools = append(params.Tools, anthropic.ToolUnionParam{
-			OfWebSearchTool20250305: &anthropic.WebSearchTool20250305Param{},
+			OfWebSearchTool20250305: tool,
 		})
 	}
 	if a.outputSchema != nil {
