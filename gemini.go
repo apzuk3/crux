@@ -62,13 +62,11 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 		config.ResponseJsonSchema = schema
 	}
 	// The SDK constructor can fail, so initialization errors flow through Run.
-	if a.gemini == nil {
-		a.gemini, err = a.newGeminiClient(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("gemini client: %w", err)
-		}
+	client, err := a.newGeminiClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gemini client: %w", err)
 	}
-	response, err := a.gemini.Models.GenerateContent(ctx, a.model, contents, config)
+	response, err := client.Models.GenerateContent(ctx, a.model, contents, config)
 	if err != nil {
 		return nil, fmt.Errorf("gemini generate content: %w", err)
 	}

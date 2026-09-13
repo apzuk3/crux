@@ -8,13 +8,11 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/invopop/jsonschema"
-	"github.com/openai/openai-go/v3"
-	"google.golang.org/genai"
 )
 
 type Agent struct {
+	name         string
 	maxTurns     int32
 	instructions string
 	allowedTools []string
@@ -27,10 +25,6 @@ type Agent struct {
 
 	searchOptions *SearchOptions // nil disables web search
 	toolsRegistry *ToolsRegistry
-
-	openai    *openai.Client
-	anthropic *anthropic.Client
-	gemini    *genai.Client
 
 	logs []Entry
 }
@@ -87,6 +81,12 @@ func WithProvider(provider Provider) AgentOption {
 	return func(a *Agent) { a.provider = provider }
 }
 
+// WithModel changes the model. When forking across providers, also set
+// WithProvider and the destination's connection settings.
+func WithModel(model string) AgentOption {
+	return func(a *Agent) { a.model = model }
+}
+
 func WithMaxTurns(turns int32) AgentOption {
 	return func(a *Agent) { a.maxTurns = turns }
 }
@@ -132,8 +132,9 @@ func WithOutputSchemaFrom[T any]() AgentOption {
 	}
 }
 
-func NewAgent(model string, opts ...AgentOption) *Agent {
+func NewAgent(name, model string, opts ...AgentOption) *Agent {
 	agent := &Agent{
+		name:          name,
 		model:         model,
 		maxTurns:      10,
 		toolsRegistry: defaultToolsRegistry,
@@ -167,19 +168,12 @@ func NewAgent(model string, opts ...AgentOption) *Agent {
 		agent.apikey = "ollama" // Local Ollama ignores authentication.
 	}
 
-	switch agent.provider {
-	case ProviderOpenAI, ProviderOpenrouter, ProviderXAI, ProviderDeepSeek, ProviderOllama:
-		agent.openai = agent.newOpenAIClient()
-	}
-
-	if agent.provider == ProviderAnthropic {
-		agent.anthropic = agent.newAnthropicClient()
-	}
-
 	return agent
 }
 
-// Run executes the agent and returns its final text response.
+// Run continues the retained conversation and returns its final text response.
+// User inputs, model entries, and tool results are retained even if a later step
+// fails. Run must not execute concurrently with other operations on the agent.
 func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 	// The user turn is part of the log, so every provider sees one shape and a
 	// resumed session needs nothing but its history.
@@ -187,7 +181,8 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	log := []Entry{entry}
+	a.logs = append(a.logs, entry)
+	log := a.logs
 
 	// ---> Notify start
 	for range a.maxTurns {
@@ -233,10 +228,10 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 			return "", fmt.Errorf("unsupported provider %q", a.provider)
 		}
 
-		log = append(log, produced...)
 		a.logs = append(a.logs, produced...)
 		results := a.dispatchCalls(ctx, produced)
-		log = append(log, results...)
+		a.logs = append(a.logs, results...)
+		log = a.logs
 
 		// Local tool results require another model step.
 		if len(results) == 0 {

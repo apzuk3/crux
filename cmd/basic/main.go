@@ -235,6 +235,7 @@ type Output struct {
 
 func main() {
 	agent := crux.NewAgent(
+		"day-trip-planner",
 		crux.ClaudeHaiku4_5,
 		crux.WithInstructions(`You are a day-trip planner working with fictional demo data.
 Use tools for all forecasts, schedules, prices, and availability. Never invent IDs.

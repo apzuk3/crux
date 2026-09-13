@@ -100,7 +100,8 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 		}
 	}
 
-	response, err := a.openai.Responses.New(ctx, params)
+	client := a.newOpenAIClient()
+	response, err := client.Responses.New(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("%s responses: %w", a.provider, err)
 	}
