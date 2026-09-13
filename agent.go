@@ -26,13 +26,21 @@ type Agent struct {
 	outputSchema *jsonschema.Schema
 
 	searchOptions *SearchOptions // nil disables web search
-
 	toolsRegistry *ToolsRegistry
 
 	openai    *openai.Client
 	anthropic *anthropic.Client
 	gemini    *genai.Client
+
+	logs []Entry
 }
+
+// SearchOptions configures provider-executed web search.
+type SearchOptions struct {
+	UserLocation *UserLocation // nil means no location is supplied
+}
+
+type SearchOption func(*SearchOptions)
 
 type AgentOption func(*Agent)
 
@@ -43,13 +51,6 @@ func WithAllowedTools(tools []string) AgentOption {
 func WithInstructions(instructions string) AgentOption {
 	return func(a *Agent) { a.instructions = instructions }
 }
-
-// SearchOptions configures provider-executed web search.
-type SearchOptions struct {
-	UserLocation *UserLocation // nil means no location is supplied
-}
-
-type SearchOption func(*SearchOptions)
 
 // WithUserLocation supplies geographic context using the fields supported by
 // the provider. Gemini uses paired coordinates; OpenAI and Anthropic use the
@@ -191,11 +192,10 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 	// ---> Notify start
 	for range a.maxTurns {
 		var produced []Entry
-		var continueTurn bool
 
 		switch a.provider {
 		case ProviderAnthropic:
-			produced, continueTurn, err = a.anthropicStep(ctx, log)
+			produced, err = a.anthropicStep(ctx, log)
 			if err != nil {
 				return "", err
 			}
@@ -234,11 +234,12 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 		}
 
 		log = append(log, produced...)
+		a.logs = append(a.logs, produced...)
 		results := a.dispatchCalls(ctx, produced)
 		log = append(log, results...)
 
-		// Local tool results and paused server-side turns require continuation.
-		if len(results) == 0 && !continueTurn {
+		// Local tool results require another model step.
+		if len(results) == 0 {
 			// ---> Notify end
 			return finalText(produced), nil
 		}
@@ -267,6 +268,7 @@ func (a *Agent) dispatch(ctx context.Context, call ToolCall) Entry {
 	case !ok:
 		result.Error = fmt.Sprintf("unknown tool %q", call.Name)
 	default:
+		ctx = ContextWithState(ctx, a.StateSnapshot())
 		output, err := tool.invoke(ctx, call.Args)
 		if err != nil {
 			result.Error = err.Error()
@@ -284,9 +286,14 @@ func (a *Agent) dispatchCalls(ctx context.Context, entries []Entry) []Entry {
 	var results []Entry
 	for _, e := range entries {
 		if e.Kind == KindToolCall {
+			if e.ToolCall == nil {
+				continue
+			}
+
 			results = append(results, a.dispatch(ctx, *e.ToolCall))
 		}
 	}
+
 	return results
 }
 

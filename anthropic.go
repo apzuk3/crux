@@ -26,16 +26,16 @@ func (a *Agent) newAnthropicClient() *anthropic.Client {
 	return &client
 }
 
-// anthropicStep returns ordered blocks with usage and whether a paused server
-// turn needs continuation.
-func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, bool, error) {
+// anthropicStep returns ordered blocks with usage, resuming paused server turns
+// internally until the model finishes or requests a local tool.
+func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error) {
 	messages, err := toAnthropicMessages(log)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	tools, err := anthropicTools(a.toolsRegistry, a.allowedTools)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	params := anthropic.MessageNewParams{
 		Model: a.model, Messages: messages, Tools: tools,
@@ -67,43 +67,54 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, bool, 
 	if a.outputSchema != nil {
 		raw, err := json.Marshal(a.outputSchema)
 		if err != nil {
-			return nil, false, fmt.Errorf("marshal output schema: %w", err)
+			return nil, fmt.Errorf("marshal output schema: %w", err)
 		}
 		var schema map[string]any
 		if err := json.Unmarshal(raw, &schema); err != nil {
-			return nil, false, fmt.Errorf("decode output schema: %w", err)
+			return nil, fmt.Errorf("decode output schema: %w", err)
 		}
 		params.OutputConfig = anthropic.OutputConfigParam{
 			Format: anthropic.JSONOutputFormatParam{Schema: schema},
 		}
 	}
-	response, err := a.anthropic.Messages.New(ctx, params)
-	if err != nil {
-		return nil, false, fmt.Errorf("anthropic messages: %w", err)
-	}
-	switch response.StopReason {
-	case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence, anthropic.StopReasonToolUse, anthropic.StopReasonPauseTurn:
-	case anthropic.StopReasonRefusal:
-		return nil, false, errors.New("anthropic refused the request")
-	default:
-		return nil, false, fmt.Errorf("anthropic response did not complete: stop reason %q", response.StopReason)
-	}
-	produced := make([]Entry, 0, len(response.Content))
-	for _, block := range response.Content {
-		entry, err := fromAnthropicContentBlock(block)
+	// Bound server-side continuation independently of the agent's tool turns.
+	const maxContinuations = 10
+	var produced []Entry
+	for continuations := 0; ; continuations++ {
+		response, err := a.anthropic.Messages.New(ctx, params)
 		if err != nil {
-			return nil, false, err
+			return nil, fmt.Errorf("anthropic messages: %w", err)
 		}
-		produced = append(produced, entry)
+		switch response.StopReason {
+		case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence, anthropic.StopReasonToolUse, anthropic.StopReasonPauseTurn:
+		case anthropic.StopReasonRefusal:
+			return nil, errors.New("anthropic refused the request")
+		default:
+			return nil, fmt.Errorf("anthropic response did not complete: stop reason %q", response.StopReason)
+		}
+		if len(response.Content) == 0 {
+			return nil, errors.New("anthropic returned no content")
+		}
+		for _, block := range response.Content {
+			entry, err := fromAnthropicContentBlock(block)
+			if err != nil {
+				return nil, err
+			}
+			produced = append(produced, entry)
+		}
+		produced[len(produced)-1].Usage = &Usage{
+			InputTokens:  int(response.Usage.InputTokens + response.Usage.CacheCreationInputTokens + response.Usage.CacheReadInputTokens),
+			OutputTokens: int(response.Usage.OutputTokens),
+		}
+		if response.StopReason != anthropic.StopReasonPauseTurn {
+			return produced, nil
+		}
+		if continuations == maxContinuations {
+			return nil, errors.New("anthropic max paused-turn continuations reached")
+		}
+		// Replay all returned blocks unchanged, keeping the same tools and config.
+		params.Messages = append(params.Messages, response.ToParam())
 	}
-	if len(produced) == 0 {
-		return nil, false, errors.New("anthropic returned no content")
-	}
-	produced[len(produced)-1].Usage = &Usage{
-		InputTokens:  int(response.Usage.InputTokens + response.Usage.CacheCreationInputTokens + response.Usage.CacheReadInputTokens),
-		OutputTokens: int(response.Usage.OutputTokens),
-	}
-	return produced, response.StopReason == anthropic.StopReasonPauseTurn, nil
 }
 
 func anthropicTools(registry *ToolsRegistry, allowedTools []string) ([]anthropic.ToolUnionParam, error) {
