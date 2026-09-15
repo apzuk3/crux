@@ -16,6 +16,8 @@ func (a *Agent) Fork(opts ...AgentOption) (*Agent, error) {
 // applies opts in order. from is an exclusive slice offset, not an Entry.Seq.
 // Empty history is valid; a prefix with an unfinished local tool exchange or
 // an unmatched tool result is not.
+// Changing providers clears opaque data and removes provider-only tool events
+// from the copied history. Portable entries remain in their original order.
 //
 // History and mutable search/tool-selection settings are copied. State values
 // follow StateSnapshot's copying rules. The tools registry and output schema
@@ -41,6 +43,14 @@ func (a *Agent) ForkFrom(from int, opts ...AgentOption) (*Agent, error) {
 	}
 	for _, opt := range opts {
 		opt(&fork)
+	}
+	if fork.provider != a.provider {
+		for i := range fork.logs {
+			fork.logs[i].Opaque = nil
+		}
+		fork.logs = slices.DeleteFunc(fork.logs, func(entry Entry) bool {
+			return entry.Kind == KindProviderTool
+		})
 	}
 	return &fork, nil
 }

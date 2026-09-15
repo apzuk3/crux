@@ -230,6 +230,9 @@ func toOpenAIResponseInput(log []Entry) (responses.ResponseInputParam, error) {
 		if e.Kind == KindStateDelta {
 			continue // tool-written state, never shown to the model
 		}
+		if e.Kind == KindReasoning && len(e.Opaque[openAIOutputItemOpaqueKey]) == 0 {
+			continue // Foreign reasoning cannot be replayed without provider data.
+		}
 
 		item, err := toOpenAIResponseInputItemUnionParam(e)
 		if err != nil {
@@ -284,16 +287,6 @@ func toOpenAIResponseInputItemUnionParam(e Entry) (responses.ResponseInputItemUn
 				Status:  responses.ResponseOutputMessageStatusCompleted,
 			},
 		}, nil
-	case KindReasoning:
-		item := responses.ResponseReasoningItemParam{
-			Status: responses.ResponseReasoningItemStatusCompleted,
-		}
-		if e.Reasoning != nil && e.Reasoning.Summary != "" {
-			item.Summary = []responses.ResponseReasoningItemSummaryParam{
-				{Text: e.Reasoning.Summary},
-			}
-		}
-		return responses.ResponseInputItemUnionParam{OfReasoning: &item}, nil
 	case KindToolCall:
 		if e.ToolCall == nil {
 			return responses.ResponseInputItemUnionParam{}, errors.New("tool call entry carries no tool call")

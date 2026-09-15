@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/invopop/jsonschema"
@@ -144,7 +145,7 @@ func NewAgent(name, model string, opts ...AgentOption) *Agent {
 	}
 
 	if agent.provider == "" {
-		agent.provider = inferProvider(model)
+		agent.provider = inferProvider(agent.model)
 	}
 
 	if agent.apikey == "" {
@@ -258,6 +259,10 @@ func Run[Out any](ctx context.Context, a *Agent, input any) (Out, error) {
 // than returned, because the call is still owed an answer.
 func (a *Agent) dispatch(ctx context.Context, call ToolCall) Entry {
 	result := ToolResult{CallID: call.ID}
+	if !slices.Contains(a.allowedTools, call.Name) {
+		result.Error = fmt.Sprintf("tool %q is not allowed", call.Name)
+		return Entry{Kind: KindToolResult, ToolResult: &result}
+	}
 
 	switch tool, ok := a.toolsRegistry.lookup(call.Name); {
 	case !ok:
