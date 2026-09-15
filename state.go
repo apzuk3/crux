@@ -3,6 +3,7 @@ package crux
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"slices"
 )
 
@@ -22,9 +23,9 @@ func (a *Agent) StateSnapshot() map[string]any {
 		if entry.Kind != KindStateDelta || entry.Delta == nil {
 			continue
 		}
-		for key, value := range entry.Delta.Set {
-			state[key] = value
-		}
+
+		maps.Copy(state, entry.Delta.Set)
+
 		for _, key := range entry.Delta.Delete {
 			delete(state, key)
 		}

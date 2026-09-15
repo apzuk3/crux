@@ -31,7 +31,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	tools, err := geminiTools(a.toolsRegistry, a.allowedTools)
+	tools, err := geminiTools(a.tools)
 	if err != nil {
 		return nil, err
 	}
@@ -109,8 +109,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 	return produced, nil
 }
 
-func geminiTools(registry *ToolsRegistry, allowedTools []string) ([]*genai.Tool, error) {
-	selected := registry.selected(allowedTools)
+func geminiTools(selected []Tool) ([]*genai.Tool, error) {
 	if len(selected) == 0 {
 		return nil, nil
 	}

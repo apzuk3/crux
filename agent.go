@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"strings"
 
@@ -16,7 +15,6 @@ type Agent struct {
 	name         string
 	maxTurns     int32
 	instructions string
-	allowedTools []string
 
 	provider     Provider
 	model        string
@@ -25,7 +23,10 @@ type Agent struct {
 	outputSchema *jsonschema.Schema
 
 	searchOptions *SearchOptions // nil disables web search
+
+	allowedTools  []string
 	toolsRegistry *ToolsRegistry
+	tools         []Tool // nil means tool options need binding; bound empty sets are non-nil
 
 	logs []Entry
 }
@@ -37,102 +38,6 @@ type SearchOptions struct {
 
 type SearchOption func(*SearchOptions)
 
-type AgentOption func(*Agent)
-
-func WithAllowedTools(tools []string) AgentOption {
-	return func(a *Agent) { a.allowedTools = tools }
-}
-
-func WithInstructions(instructions string) AgentOption {
-	return func(a *Agent) { a.instructions = instructions }
-}
-
-// WithUserLocation supplies geographic context using the fields supported by
-// the provider. Gemini uses paired coordinates; OpenAI and Anthropic use the
-// named location fields. Providers without location support ignore it.
-func WithUserLocation(location UserLocation) SearchOption {
-	return func(opts *SearchOptions) {
-		value := location
-		if location.Latitude != nil {
-			latitude := *location.Latitude
-			value.Latitude = &latitude
-		}
-		if location.Longitude != nil {
-			longitude := *location.Longitude
-			value.Longitude = &longitude
-		}
-		opts.UserLocation = &value
-	}
-}
-
-// WithWebSearch enables provider-executed search on supported OpenAI,
-// Anthropic, Gemini, and xAI models. The model decides when to search.
-// Each call replaces the search configuration; no options means no location.
-func WithWebSearch(opts ...SearchOption) AgentOption {
-	return func(a *Agent) {
-		search := &SearchOptions{}
-		for _, opt := range opts {
-			opt(search)
-		}
-		a.searchOptions = search
-	}
-}
-
-func WithProvider(provider Provider) AgentOption {
-	return func(a *Agent) { a.provider = provider }
-}
-
-// WithModel changes the model. When forking across providers, also set
-// WithProvider and the destination's connection settings.
-func WithModel(model string) AgentOption {
-	return func(a *Agent) { a.model = model }
-}
-
-func WithMaxTurns(turns int32) AgentOption {
-	return func(a *Agent) { a.maxTurns = turns }
-}
-
-func WithBaseURL(url string) AgentOption {
-	return func(a *Agent) { a.baseURL = url }
-}
-
-func WithAPIKey(apikey string) AgentOption {
-	return func(a *Agent) { a.apikey = apikey }
-}
-
-func WithTools(registry *ToolsRegistry) AgentOption {
-	return func(a *Agent) { a.toolsRegistry = registry }
-}
-
-// WithOutputSchema sets the response schema. For OpenAI, it must satisfy strict
-// Structured Outputs requirements: an object root, all properties required, and
-// additionalProperties: false on every object.
-// For Anthropic, the schema must satisfy its supported JSON Schema subset;
-// it is sent unchanged through output_config.format.
-// For Gemini, the schema must satisfy its supported JSON Schema subset;
-// it is sent unchanged through responseJsonSchema.
-// xAI, DeepSeek, and local Ollama use the OpenAI Responses schema format.
-// Local Ollama support is verified in v0.34.0. Ollama Cloud does not currently
-// support structured outputs.
-func WithOutputSchema(schema *jsonschema.Schema) AgentOption {
-	return func(a *Agent) { a.outputSchema = schema }
-}
-
-// WithOutputSchemaFrom reflects T into a response schema, or disables structured
-// output for string and any. T must satisfy WithOutputSchema's requirements;
-// reflection does not normalize optional fields or maps for OpenAI strict mode.
-func WithOutputSchemaFrom[T any]() AgentOption {
-	return func(a *Agent) {
-		var zero T
-		switch any(&zero).(type) {
-		case *string, *any:
-			a.outputSchema = nil
-		default:
-			a.outputSchema = jsonschema.ReflectFromType(reflect.TypeFor[T]())
-		}
-	}
-}
-
 func NewAgent(name, model string, opts ...AgentOption) *Agent {
 	agent := &Agent{
 		name:          name,
@@ -142,6 +47,9 @@ func NewAgent(name, model string, opts ...AgentOption) *Agent {
 	}
 	for _, opt := range opts {
 		opt(agent)
+	}
+	if agent.tools == nil {
+		agent.tools = agent.toolsRegistry.selected(agent.allowedTools)
 	}
 
 	if agent.provider == "" {
@@ -257,27 +165,31 @@ func Run[Out any](ctx context.Context, a *Agent, input any) (Out, error) {
 
 // dispatch runs a tool call locally. A failure is reported to the model rather
 // than returned, because the call is still owed an answer.
-func (a *Agent) dispatch(ctx context.Context, call ToolCall) Entry {
+func (a *Agent) dispatch(ctx context.Context, call ToolCall) []Entry {
 	result := ToolResult{CallID: call.ID}
-	if !slices.Contains(a.allowedTools, call.Name) {
+	index := slices.IndexFunc(a.tools, func(tool Tool) bool { return tool.name == call.Name })
+	if index < 0 {
 		result.Error = fmt.Sprintf("tool %q is not allowed", call.Name)
-		return Entry{Kind: KindToolResult, ToolResult: &result}
+		return []Entry{{Kind: KindToolResult, ToolResult: &result}}
 	}
 
-	switch tool, ok := a.toolsRegistry.lookup(call.Name); {
-	case !ok:
-		result.Error = fmt.Sprintf("unknown tool %q", call.Name)
-	default:
-		ctx = ContextWithState(ctx, a.StateSnapshot())
-		output, err := tool.invoke(ctx, call.Args)
-		if err != nil {
-			result.Error = err.Error()
-		} else {
-			result.Output = output
-		}
+	var resp []Entry
+
+	tool := a.tools[index]
+	snapshot := a.StateSnapshot()
+
+	output, delta, err := tool.invoke(ContextWithState(ctx, snapshot), call.Args)
+	if err != nil {
+		result.Error = err.Error()
+	} else {
+		result.Output = output
 	}
 
-	return Entry{Kind: KindToolResult, ToolResult: &result}
+	if delta != nil {
+		resp = append(resp, Entry{Kind: KindStateDelta, ToolResult: &result, Delta: delta})
+	}
+
+	return append(resp, Entry{Kind: KindToolResult, ToolResult: &result})
 }
 
 // dispatchCalls executes local calls in model order. The caller appends the
@@ -290,7 +202,7 @@ func (a *Agent) dispatchCalls(ctx context.Context, entries []Entry) []Entry {
 				continue
 			}
 
-			results = append(results, a.dispatch(ctx, *e.ToolCall))
+			results = append(results, a.dispatch(ctx, *e.ToolCall)...)
 		}
 	}
 

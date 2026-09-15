@@ -45,7 +45,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 	params := responses.ResponseNewParams{
 		Model: openai.ResponsesModel(a.model),
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: input},
-		Tools: openAITools(a.toolsRegistry, a.allowedTools),
+		Tools: openAITools(a.tools),
 		Store: openai.Bool(false),
 	}
 
@@ -146,9 +146,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 	return produced, nil
 }
 
-func openAITools(registry *ToolsRegistry, allowedTools []string) []responses.ToolUnionParam {
-	tools := registry.selected(allowedTools)
-
+func openAITools(tools []Tool) []responses.ToolUnionParam {
 	params := make([]responses.ToolUnionParam, 0, len(tools))
 	for _, tool := range tools {
 		params = append(params, responses.ToolUnionParam{

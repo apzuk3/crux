@@ -33,7 +33,7 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 	if err != nil {
 		return nil, err
 	}
-	tools, err := anthropicTools(a.toolsRegistry, a.allowedTools)
+	tools, err := anthropicTools(a.tools)
 	if err != nil {
 		return nil, err
 	}
@@ -118,8 +118,7 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 	}
 }
 
-func anthropicTools(registry *ToolsRegistry, allowedTools []string) ([]anthropic.ToolUnionParam, error) {
-	selected := registry.selected(allowedTools)
+func anthropicTools(selected []Tool) ([]anthropic.ToolUnionParam, error) {
 	tools := make([]anthropic.ToolUnionParam, 0, len(selected))
 	for _, tool := range selected {
 		if tool.schema["type"] != "object" {

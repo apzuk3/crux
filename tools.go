@@ -14,7 +14,7 @@ type Tool struct {
 	name        string
 	description string
 	schema      map[string]any
-	invoke      func(ctx context.Context, args json.RawMessage) (string, error)
+	invoke      func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error)
 }
 
 type ToolsRegistry struct {
@@ -31,27 +31,37 @@ func NewToolsRegistry() *ToolsRegistry {
 var defaultToolsRegistry = NewToolsRegistry()
 
 func RegisterTool[In, Out any](name string, description string, fn func(ctx context.Context, input In) (Out, error)) {
+	RegisterToolWithRegistry(defaultToolsRegistry, name, description, func(ctx context.Context, input In) (Out, *StateDelta, error) {
+		output, err := fn(ctx, input)
+
+		return output, nil, err
+	})
+}
+
+func RegisterToolStateMutate[In, Out any](name string, description string, fn func(ctx context.Context, input In) (Out, *StateDelta, error)) {
 	RegisterToolWithRegistry(defaultToolsRegistry, name, description, fn)
 }
 
-func RegisterToolWithRegistry[In, Out any](registry *ToolsRegistry, name string, description string, fn func(ctx context.Context, input In) (Out, error)) {
+func RegisterToolWithRegistry[In, Out any](registry *ToolsRegistry, name string, description string, fn func(ctx context.Context, input In) (Out, *StateDelta, error)) {
 	tool := Tool{
 		name:        name,
 		description: description,
 		schema:      jsonSchemaOf[In](),
-		invoke: func(ctx context.Context, args json.RawMessage) (string, error) {
+		invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
 			var input In
 			if len(args) > 0 {
 				if err := json.Unmarshal(args, &input); err != nil {
-					return "", fmt.Errorf("decode arguments for %q: %w", name, err)
+					return "", nil, fmt.Errorf("decode arguments for %q: %w", name, err)
 				}
 			}
 
-			output, err := fn(ctx, input)
+			output, delta, err := fn(ctx, input)
 			if err != nil {
-				return "", err
+				return "", nil, err
 			}
-			return renderToolOutput(output)
+			outputStr, err := renderToolOutput(output)
+
+			return outputStr, delta, err
 		},
 	}
 
@@ -61,16 +71,9 @@ func RegisterToolWithRegistry[In, Out any](registry *ToolsRegistry, name string,
 	registry.tools[name] = tool
 }
 
-func (r *ToolsRegistry) lookup(name string) (Tool, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	tool, ok := r.tools[name]
-	return tool, ok
-}
-
 // selected returns registered tools in the order of the given names.
 // Unknown names are skipped and repeated names are included only once.
+// The returned slice is non-nil even when no tools are selected.
 func (r *ToolsRegistry) selected(names []string) []Tool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

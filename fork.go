@@ -20,9 +20,10 @@ func (a *Agent) Fork(opts ...AgentOption) (*Agent, error) {
 // from the copied history. Portable entries remain in their original order.
 //
 // History and mutable search/tool-selection settings are copied. State values
-// follow StateSnapshot's copying rules. The tools registry and output schema
-// remain shared unless overridden. Fork must not run concurrently with writes
-// to the agent.
+// follow StateSnapshot's copying rules. Bound tools are inherited unless tool
+// options are supplied, which resolve a fresh selection from the registry.
+// The tools registry and output schema remain shared unless overridden.
+// Fork must not run concurrently with writes to the agent.
 func (a *Agent) ForkFrom(from int, opts ...AgentOption) (*Agent, error) {
 	if from < 0 || from > len(a.logs) {
 		return nil, fmt.Errorf("cannot fork at offset %d: must be between 0 and %d", from, len(a.logs))
@@ -34,6 +35,7 @@ func (a *Agent) ForkFrom(from int, opts ...AgentOption) (*Agent, error) {
 	fork := *a
 	fork.logs = cloneEntries(a.logs[:from])
 	fork.allowedTools = slices.Clone(a.allowedTools)
+	fork.tools = slices.Clone(a.tools)
 	if a.searchOptions != nil {
 		search := *a.searchOptions
 		if search.UserLocation != nil {
@@ -43,6 +45,9 @@ func (a *Agent) ForkFrom(from int, opts ...AgentOption) (*Agent, error) {
 	}
 	for _, opt := range opts {
 		opt(&fork)
+	}
+	if fork.tools == nil {
+		fork.tools = fork.toolsRegistry.selected(fork.allowedTools)
 	}
 	if fork.provider != a.provider {
 		for i := range fork.logs {
