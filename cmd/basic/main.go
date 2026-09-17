@@ -234,7 +234,7 @@ type Output struct {
 }
 
 func main() {
-	agent := crux.NewAgent(
+	agent := crux.Must(crux.NewAgent(
 		"day-trip-planner",
 		crux.ClaudeHaiku4_5,
 		crux.WithInstructions(`You are a day-trip planner working with fictional demo data.
@@ -251,13 +251,13 @@ with the final selection; if it exceeds the budget, revise the selection and rec
 Only return the structured itinerary after availability and cost are verified.
 Explain the destination comparison and note that prices exclude meals and local transfers.
 This is a plan only; no tickets have been booked.`),
-		crux.WithAllowedTools([]string{
+		crux.WithTools([]string{
 			"get_weather", "search_transport", "search_activities",
 			"check_availability", "calculate_trip_cost",
 		}),
 		crux.WithMaxTurns(15),
 		crux.WithOutputSchemaFrom[Output](),
-	)
+	))
 
 	output, err := crux.Run[Output](context.Background(), agent,
 		"Plan a day trip from New York for two adults on "+tripDate+". Compare Boston and Philadelphia, "+

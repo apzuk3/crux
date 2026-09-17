@@ -34,7 +34,6 @@ func (a *Agent) ForkFrom(from int, opts ...AgentOption) (*Agent, error) {
 
 	fork := *a
 	fork.logs = cloneEntries(a.logs[:from])
-	fork.allowedTools = slices.Clone(a.allowedTools)
 	fork.tools = slices.Clone(a.tools)
 	if a.searchOptions != nil {
 		search := *a.searchOptions
@@ -44,11 +43,11 @@ func (a *Agent) ForkFrom(from int, opts ...AgentOption) (*Agent, error) {
 		fork.searchOptions = &search
 	}
 	for _, opt := range opts {
-		opt(&fork)
+		if err := opt(&fork); err != nil {
+			return nil, err
+		}
 	}
-	if fork.tools == nil {
-		fork.tools = fork.toolsRegistry.selected(fork.allowedTools)
-	}
+
 	if fork.provider != a.provider {
 		for i := range fork.logs {
 			fork.logs[i].Opaque = nil

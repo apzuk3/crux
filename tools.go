@@ -10,20 +10,29 @@ import (
 	"sync"
 )
 
+type ToolKind string
+
+const (
+	ToolKindTool     ToolKind = "fn"
+	ToolKindSubagent ToolKind = "agent"
+)
+
 type Tool struct {
 	name        string
+	kind        ToolKind
 	description string
 	schema      map[string]any
 	invoke      func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error)
 }
 
 type ToolsRegistry struct {
-	mu    sync.Mutex
+	mu    *sync.Mutex
 	tools map[string]Tool
 }
 
-func NewToolsRegistry() *ToolsRegistry {
-	return &ToolsRegistry{
+func NewToolsRegistry() ToolsRegistry {
+	return ToolsRegistry{
+		mu:    &sync.Mutex{},
 		tools: make(map[string]Tool),
 	}
 }
@@ -42,11 +51,12 @@ func RegisterToolStateMutate[In, Out any](name string, description string, fn fu
 	RegisterToolWithRegistry(defaultToolsRegistry, name, description, fn)
 }
 
-func RegisterToolWithRegistry[In, Out any](registry *ToolsRegistry, name string, description string, fn func(ctx context.Context, input In) (Out, *StateDelta, error)) {
+func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, description string, fn func(ctx context.Context, input In) (Out, *StateDelta, error)) {
 	tool := Tool{
 		name:        name,
 		description: description,
 		schema:      jsonSchemaOf[In](),
+		kind:        ToolKindTool,
 		invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
 			var input In
 			if len(args) > 0 {
@@ -74,7 +84,7 @@ func RegisterToolWithRegistry[In, Out any](registry *ToolsRegistry, name string,
 // selected returns registered tools in the order of the given names.
 // Unknown names are skipped and repeated names are included only once.
 // The returned slice is non-nil even when no tools are selected.
-func (r *ToolsRegistry) selected(names []string) []Tool {
+func (r *ToolsRegistry) selected(names []string) ([]Tool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -87,12 +97,12 @@ func (r *ToolsRegistry) selected(names []string) []Tool {
 		seen[name] = true
 		tool, ok := r.tools[name]
 		if !ok {
-			continue
+			return nil, ErrToolNotFound
 		}
 		tools = append(tools, tool)
 	}
 
-	return tools
+	return tools, nil
 }
 
 func renderToolOutput(output any) (string, error) {

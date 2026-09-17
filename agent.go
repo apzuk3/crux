@@ -24,9 +24,7 @@ type Agent struct {
 
 	searchOptions *SearchOptions // nil disables web search
 
-	allowedTools  []string
-	toolsRegistry *ToolsRegistry
-	tools         []Tool // nil means tool options need binding; bound empty sets are non-nil
+	tools []Tool
 
 	logs []Entry
 }
@@ -38,18 +36,17 @@ type SearchOptions struct {
 
 type SearchOption func(*SearchOptions)
 
-func NewAgent(name, model string, opts ...AgentOption) *Agent {
+func NewAgent(name, model string, opts ...AgentOption) (*Agent, error) {
 	agent := &Agent{
-		name:          name,
-		model:         model,
-		maxTurns:      10,
-		toolsRegistry: defaultToolsRegistry,
+		name:     name,
+		model:    model,
+		maxTurns: 10,
+		tools:    make([]Tool, 0),
 	}
 	for _, opt := range opts {
-		opt(agent)
-	}
-	if agent.tools == nil {
-		agent.tools = agent.toolsRegistry.selected(agent.allowedTools)
+		if err := opt(agent); err != nil {
+			return nil, err
+		}
 	}
 
 	if agent.provider == "" {
@@ -75,6 +72,14 @@ func NewAgent(name, model string, opts ...AgentOption) *Agent {
 
 	if agent.provider == ProviderOllama && agent.apikey == "" {
 		agent.apikey = "ollama" // Local Ollama ignores authentication.
+	}
+
+	return agent, nil
+}
+
+func Must(agent *Agent, err error) *Agent {
+	if err != nil {
+		panic(err)
 	}
 
 	return agent

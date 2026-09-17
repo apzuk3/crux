@@ -10,17 +10,67 @@ import (
 	"github.com/invopop/jsonschema"
 )
 
-type AgentOption func(*Agent)
+type AgentConfig struct {
+}
 
-func WithAllowedTools(tools []string) AgentOption {
-	return func(a *Agent) {
-		a.allowedTools = slices.Clone(tools)
-		a.tools = nil
+type AgentOption func(*Agent) error
+
+// WithTools replaces existing registry tools with the selected ones, preserving subagents.
+func WithTools(tools []string) AgentOption {
+	return func(a *Agent) error {
+		selected, err := defaultToolsRegistry.selected(tools)
+		if err != nil {
+			return err
+		}
+
+		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
+			return t.kind == ToolKindTool
+		})
+		a.tools = append(a.tools, selected...)
+
+		return nil
+	}
+}
+
+// WithoutTools removes all registry tools, preserving subagents.
+func WithoutTools() AgentOption {
+	return func(a *Agent) error {
+		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
+			return t.kind == ToolKindTool
+		})
+		return nil
+	}
+}
+
+// WithoutSubagents removes all subagents, preserving registry tools.
+func WithoutSubagents() AgentOption {
+	return func(a *Agent) error {
+		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
+			return t.kind == ToolKindSubagent
+		})
+		return nil
+	}
+}
+
+// WithToolsRegistry replaces existing registry tools using a custom registry, preserving subagents.
+func WithToolsRegistry(tools []string, registry ToolsRegistry) AgentOption {
+	return func(a *Agent) error {
+		selected, err := registry.selected(tools)
+		if err != nil {
+			return err
+		}
+
+		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
+			return t.kind == ToolKindTool
+		})
+		a.tools = append(a.tools, selected...)
+
+		return nil
 	}
 }
 
 func WithInstructions(instructions string) AgentOption {
-	return func(a *Agent) { a.instructions = instructions }
+	return func(a *Agent) error { a.instructions = instructions; return nil }
 }
 
 // WithUserLocation supplies geographic context using the fields supported by
@@ -45,42 +95,37 @@ func WithUserLocation(location UserLocation) SearchOption {
 // Anthropic, Gemini, and xAI models. The model decides when to search.
 // Each call replaces the search configuration; no options means no location.
 func WithWebSearch(opts ...SearchOption) AgentOption {
-	return func(a *Agent) {
+	return func(a *Agent) error {
 		search := &SearchOptions{}
 		for _, opt := range opts {
 			opt(search)
 		}
 		a.searchOptions = search
+
+		return nil
 	}
 }
 
 func WithProvider(provider Provider) AgentOption {
-	return func(a *Agent) { a.provider = provider }
+	return func(a *Agent) error { a.provider = provider; return nil }
 }
 
 // WithModel changes the model. When forking across providers, also set
 // WithProvider and the destination's connection settings.
 func WithModel(model string) AgentOption {
-	return func(a *Agent) { a.model = model }
+	return func(a *Agent) error { a.model = model; return nil }
 }
 
 func WithMaxTurns(turns int32) AgentOption {
-	return func(a *Agent) { a.maxTurns = turns }
+	return func(a *Agent) error { a.maxTurns = turns; return nil }
 }
 
 func WithBaseURL(url string) AgentOption {
-	return func(a *Agent) { a.baseURL = url }
+	return func(a *Agent) error { a.baseURL = url; return nil }
 }
 
 func WithAPIKey(apikey string) AgentOption {
-	return func(a *Agent) { a.apikey = apikey }
-}
-
-func WithTools(registry *ToolsRegistry) AgentOption {
-	return func(a *Agent) {
-		a.toolsRegistry = registry
-		a.tools = nil
-	}
+	return func(a *Agent) error { a.apikey = apikey; return nil }
 }
 
 // WithOutputSchema sets the response schema. For OpenAI, it must satisfy strict
@@ -94,14 +139,14 @@ func WithTools(registry *ToolsRegistry) AgentOption {
 // Local Ollama support is verified in v0.34.0. Ollama Cloud does not currently
 // support structured outputs.
 func WithOutputSchema(schema *jsonschema.Schema) AgentOption {
-	return func(a *Agent) { a.outputSchema = schema }
+	return func(a *Agent) error { a.outputSchema = schema; return nil }
 }
 
 // WithOutputSchemaFrom reflects T into a response schema, or disables structured
 // output for string and any. T must satisfy WithOutputSchema's requirements;
 // reflection does not normalize optional fields or maps for OpenAI strict mode.
 func WithOutputSchemaFrom[T any]() AgentOption {
-	return func(a *Agent) {
+	return func(a *Agent) error {
 		var zero T
 		switch any(&zero).(type) {
 		case *string, *any:
@@ -109,6 +154,8 @@ func WithOutputSchemaFrom[T any]() AgentOption {
 		default:
 			a.outputSchema = jsonschema.ReflectFromType(reflect.TypeFor[T]())
 		}
+
+		return nil
 	}
 }
 
@@ -116,7 +163,7 @@ func WithOutputSchemaFrom[T any]() AgentOption {
 // arguments as well. It panics if the schema cannot be represented as an object.
 // description - one liner description of that agent does.
 func WithSubAgent(subAgent *Agent, description string) AgentOption {
-	return func(parent *Agent) {
+	return func(parent *Agent) error {
 		schema := map[string]any{"type": "object", "properties": map[string]any{}}
 		if subAgent.outputSchema != nil {
 			schema = nil
@@ -128,10 +175,12 @@ func WithSubAgent(subAgent *Agent, description string) AgentOption {
 				panic(fmt.Errorf("decode schema for subagent %q: %w", subAgent.name, err))
 			}
 		}
+
 		tool := Tool{
-			name:        subAgent.name,
+			name:        "agent_" + subAgent.name,
 			description: description,
 			schema:      schema,
+			kind:        ToolKindSubagent,
 			invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
 				output, err := subAgent.Run(ctx, string(args))
 				if err != nil {
@@ -142,9 +191,8 @@ func WithSubAgent(subAgent *Agent, description string) AgentOption {
 			},
 		}
 
-		if parent.tools == nil {
-			parent.tools = parent.toolsRegistry.selected(parent.allowedTools)
-		}
 		parent.tools = append(parent.tools, tool)
+
+		return nil
 	}
 }

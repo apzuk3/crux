@@ -20,13 +20,13 @@ func main() {
 	}
 
 	ctx := context.Background()
-	agent := crux.NewAgent(
+	agent := crux.Must(crux.NewAgent(
 		"travel-planner",
 		crux.ChatModelGPT4_1Mini,
 		crux.WithProvider(crux.ProviderOpenAI),
 		crux.WithAPIKey(openAIKey),
 		crux.WithInstructions("You are a helpful travel planner. Keep answers concise."),
-	)
+	))
 
 	response, err := agent.Run(ctx, "Plan a one-day visit to Rome for two adults with a 150 euro budget. We prefer history and vegetarian food.")
 	if err != nil {
