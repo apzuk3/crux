@@ -24,7 +24,8 @@ type Agent struct {
 
 	searchOptions *SearchOptions // nil disables web search
 
-	tools []Tool
+	tools            []Tool
+	pendingApprovals []*ToolCall
 
 	logs []Entry
 }
@@ -51,6 +52,10 @@ func NewAgent(name, model string, opts ...AgentOption) (*Agent, error) {
 
 	if agent.provider == "" {
 		agent.provider = inferProvider(agent.model)
+	}
+
+	if agent.provider == "" {
+		return nil, fmt.Errorf("cannot infer provider from model %q, please pass through crux.WithProvider", agent.model)
 	}
 
 	if agent.apikey == "" {
@@ -89,52 +94,68 @@ func Must(agent *Agent, err error) *Agent {
 // User inputs, model entries, and tool results are retained even if a later step
 // fails. Run must not execute concurrently with other operations on the agent.
 func (a *Agent) Run(ctx context.Context, input any) (string, error) {
-	// The user turn is part of the log, so every provider sees one shape and a
-	// resumed session needs nothing but its history.
-	entry, err := NewUserEntry(input)
-	if err != nil {
-		return "", err
+	if len(a.pendingApprovals) > 0 {
+		return "", ErrApprovalNeeded
 	}
-	a.logs = append(a.logs, entry)
-	log := a.logs
+
+	if input == nil && len(a.logs) == 0 {
+		return "", errors.New("cannot run agent with no input and empty history")
+	}
+
+	if input != nil {
+		// The user turn is part of the log, so every provider sees one shape and a
+		// resumed session needs nothing but its history.
+		entry, err := NewUserEntry(input)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(entry.Text()) == "" {
+			return "", errors.New("user input produced empty text")
+		}
+
+		a.logs = append(a.logs, entry)
+	}
 
 	// ---> Notify start
 	for range a.maxTurns {
-		var produced []Entry
+		var (
+			produced []Entry
+			err      error
+		)
 
 		switch a.provider {
 		case ProviderAnthropic:
-			produced, err = a.anthropicStep(ctx, log)
+			produced, err = a.anthropicStep(ctx, a.logs)
 			if err != nil {
 				return "", err
 			}
 		case ProviderOpenAI:
-			produced, err = a.openAIstep(ctx, log)
+			produced, err = a.openAIstep(ctx, a.logs)
 			if err != nil {
 				return "", err
 			}
 		case ProviderOpenrouter:
-			produced, err = a.openrouterStep(ctx, log)
+			produced, err = a.openrouterStep(ctx, a.logs)
 			if err != nil {
 				return "", err
 			}
 		case ProviderGoogle:
-			produced, err = a.geminiStep(ctx, log)
+			produced, err = a.geminiStep(ctx, a.logs)
 			if err != nil {
 				return "", err
 			}
 		case ProviderXAI:
-			produced, err = a.xaiStep(ctx, log)
+			produced, err = a.xaiStep(ctx, a.logs)
 			if err != nil {
 				return "", err
 			}
 		case ProviderDeepSeek:
-			produced, err = a.deepseekStep(ctx, log)
+			produced, err = a.deepseekStep(ctx, a.logs)
 			if err != nil {
 				return "", err
 			}
 		case ProviderOllama:
-			produced, err = a.ollamaStep(ctx, log)
+			produced, err = a.ollamaStep(ctx, a.logs)
 			if err != nil {
 				return "", err
 			}
@@ -142,19 +163,146 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 			return "", fmt.Errorf("unsupported provider %q", a.provider)
 		}
 
+		// Retain all model entries in history before dispatching local tools.
 		a.logs = append(a.logs, produced...)
-		results := a.dispatchCalls(ctx, produced)
-		a.logs = append(a.logs, results...)
-		log = a.logs
 
-		// Local tool results require another model step.
-		if len(results) == 0 {
+		for _, e := range produced {
+			if e.Kind != KindToolCall || e.ToolCall == nil {
+				continue
+			}
+
+			results, err := a.dispatch(ctx, e.ToolCall, false)
+			if errors.Is(err, ErrApprovalNeeded) {
+				a.pendingApprovals = append(a.pendingApprovals, e.ToolCall)
+				continue
+			}
+			a.logs = append(a.logs, results...)
+		}
+
+		if len(a.pendingApprovals) > 0 {
+			return "", ErrApprovalNeeded
+		}
+
+		// If the latest turn produced the final answer without requesting further tools:
+		if text, ok := a.FinalOutput(); ok {
 			// ---> Notify end
-			return finalText(produced), nil
+			return text, nil
 		}
 	}
 
 	return "", errors.New("max turns reached")
+}
+
+// FinalOutput returns the final assistant text if the latest turn completed
+// without requesting further tools, along with a boolean indicating completion.
+func (a *Agent) FinalOutput() (string, bool) {
+	if len(a.logs) == 0 || len(a.pendingApprovals) > 0 {
+		return "", false
+	}
+
+	start := len(a.logs)
+	for i := len(a.logs) - 1; i >= 0; i-- {
+		kind := a.logs[i].Kind
+		if kind == KindUser || kind == KindToolResult || kind == KindStateDelta {
+			start = i + 1
+			break
+		}
+		if i == 0 {
+			start = 0
+		}
+	}
+
+	if start >= len(a.logs) {
+		return "", false
+	}
+
+	latestTurn := a.logs[start:]
+	var hasAssistant bool
+	for _, e := range latestTurn {
+		if e.Kind == KindToolCall {
+			return "", false
+		}
+		if e.Kind == KindAssistant {
+			hasAssistant = true
+		}
+	}
+
+	if !hasAssistant {
+		return "", false
+	}
+
+	return finalText(latestTurn), true
+}
+
+func (a *Agent) Resume(ctx context.Context) (string, error) {
+	return a.Run(ctx, nil)
+}
+
+func (a *Agent) PendingApprovals() []*ToolCall {
+	return slices.Clone(a.pendingApprovals)
+}
+
+func (a *Agent) Approve(ctx context.Context, callID string) error {
+	if callID == "" {
+		return errors.New("tool call ID cannot be empty")
+	}
+
+	idx := slices.IndexFunc(a.pendingApprovals, func(pending *ToolCall) bool {
+		return pending.ID == callID
+	})
+	if idx < 0 {
+		return fmt.Errorf("tool call %q is not pending approval", callID)
+	}
+
+	call := a.pendingApprovals[idx]
+
+	// the only error dispatch ever returns is ErrApprovalNeeded, which is handled above.
+	// with the last argument set to true, the call will never return an error.
+	// any error occurred during the call will be reported to the model as toolcall result.
+	results, _ := a.dispatch(ctx, call, true)
+
+	// Remove from pending approvals
+	a.pendingApprovals = append(a.pendingApprovals[:idx], a.pendingApprovals[idx+1:]...)
+	if len(a.pendingApprovals) == 0 {
+		a.pendingApprovals = nil
+	}
+
+	// Append to history
+	a.logs = append(a.logs, results...)
+	return nil
+}
+
+func (a *Agent) Reject(ctx context.Context, callID string, reason string) error {
+	if callID == "" {
+		return errors.New("tool call ID cannot be empty")
+	}
+
+	idx := slices.IndexFunc(a.pendingApprovals, func(pending *ToolCall) bool {
+		return pending.ID == callID
+	})
+	if idx < 0 {
+		return fmt.Errorf("tool call %q is not pending approval", callID)
+	}
+
+	call := a.pendingApprovals[idx]
+
+	// Remove from pending approvals
+	a.pendingApprovals = append(a.pendingApprovals[:idx], a.pendingApprovals[idx+1:]...)
+	if len(a.pendingApprovals) == 0 {
+		a.pendingApprovals = nil
+	}
+
+	if reason == "" {
+		reason = "tool execution declined by user"
+	}
+
+	result := ToolResult{
+		CallID: call.ID,
+		Error:  reason,
+	}
+
+	a.logs = append(a.logs, Entry{Kind: KindToolResult, ToolResult: &result})
+	return nil
 }
 
 // Run executes the agent and decodes its final text response into Out. Anything
@@ -168,19 +316,39 @@ func Run[Out any](ctx context.Context, a *Agent, input any) (Out, error) {
 	return decodeOutput[Out](text)
 }
 
+// Resume executes the agent to continue after tool approvals/rejections and decodes
+// its final text response into Out.
+func Resume[Out any](ctx context.Context, a *Agent) (Out, error) {
+	text, err := a.Resume(ctx)
+	if err != nil {
+		var zero Out
+		return zero, err
+	}
+	return decodeOutput[Out](text)
+}
+
 // dispatch runs a tool call locally. A failure is reported to the model rather
 // than returned, because the call is still owed an answer.
-func (a *Agent) dispatch(ctx context.Context, call ToolCall) []Entry {
+//
+// dispatch returns the tool result entry and any state delta that the took introduced.
+func (a *Agent) dispatch(ctx context.Context, call *ToolCall, approve bool) ([]Entry, error) {
+	if call == nil {
+		return nil, errors.New("dispatch: call cannot be nil")
+	}
+
 	result := ToolResult{CallID: call.ID}
 	index := slices.IndexFunc(a.tools, func(tool Tool) bool { return tool.name == call.Name })
 	if index < 0 {
 		result.Error = fmt.Sprintf("tool %q is not allowed", call.Name)
-		return []Entry{{Kind: KindToolResult, ToolResult: &result}}
+		return []Entry{{Kind: KindToolResult, ToolResult: &result}}, nil
 	}
 
-	var resp []Entry
-
 	tool := a.tools[index]
+
+	if !approve && tool.approvalNeeded {
+		return nil, ErrApprovalNeeded
+	}
+
 	snapshot := a.StateSnapshot()
 
 	output, delta, err := tool.invoke(ContextWithState(ctx, snapshot), call.Args)
@@ -190,28 +358,19 @@ func (a *Agent) dispatch(ctx context.Context, call ToolCall) []Entry {
 		result.Output = output
 	}
 
+	var resp = []Entry{
+		{Kind: KindToolResult, ToolResult: &result},
+	}
+
 	if delta != nil {
-		resp = append(resp, Entry{Kind: KindStateDelta, ToolResult: &result, Delta: delta})
-	}
-
-	return append(resp, Entry{Kind: KindToolResult, ToolResult: &result})
-}
-
-// dispatchCalls executes local calls in model order. The caller appends the
-// results after all model entries, as required by the provider protocols.
-func (a *Agent) dispatchCalls(ctx context.Context, entries []Entry) []Entry {
-	var results []Entry
-	for _, e := range entries {
-		if e.Kind == KindToolCall {
-			if e.ToolCall == nil {
-				continue
-			}
-
-			results = append(results, a.dispatch(ctx, *e.ToolCall)...)
+		if delta.By == "" {
+			delta.By = call.Name
 		}
+
+		resp = append(resp, Entry{Kind: KindStateDelta, Delta: delta})
 	}
 
-	return results
+	return resp, nil
 }
 
 func finalText(entries []Entry) string {
@@ -242,7 +401,16 @@ func decodeOutput[Out any](text string) (Out, error) {
 		return output, nil
 	}
 
-	if err := json.Unmarshal([]byte(text), &output); err != nil {
+	clean := strings.TrimSpace(text)
+	if strings.HasPrefix(clean, "```") {
+		if idx := strings.Index(clean, "\n"); idx != -1 {
+			clean = clean[idx+1:]
+		}
+		clean = strings.TrimSuffix(clean, "```")
+		clean = strings.TrimSpace(clean)
+	}
+
+	if err := json.Unmarshal([]byte(clean), &output); err != nil {
 		return output, fmt.Errorf("decode agent output as %T: %w", output, err)
 	}
 	return output, nil

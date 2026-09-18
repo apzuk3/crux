@@ -18,11 +18,20 @@ const (
 )
 
 type Tool struct {
-	name        string
-	kind        ToolKind
-	description string
-	schema      map[string]any
-	invoke      func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error)
+	name           string
+	kind           ToolKind
+	description    string
+	schema         map[string]any
+	invoke         func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error)
+	approvalNeeded bool
+}
+
+type ToolOption func(*Tool)
+
+func WithApprovalNeeded(approvalNeeded bool) ToolOption {
+	return func(tool *Tool) {
+		tool.approvalNeeded = approvalNeeded
+	}
 }
 
 type ToolsRegistry struct {
@@ -39,19 +48,19 @@ func NewToolsRegistry() ToolsRegistry {
 
 var defaultToolsRegistry = NewToolsRegistry()
 
-func RegisterTool[In, Out any](name string, description string, fn func(ctx context.Context, input In) (Out, error)) {
+func RegisterTool[In, Out any](name string, description string, fn func(ctx context.Context, input In) (Out, error), opts ...ToolOption) {
 	RegisterToolWithRegistry(defaultToolsRegistry, name, description, func(ctx context.Context, input In) (Out, *StateDelta, error) {
 		output, err := fn(ctx, input)
 
 		return output, nil, err
-	})
+	}, opts...)
 }
 
-func RegisterToolStateMutate[In, Out any](name string, description string, fn func(ctx context.Context, input In) (Out, *StateDelta, error)) {
-	RegisterToolWithRegistry(defaultToolsRegistry, name, description, fn)
+func RegisterToolStateMutate[In, Out any](name string, description string, fn func(ctx context.Context, input In) (Out, *StateDelta, error), opts ...ToolOption) {
+	RegisterToolWithRegistry(defaultToolsRegistry, name, description, fn, opts...)
 }
 
-func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, description string, fn func(ctx context.Context, input In) (Out, *StateDelta, error)) {
+func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, description string, fn func(ctx context.Context, input In) (Out, *StateDelta, error), opts ...ToolOption) {
 	tool := Tool{
 		name:        name,
 		description: description,
@@ -73,6 +82,9 @@ func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, 
 
 			return outputStr, delta, err
 		},
+	}
+	for _, opt := range opts {
+		opt(&tool)
 	}
 
 	registry.mu.Lock()

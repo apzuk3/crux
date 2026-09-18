@@ -259,7 +259,7 @@ This is a plan only; no tickets have been booked.`),
 		crux.WithOutputSchemaFrom[Output](),
 	))
 
-	output, err := crux.Run[Output](context.Background(), agent,
+	output, err := agent.Run(context.Background(),
 		"Plan a day trip from New York for two adults on "+tripDate+". Compare Boston and Philadelphia, "+
 			"keep round-trip transport and activities under $300 total, and choose at least two activities "+
 			"suitable for the forecast. If an activity is unavailable, find a replacement.")

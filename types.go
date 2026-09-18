@@ -29,6 +29,8 @@ const (
 	KindToolCall
 	KindToolResult
 	KindStateDelta
+	// KindCompaction represents a compacted conversation range.
+	// NOTE: Runtime compaction is deferred and is unsupported in alpha.
 	KindCompaction
 	KindProviderTool // server-executed tool event retained in Opaque
 )
@@ -40,27 +42,34 @@ const (
 	ContentKindRefusal ContentKind = "refusal"
 )
 
+const (
+	EventAgentStarted = "agent_started"
+	EventAgentEnded   = "agent_ended"
+	EventTurnStarted  = "turn_started"
+	EventTurnEnded    = "turn_ended"
+)
+
 type ContentPart struct {
-	Kind ContentKind
-	Text string
+	Kind ContentKind `json:"kind"`
+	Text string      `json:"text"`
 }
 
 type Entry struct {
-	Seq   uint64
-	At    time.Time
-	Kind  Kind
-	Agent string // which agent produced it
+	Seq   uint64    `json:"seq"`
+	At    time.Time `json:"at"`
+	Kind  Kind      `json:"kind"`
+	Agent string    `json:"agent"` // which agent produced it
 
-	Content []ContentPart // portable user or assistant content
+	Content []ContentPart `json:"content,omitempty"` // portable user or assistant content
 
-	Reasoning  *Reasoning
-	ToolCall   *ToolCall
-	ToolResult *ToolResult
-	Delta      *StateDelta
-	Compaction *Compaction
+	Reasoning  *Reasoning  `json:"reasoning,omitempty"`
+	ToolCall   *ToolCall   `json:"tool_call,omitempty"`
+	ToolResult *ToolResult `json:"tool_result,omitempty"`
+	Delta      *StateDelta `json:"delta,omitempty"`
+	Compaction *Compaction `json:"compaction,omitempty"`
 
-	Opaque map[string][]byte // provider adornments; dropped on provider switch
-	Usage  *Usage            // tokens, latency; never affects replay
+	Opaque map[string][]byte `json:"opaque,omitempty"` // provider adornments; dropped on provider switch
+	Usage  *Usage            `json:"usage,omitempty"`  // tokens, latency; never affects replay
 }
 
 func NewUserEntry(input any) (Entry, error) {
@@ -70,6 +79,8 @@ func NewUserEntry(input any) (Entry, error) {
 		text = v
 	case fmt.Stringer:
 		text = v.String()
+	default:
+		return Entry{}, fmt.Errorf("unsupported user input type %T", input)
 	}
 	return Entry{
 		Kind:    KindUser,
@@ -90,34 +101,38 @@ func (e Entry) Text() string {
 }
 
 type Reasoning struct {
-	Summary string // plaintext, if the provider gives one
+	Summary string `json:"summary,omitempty"` // plaintext, if the provider gives one
 }
 
 type ToolCall struct {
-	ID   string // provider-issued call ID
-	Name string
-	Args json.RawMessage
+	ID   string          `json:"id"` // provider-issued call ID
+	Name string          `json:"name"`
+	Args json.RawMessage `json:"args,omitempty"`
 }
 
 type ToolResult struct {
-	CallID string // references ToolCall.ID
-	Output string
-	Error  string // set on failure or decline; still owed to the model
+	CallID string `json:"call_id"` // references ToolCall.ID
+	Output string `json:"output,omitempty"`
+	Error  string `json:"error,omitempty"` // set on failure or decline; still owed to the model
 }
 
 type StateDelta struct {
-	By     string // tool that wrote it
-	Set    map[string]any
-	Delete []string
+	By     string         `json:"by"` // tool that wrote it
+	Set    map[string]any `json:"set,omitempty"`
+	Delete []string       `json:"delete,omitempty"`
 }
 
+// Compaction defines a superseded history range and its summary.
+// NOTE: Runtime compaction execution is deferred and is currently
+// unsupported in alpha. Compaction entries cannot yet be constructed by or replayed to providers.
 type Compaction struct {
-	From, To uint64 // superseded range
-	Summary  string
+	From    uint64 `json:"from"` // superseded range start
+	To      uint64 `json:"to"`   // superseded range end
+	Summary string `json:"summary,omitempty"`
 }
 
 type Usage struct {
-	InputTokens  int
-	OutputTokens int
-	Latency      time.Duration
+	InputTokens  int           `json:"input_tokens"`
+	OutputTokens int           `json:"output_tokens"`
+	Latency      time.Duration `json:"latency"`
 }
