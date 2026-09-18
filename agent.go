@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -64,7 +65,7 @@ func NewAgent(name, model string, opts ...AgentOption) (*Agent, error) {
 	if agent.baseURL == "" {
 		switch agent.provider {
 		case ProviderOpenrouter:
-			agent.baseURL = "https://api.openrouter.ai"
+			agent.baseURL = "https://openrouter.ai/api/v1"
 		case ProviderXAI:
 			agent.baseURL = "https://api.x.ai/v1"
 		case ProviderDeepSeek:
@@ -93,12 +94,20 @@ func Must(agent *Agent, err error) *Agent {
 // User inputs, model entries, and tool results are retained even if a later step
 // fails. Run must not execute concurrently with other operations on the agent.
 func (a *Agent) Run(ctx context.Context, input any) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	if len(a.PendingApprovals()) > 0 {
 		return "", ErrApprovalNeeded
 	}
 
 	if input == nil && len(a.logs) == 0 {
 		return "", errors.New("cannot run agent with no input and empty history")
+	}
+
+	if input != nil && a.hasUnexecutedToolCalls() {
+		return "", errors.New("cannot run agent with new user input while tool calls are pending execution; call Resume first")
 	}
 
 	if input != nil {
@@ -117,7 +126,14 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 
 	// ---> Notify start
 	for range a.maxTurns {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+
 		a.logs = append(a.logs, a.executeUnexecutedToolCalls(ctx)...)
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 
 		var (
 			produced []Entry
@@ -171,6 +187,13 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 			return "", ErrApprovalNeeded
 		}
 
+		if refusal, refused := latestRefusal(produced); refused {
+			if refusal != "" {
+				return "", fmt.Errorf("model refused the request: %s", refusal)
+			}
+			return "", errors.New("model refused the request")
+		}
+
 		// If the latest turn produced the final answer without requesting further tools:
 		if text, ok := a.FinalOutput(); ok {
 			// ---> Notify end
@@ -205,6 +228,10 @@ func (a *Agent) FinalOutput() (string, bool) {
 	}
 
 	latestTurn := a.logs[start:]
+	if _, refused := latestRefusal(latestTurn); refused {
+		return "", false
+	}
+
 	var hasAssistant bool
 	for _, e := range latestTurn {
 		if e.Kind == KindToolCall {
@@ -220,6 +247,19 @@ func (a *Agent) FinalOutput() (string, bool) {
 	}
 
 	return finalText(latestTurn), true
+}
+
+func latestRefusal(entries []Entry) (string, bool) {
+	for _, entry := range entries {
+		if entry.Kind == KindAssistant {
+			for _, part := range entry.Content {
+				if part.Kind == ContentKindRefusal {
+					return part.Text, true
+				}
+			}
+		}
+	}
+	return "", false
 }
 
 func (a *Agent) Resume(ctx context.Context) (string, error) {
@@ -268,9 +308,12 @@ func (a *Agent) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 	}
 
 	var unexecuted []*ToolCall
+	seen := make(map[string]bool)
 	for _, entry := range a.logs {
 		if entry.Kind == KindToolCall && entry.ToolCall != nil && entry.ToolCall.ID != "" {
-			if !resolved[entry.ToolCall.ID] {
+			id := entry.ToolCall.ID
+			if !resolved[id] && !seen[id] {
+				seen[id] = true
 				unexecuted = append(unexecuted, entry.ToolCall)
 			}
 		}
@@ -280,9 +323,14 @@ func (a *Agent) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 		return nil
 	}
 
+	state := a.StateSnapshot()
 	var entries []Entry
 	// Execute in the exact order requested by the model.
 	for _, call := range unexecuted {
+		if err := ctx.Err(); err != nil {
+			break
+		}
+
 		dec := decisions[call.ID]
 		if dec != nil && !dec.Approved {
 			reason := dec.Reason
@@ -297,8 +345,16 @@ func (a *Agent) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 			continue
 		}
 
-		results, _ := a.dispatch(ctx, call, true)
+		results, delta := a.dispatch(ctx, call, state)
 		entries = append(entries, results...)
+		if delta != nil {
+			if delta.Set != nil {
+				maps.Copy(state, delta.Set)
+			}
+			for _, key := range delta.Delete {
+				delete(state, key)
+			}
+		}
 	}
 
 	return entries
@@ -406,10 +462,10 @@ func Resume[Out any](ctx context.Context, a *Agent) (Out, error) {
 // dispatch runs a tool call locally. A failure is reported to the model rather
 // than returned, because the call is still owed an answer.
 //
-// dispatch returns the tool result entry and any state delta that the took introduced.
-func (a *Agent) dispatch(ctx context.Context, call *ToolCall, approve bool) ([]Entry, error) {
+// dispatch returns the tool result entry and any state delta that the tool introduced.
+func (a *Agent) dispatch(ctx context.Context, call *ToolCall, snapshot map[string]any) ([]Entry, *StateDelta) {
 	if call == nil {
-		return nil, errors.New("dispatch: call cannot be nil")
+		return nil, nil
 	}
 
 	result := ToolResult{CallID: call.ID}
@@ -420,12 +476,6 @@ func (a *Agent) dispatch(ctx context.Context, call *ToolCall, approve bool) ([]E
 	}
 
 	tool := a.tools[index]
-
-	if !approve && tool.approvalNeeded {
-		return nil, ErrApprovalNeeded
-	}
-
-	snapshot := a.StateSnapshot()
 
 	output, delta, err := tool.invoke(ContextWithState(ctx, snapshot), call.Args)
 	if err != nil {
@@ -446,7 +496,7 @@ func (a *Agent) dispatch(ctx context.Context, call *ToolCall, approve bool) ([]E
 		resp = append(resp, Entry{Kind: KindStateDelta, Delta: delta})
 	}
 
-	return resp, nil
+	return resp, delta
 }
 
 func finalText(entries []Entry) string {
@@ -478,12 +528,24 @@ func decodeOutput[Out any](text string) (Out, error) {
 	}
 
 	clean := strings.TrimSpace(text)
-	if strings.HasPrefix(clean, "```") {
-		if idx := strings.Index(clean, "\n"); idx != -1 {
-			clean = clean[idx+1:]
+	if err := json.Unmarshal([]byte(clean), &output); err == nil {
+		return output, nil
+	}
+
+	if start := strings.Index(clean, "```"); start != -1 {
+		rest := clean[start+3:]
+		if end := strings.LastIndex(rest, "```"); end != -1 {
+			block := rest[:end]
+			if nl := strings.Index(block, "\n"); nl != -1 {
+				block = block[nl+1:]
+			} else if strings.HasPrefix(strings.ToLower(block), "json") {
+				block = block[4:]
+			}
+			block = strings.TrimSpace(block)
+			if err := json.Unmarshal([]byte(block), &output); err == nil {
+				return output, nil
+			}
 		}
-		clean = strings.TrimSuffix(clean, "```")
-		clean = strings.TrimSpace(clean)
 	}
 
 	if err := json.Unmarshal([]byte(clean), &output); err != nil {
