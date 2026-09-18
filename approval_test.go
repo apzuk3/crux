@@ -211,3 +211,42 @@ func TestForkRetainsKindApproval(t *testing.T) {
 		t.Fatalf("unexpected Approval in forked approval entry: %+v", fork.logs[2].Approval)
 	}
 }
+
+func TestApproveRejectHonorContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	call := &ToolCall{ID: "call_1", Name: "action", Args: json.RawMessage(`{}`)}
+	agent := &Agent{
+		tools: []Tool{{name: "action", approvalNeeded: true}},
+		logs: []Entry{
+			{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}},
+			{Kind: KindToolCall, ToolCall: call},
+		},
+	}
+
+	if err := agent.Approve(ctx, "call_1"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled from Approve, got %v", err)
+	}
+
+	if err := agent.Reject(ctx, "call_1", "reason"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled from Reject, got %v", err)
+	}
+}
+
+func TestResumeIdempotentWhenAlreadyCompleted(t *testing.T) {
+	agent := &Agent{
+		logs: []Entry{
+			{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hello"}}},
+			{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: "world"}}},
+		},
+	}
+
+	out, err := agent.Resume(context.Background())
+	if err != nil {
+		t.Fatalf("expected Resume on completed agent to succeed, got %v", err)
+	}
+	if out != "world" {
+		t.Fatalf("expected Resume to return %q, got %q", "world", out)
+	}
+}

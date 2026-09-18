@@ -106,6 +106,12 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 		return "", errors.New("cannot run agent with no input and empty history")
 	}
 
+	if input == nil {
+		if text, ok := a.FinalOutput(); ok {
+			return text, nil
+		}
+	}
+
 	if input != nil && a.hasUnexecutedToolCalls() {
 		return "", errors.New("cannot run agent with new user input while tool calls are pending execution; call Resume first")
 	}
@@ -387,6 +393,10 @@ func (a *Agent) PendingApprovals() []*ToolCall {
 }
 
 func (a *Agent) Approve(ctx context.Context, callID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if callID == "" {
 		return errors.New("tool call ID cannot be empty")
 	}
@@ -410,6 +420,10 @@ func (a *Agent) Approve(ctx context.Context, callID string) error {
 }
 
 func (a *Agent) Reject(ctx context.Context, callID string, reason string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if callID == "" {
 		return errors.New("tool call ID cannot be empty")
 	}
