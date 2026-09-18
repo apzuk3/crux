@@ -24,8 +24,7 @@ type Agent struct {
 
 	searchOptions *SearchOptions // nil disables web search
 
-	tools            []Tool
-	pendingApprovals []*ToolCall
+	tools []Tool
 
 	logs []Entry
 }
@@ -94,7 +93,7 @@ func Must(agent *Agent, err error) *Agent {
 // User inputs, model entries, and tool results are retained even if a later step
 // fails. Run must not execute concurrently with other operations on the agent.
 func (a *Agent) Run(ctx context.Context, input any) (string, error) {
-	if len(a.pendingApprovals) > 0 {
+	if len(a.PendingApprovals()) > 0 {
 		return "", ErrApprovalNeeded
 	}
 
@@ -118,6 +117,8 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 
 	// ---> Notify start
 	for range a.maxTurns {
+		a.logs = append(a.logs, a.executeUnexecutedToolCalls(ctx)...)
+
 		var (
 			produced []Entry
 			err      error
@@ -166,20 +167,7 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 		// Retain all model entries in history before dispatching local tools.
 		a.logs = append(a.logs, produced...)
 
-		for _, e := range produced {
-			if e.Kind != KindToolCall || e.ToolCall == nil {
-				continue
-			}
-
-			results, err := a.dispatch(ctx, e.ToolCall, false)
-			if errors.Is(err, ErrApprovalNeeded) {
-				a.pendingApprovals = append(a.pendingApprovals, e.ToolCall)
-				continue
-			}
-			a.logs = append(a.logs, results...)
-		}
-
-		if len(a.pendingApprovals) > 0 {
+		if len(a.PendingApprovals()) > 0 {
 			return "", ErrApprovalNeeded
 		}
 
@@ -196,14 +184,14 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 // FinalOutput returns the final assistant text if the latest turn completed
 // without requesting further tools, along with a boolean indicating completion.
 func (a *Agent) FinalOutput() (string, bool) {
-	if len(a.logs) == 0 || len(a.pendingApprovals) > 0 {
+	if len(a.logs) == 0 || len(a.PendingApprovals()) > 0 || a.hasUnexecutedToolCalls() {
 		return "", false
 	}
 
 	start := len(a.logs)
 	for i := len(a.logs) - 1; i >= 0; i-- {
 		kind := a.logs[i].Kind
-		if kind == KindUser || kind == KindToolResult || kind == KindStateDelta {
+		if kind == KindUser || kind == KindToolResult || a.logs[i].HiddenFromModel() {
 			start = i + 1
 			break
 		}
@@ -238,8 +226,108 @@ func (a *Agent) Resume(ctx context.Context) (string, error) {
 	return a.Run(ctx, nil)
 }
 
+func (a *Agent) toolRequiresApproval(name string) bool {
+	index := slices.IndexFunc(a.tools, func(tool Tool) bool { return tool.name == name })
+	if index < 0 {
+		return false
+	}
+	return a.tools[index].approvalNeeded
+}
+
+func (a *Agent) hasUnexecutedToolCalls() bool {
+	resolved := make(map[string]bool)
+	for _, entry := range a.logs {
+		if entry.Kind == KindToolResult && entry.ToolResult != nil && entry.ToolResult.CallID != "" {
+			resolved[entry.ToolResult.CallID] = true
+		}
+	}
+	for _, entry := range a.logs {
+		if entry.Kind == KindToolCall && entry.ToolCall != nil && entry.ToolCall.ID != "" {
+			if !resolved[entry.ToolCall.ID] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (a *Agent) executeUnexecutedToolCalls(ctx context.Context) []Entry {
+	if len(a.PendingApprovals()) > 0 {
+		return nil
+	}
+
+	resolved := make(map[string]bool)
+	decisions := make(map[string]*Approval)
+	for _, entry := range a.logs {
+		if entry.Kind == KindToolResult && entry.ToolResult != nil && entry.ToolResult.CallID != "" {
+			resolved[entry.ToolResult.CallID] = true
+		}
+		if entry.Kind == KindApproval && entry.Approval != nil && entry.Approval.CallID != "" {
+			decisions[entry.Approval.CallID] = entry.Approval
+		}
+	}
+
+	var unexecuted []*ToolCall
+	for _, entry := range a.logs {
+		if entry.Kind == KindToolCall && entry.ToolCall != nil && entry.ToolCall.ID != "" {
+			if !resolved[entry.ToolCall.ID] {
+				unexecuted = append(unexecuted, entry.ToolCall)
+			}
+		}
+	}
+
+	if len(unexecuted) == 0 {
+		return nil
+	}
+
+	var entries []Entry
+	// Execute in the exact order requested by the model.
+	for _, call := range unexecuted {
+		dec := decisions[call.ID]
+		if dec != nil && !dec.Approved {
+			reason := dec.Reason
+			if reason == "" {
+				reason = "tool execution declined by user"
+			}
+			result := ToolResult{
+				CallID: call.ID,
+				Error:  reason,
+			}
+			entries = append(entries, Entry{Kind: KindToolResult, ToolResult: &result})
+			continue
+		}
+
+		results, _ := a.dispatch(ctx, call, true)
+		entries = append(entries, results...)
+	}
+
+	return entries
+}
+
 func (a *Agent) PendingApprovals() []*ToolCall {
-	return slices.Clone(a.pendingApprovals)
+	resolved := make(map[string]bool)
+	decisions := make(map[string]bool)
+	for _, entry := range a.logs {
+		if entry.Kind == KindToolResult && entry.ToolResult != nil && entry.ToolResult.CallID != "" {
+			resolved[entry.ToolResult.CallID] = true
+		}
+		if entry.Kind == KindApproval && entry.Approval != nil && entry.Approval.CallID != "" {
+			decisions[entry.Approval.CallID] = true
+		}
+	}
+
+	var pending []*ToolCall
+	seen := make(map[string]bool)
+	for _, entry := range a.logs {
+		if entry.Kind == KindToolCall && entry.ToolCall != nil && entry.ToolCall.ID != "" {
+			id := entry.ToolCall.ID
+			if !resolved[id] && !decisions[id] && !seen[id] && a.toolRequiresApproval(entry.ToolCall.Name) {
+				seen[id] = true
+				pending = append(pending, entry.ToolCall)
+			}
+		}
+	}
+	return pending
 }
 
 func (a *Agent) Approve(ctx context.Context, callID string) error {
@@ -247,28 +335,21 @@ func (a *Agent) Approve(ctx context.Context, callID string) error {
 		return errors.New("tool call ID cannot be empty")
 	}
 
-	idx := slices.IndexFunc(a.pendingApprovals, func(pending *ToolCall) bool {
-		return pending.ID == callID
+	pending := a.PendingApprovals()
+	idx := slices.IndexFunc(pending, func(p *ToolCall) bool {
+		return p.ID == callID
 	})
 	if idx < 0 {
 		return fmt.Errorf("tool call %q is not pending approval", callID)
 	}
 
-	call := a.pendingApprovals[idx]
-
-	// the only error dispatch ever returns is ErrApprovalNeeded, which is handled above.
-	// with the last argument set to true, the call will never return an error.
-	// any error occurred during the call will be reported to the model as toolcall result.
-	results, _ := a.dispatch(ctx, call, true)
-
-	// Remove from pending approvals
-	a.pendingApprovals = append(a.pendingApprovals[:idx], a.pendingApprovals[idx+1:]...)
-	if len(a.pendingApprovals) == 0 {
-		a.pendingApprovals = nil
-	}
-
-	// Append to history
-	a.logs = append(a.logs, results...)
+	a.logs = append(a.logs, Entry{
+		Kind: KindApproval,
+		Approval: &Approval{
+			CallID:   callID,
+			Approved: true,
+		},
+	})
 	return nil
 }
 
@@ -277,31 +358,26 @@ func (a *Agent) Reject(ctx context.Context, callID string, reason string) error 
 		return errors.New("tool call ID cannot be empty")
 	}
 
-	idx := slices.IndexFunc(a.pendingApprovals, func(pending *ToolCall) bool {
-		return pending.ID == callID
+	pending := a.PendingApprovals()
+	idx := slices.IndexFunc(pending, func(p *ToolCall) bool {
+		return p.ID == callID
 	})
 	if idx < 0 {
 		return fmt.Errorf("tool call %q is not pending approval", callID)
-	}
-
-	call := a.pendingApprovals[idx]
-
-	// Remove from pending approvals
-	a.pendingApprovals = append(a.pendingApprovals[:idx], a.pendingApprovals[idx+1:]...)
-	if len(a.pendingApprovals) == 0 {
-		a.pendingApprovals = nil
 	}
 
 	if reason == "" {
 		reason = "tool execution declined by user"
 	}
 
-	result := ToolResult{
-		CallID: call.ID,
-		Error:  reason,
-	}
-
-	a.logs = append(a.logs, Entry{Kind: KindToolResult, ToolResult: &result})
+	a.logs = append(a.logs, Entry{
+		Kind: KindApproval,
+		Approval: &Approval{
+			CallID:   callID,
+			Approved: false,
+			Reason:   reason,
+		},
+	})
 	return nil
 }
 

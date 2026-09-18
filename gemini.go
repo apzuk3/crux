@@ -164,7 +164,7 @@ func toGeminiContents(log []Entry) ([]*genai.Content, error) {
 		if e.Kind == KindProviderTool && len(e.Opaque[geminiPartOpaqueKey]) == 0 {
 			continue
 		}
-		if e.Kind == KindStateDelta {
+		if e.HiddenFromModel() {
 			continue
 		}
 		parts, err := toGeminiParts(e, calls)

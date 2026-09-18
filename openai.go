@@ -225,8 +225,8 @@ func toOpenAIResponseInput(log []Entry) (responses.ResponseInputParam, error) {
 		if e.Kind == KindProviderTool && len(e.Opaque[openAIOutputItemOpaqueKey]) == 0 {
 			continue
 		}
-		if e.Kind == KindStateDelta {
-			continue // tool-written state, never shown to the model
+		if e.HiddenFromModel() {
+			continue // tool-written state or approval event, never shown to the model
 		}
 		if e.Kind == KindReasoning && len(e.Opaque[openAIOutputItemOpaqueKey]) == 0 {
 			continue // Foreign reasoning cannot be replayed without provider data.

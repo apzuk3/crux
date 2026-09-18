@@ -33,6 +33,7 @@ const (
 	// NOTE: Runtime compaction is deferred and is unsupported in alpha.
 	KindCompaction
 	KindProviderTool // server-executed tool event retained in Opaque
+	KindApproval
 )
 
 type ContentKind string
@@ -67,6 +68,7 @@ type Entry struct {
 	ToolResult *ToolResult `json:"tool_result,omitempty"`
 	Delta      *StateDelta `json:"delta,omitempty"`
 	Compaction *Compaction `json:"compaction,omitempty"`
+	Approval   *Approval   `json:"approval,omitempty"`
 
 	Opaque map[string][]byte `json:"opaque,omitempty"` // provider adornments; dropped on provider switch
 	Usage  *Usage            `json:"usage,omitempty"`  // tokens, latency; never affects replay
@@ -100,6 +102,12 @@ func (e Entry) Text() string {
 	return text.String()
 }
 
+// HiddenFromModel reports whether the entry is an internal bookkeeping event
+// (like state deltas or user approvals) that is not sent to LLM providers.
+func (e Entry) HiddenFromModel() bool {
+	return e.Kind == KindStateDelta || e.Kind == KindApproval
+}
+
 type Reasoning struct {
 	Summary string `json:"summary,omitempty"` // plaintext, if the provider gives one
 }
@@ -120,6 +128,12 @@ type StateDelta struct {
 	By     string         `json:"by"` // tool that wrote it
 	Set    map[string]any `json:"set,omitempty"`
 	Delete []string       `json:"delete,omitempty"`
+}
+
+type Approval struct {
+	CallID   string `json:"call_id"`
+	Approved bool   `json:"approved"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // Compaction defines a superseded history range and its summary.

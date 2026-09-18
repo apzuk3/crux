@@ -183,7 +183,7 @@ func toAnthropicMessages(log []Entry) ([]anthropic.MessageParam, error) {
 		if e.Kind == KindProviderTool && len(e.Opaque[anthropicContentBlockOpaqueKey]) == 0 {
 			continue
 		}
-		if e.Kind == KindStateDelta {
+		if e.HiddenFromModel() {
 			continue
 		}
 		if e.Kind == KindReasoning && len(e.Opaque[anthropicContentBlockOpaqueKey]) == 0 {

@@ -35,7 +35,6 @@ func (a *Agent) ForkFrom(from int, opts ...AgentOption) (*Agent, error) {
 	fork := *a
 	fork.logs = cloneEntries(a.logs[:from])
 	fork.tools = slices.Clone(a.tools)
-	fork.pendingApprovals = nil
 	if a.searchOptions != nil {
 		search := *a.searchOptions
 		if search.UserLocation != nil {
@@ -116,6 +115,10 @@ func cloneEntries(entries []Entry) []Entry {
 		if e.Compaction != nil {
 			value := *e.Compaction
 			e.Compaction = &value
+		}
+		if e.Approval != nil {
+			value := *e.Approval
+			e.Approval = &value
 		}
 		if e.Usage != nil {
 			value := *e.Usage
