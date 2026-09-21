@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/invopop/jsonschema"
@@ -139,7 +140,9 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 			return "", errors.New("user input produced empty text")
 		}
 
-		a.sessionLogs = append(a.sessionLogs, entry)
+		if err := a.appendLogs(entry); err != nil {
+			return "", err
+		}
 	}
 
 	// ---> Notify start
@@ -148,7 +151,11 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 			return "", err
 		}
 
-		a.sessionLogs = append(a.sessionLogs, a.executeUnexecutedToolCalls(ctx)...)
+		if toolResults := a.executeUnexecutedToolCalls(ctx); len(toolResults) > 0 {
+			if err := a.appendLogs(toolResults...); err != nil {
+				return "", err
+			}
+		}
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -199,7 +206,11 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 		}
 
 		// Retain all model entries in history before dispatching local tools.
-		a.sessionLogs = append(a.sessionLogs, produced...)
+		if len(produced) > 0 {
+			if err := a.appendLogs(produced...); err != nil {
+				return "", err
+			}
+		}
 
 		if len(a.PendingApprovals()) > 0 {
 			return "", ErrApprovalNeeded
@@ -359,7 +370,7 @@ func (a *Agent) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 				CallID: call.ID,
 				Error:  reason,
 			}
-			entries = append(entries, Entry{Kind: KindToolResult, ToolResult: &result})
+			entries = append(entries, Entry{Kind: KindToolResult, ToolResult: &result, At: time.Now().UTC()})
 			continue
 		}
 
@@ -421,14 +432,13 @@ func (a *Agent) Approve(ctx context.Context, callID string) error {
 		return fmt.Errorf("tool call %q is not pending approval", callID)
 	}
 
-	a.sessionLogs = append(a.sessionLogs, Entry{
+	return a.appendLogs(Entry{
 		Kind: KindApproval,
 		Approval: &Approval{
 			CallID:   callID,
 			Approved: true,
 		},
 	})
-	return nil
 }
 
 func (a *Agent) Reject(ctx context.Context, callID string, reason string) error {
@@ -452,7 +462,7 @@ func (a *Agent) Reject(ctx context.Context, callID string, reason string) error 
 		reason = "tool execution declined by user"
 	}
 
-	a.sessionLogs = append(a.sessionLogs, Entry{
+	return a.appendLogs(Entry{
 		Kind: KindApproval,
 		Approval: &Approval{
 			CallID:   callID,
@@ -460,7 +470,6 @@ func (a *Agent) Reject(ctx context.Context, callID string, reason string) error 
 			Reason:   reason,
 		},
 	})
-	return nil
 }
 
 // Run executes the agent and decodes its final text response into Out. Anything
@@ -503,7 +512,9 @@ func (a *Agent) dispatch(ctx context.Context, call *ToolCall, snapshot map[strin
 
 	tool := a.Tools[index]
 
+	start := time.Now()
 	output, delta, err := tool.invoke(ContextWithState(ctx, snapshot), call.Args)
+	duration := time.Since(start)
 	if err != nil {
 		result.Error = err.Error()
 	} else {
@@ -511,7 +522,7 @@ func (a *Agent) dispatch(ctx context.Context, call *ToolCall, snapshot map[strin
 	}
 
 	var resp = []Entry{
-		{Kind: KindToolResult, ToolResult: &result},
+		{Kind: KindToolResult, ToolResult: &result, At: start.UTC(), Duration: duration},
 	}
 
 	if delta != nil {
@@ -519,7 +530,7 @@ func (a *Agent) dispatch(ctx context.Context, call *ToolCall, snapshot map[strin
 			delta.By = call.Name
 		}
 
-		resp = append(resp, Entry{Kind: KindStateDelta, Delta: delta})
+		resp = append(resp, Entry{Kind: KindStateDelta, Delta: delta, At: time.Now().UTC()})
 	}
 
 	return resp, delta
@@ -574,4 +585,28 @@ func decodeOutput[Out any](text string) (Out, error) {
 		return output, fmt.Errorf("decode agent output as %T: %w", output, err)
 	}
 	return output, nil
+}
+
+// Logs returns a clone of the agent's session log entries.
+func (a *Agent) Logs() []Entry {
+	return cloneEntries(a.sessionLogs)
+}
+
+func (a *Agent) appendLogs(entries ...Entry) error {
+	now := time.Now().UTC()
+	for i := range entries {
+		if entries[i].Seq == 0 {
+			entries[i].Seq = uint64(len(a.sessionLogs) + 1)
+		}
+		if entries[i].At.IsZero() {
+			entries[i].At = now
+		}
+		a.sessionLogs = append(a.sessionLogs, entries[i])
+	}
+	if a.storer != nil && len(entries) > 0 {
+		if err := a.storer.Store(a, entries...); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -66,7 +67,9 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gemini client: %w", err)
 	}
+	start := time.Now()
 	response, err := client.Models.GenerateContent(ctx, a.Model, contents, config)
+	duration := time.Since(start)
 	if err != nil {
 		return nil, fmt.Errorf("gemini generate content: %w", err)
 	}
@@ -80,11 +83,15 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 	if candidate.Content == nil || len(candidate.Content.Parts) == 0 {
 		return nil, errors.New("gemini returned no content")
 	}
+	now := time.Now().UTC()
 	produced := make([]Entry, 0, len(candidate.Content.Parts))
 	for i, part := range candidate.Content.Parts {
 		entry, err := fromGeminiPart(part)
 		if err != nil {
 			return nil, err
+		}
+		if entry.At.IsZero() {
+			entry.At = now
 		}
 		// Gemini can omit call IDs. Keep a local reference without changing
 		// the original part replayed to the API.
@@ -100,10 +107,18 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 		}
 		produced[len(produced)-1].Opaque[geminiGroundingMetadataOpaqueKey] = raw
 	}
-	if usage := response.UsageMetadata; usage != nil {
-		produced[len(produced)-1].Usage = &Usage{
-			InputTokens:  int(usage.PromptTokenCount),
-			OutputTokens: int(usage.CandidatesTokenCount + usage.ThoughtsTokenCount),
+	if len(produced) > 0 {
+		produced[len(produced)-1].Duration = duration
+		if usage := response.UsageMetadata; usage != nil {
+			var cacheRead int
+			if usage.CachedContentTokenCount > 0 {
+				cacheRead = int(usage.CachedContentTokenCount)
+			}
+			produced[len(produced)-1].Usage = &Usage{
+				InputTokens:     int(usage.PromptTokenCount),
+				OutputTokens:    int(usage.CandidatesTokenCount + usage.ThoughtsTokenCount),
+				CacheReadTokens: cacheRead,
+			}
 		}
 	}
 	return produced, nil

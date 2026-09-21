@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -101,7 +102,9 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 	}
 
 	client := a.newOpenAIClient()
+	start := time.Now()
 	response, err := client.Responses.New(ctx, params)
+	duration := time.Since(start)
 	if err != nil {
 		return nil, fmt.Errorf("%s responses: %w", a.Provider, err)
 	}
@@ -125,21 +128,35 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 		return nil, fmt.Errorf("%s response did not complete: status %q, reason %q", a.Provider, response.Status, response.IncompleteDetails.Reason)
 	}
 
+	now := time.Now().UTC()
 	produced := make([]Entry, 0, len(response.Output))
 	for _, item := range response.Output {
 		entry, err := fromOpenAIResponseOutputItemUnion(item)
 		if err != nil {
 			return nil, err
 		}
+		if entry.At.IsZero() {
+			entry.At = now
+		}
 		produced = append(produced, entry)
 	}
 
-	// Usage is reported per response, so it hangs on the last thing the model
-	// produced rather than being spread over the entries.
+	// Usage and duration are reported per response, so they hang on the last thing
+	// the model produced rather than being spread over the entries.
 	if len(produced) > 0 {
+		var cacheRead, cacheWrite int
+		if response.Usage.InputTokensDetails.CachedTokens > 0 {
+			cacheRead = int(response.Usage.InputTokensDetails.CachedTokens)
+		}
+		if response.Usage.InputTokensDetails.CacheWriteTokens > 0 {
+			cacheWrite = int(response.Usage.InputTokensDetails.CacheWriteTokens)
+		}
+		produced[len(produced)-1].Duration = duration
 		produced[len(produced)-1].Usage = &Usage{
-			InputTokens:  int(response.Usage.InputTokens),
-			OutputTokens: int(response.Usage.OutputTokens),
+			InputTokens:      int(response.Usage.InputTokens),
+			OutputTokens:     int(response.Usage.OutputTokens),
+			CacheReadTokens:  cacheRead,
+			CacheWriteTokens: cacheWrite,
 		}
 	}
 

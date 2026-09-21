@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -78,9 +79,17 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 		}
 	}
 	client := a.newAnthropicClient()
+	start := time.Now()
+	now := time.Now().UTC()
 	// Bound server-side continuation independently of the agent's tool turns.
 	const maxContinuations = 10
-	var produced []Entry
+	var (
+		produced              []Entry
+		totalInputTokens      int
+		totalOutputTokens     int
+		totalCacheReadTokens  int
+		totalCacheWriteTokens int
+	)
 	for continuations := 0; ; continuations++ {
 		response, err := client.Messages.New(ctx, params)
 		if err != nil {
@@ -101,13 +110,26 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 			if err != nil {
 				return nil, err
 			}
+			if entry.At.IsZero() {
+				entry.At = now
+			}
 			produced = append(produced, entry)
 		}
-		produced[len(produced)-1].Usage = &Usage{
-			InputTokens:  int(response.Usage.InputTokens + response.Usage.CacheCreationInputTokens + response.Usage.CacheReadInputTokens),
-			OutputTokens: int(response.Usage.OutputTokens),
-		}
+		totalInputTokens += int(response.Usage.InputTokens)
+		totalOutputTokens += int(response.Usage.OutputTokens)
+		totalCacheReadTokens += int(response.Usage.CacheReadInputTokens)
+		totalCacheWriteTokens += int(response.Usage.CacheCreationInputTokens)
+
 		if response.StopReason != anthropic.StopReasonPauseTurn {
+			if len(produced) > 0 {
+				produced[len(produced)-1].Duration = time.Since(start)
+				produced[len(produced)-1].Usage = &Usage{
+					InputTokens:      totalInputTokens,
+					OutputTokens:     totalOutputTokens,
+					CacheReadTokens:  totalCacheReadTokens,
+					CacheWriteTokens: totalCacheWriteTokens,
+				}
+			}
 			return produced, nil
 		}
 		if continuations == maxContinuations {

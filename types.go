@@ -56,9 +56,10 @@ type ContentPart struct {
 }
 
 type Entry struct {
-	Seq  uint64    `json:"seq"`
-	At   time.Time `json:"at"`
-	Kind Kind      `json:"kind"`
+	Seq      uint64        `json:"seq"`
+	At       time.Time     `json:"at"`
+	Duration time.Duration `json:"duration,omitempty"`
+	Kind     Kind          `json:"kind"`
 
 	Content []ContentPart `json:"content,omitempty"` // portable user or assistant content
 
@@ -70,7 +71,7 @@ type Entry struct {
 	Approval   *Approval   `json:"approval,omitempty"`
 
 	Opaque map[string][]byte `json:"opaque,omitempty"` // provider adornments; dropped on provider switch
-	Usage  *Usage            `json:"usage,omitempty"`  // tokens, latency; never affects replay
+	Usage  *Usage            `json:"usage,omitempty"`  // tokens; never affects replay
 }
 
 func NewUserEntry(input any) (Entry, error) {
@@ -84,6 +85,7 @@ func NewUserEntry(input any) (Entry, error) {
 		return Entry{}, fmt.Errorf("unsupported user input type %T", input)
 	}
 	return Entry{
+		At:      time.Now().UTC(),
 		Kind:    KindUser,
 		Content: []ContentPart{{Kind: ContentKindText, Text: text}},
 	}, nil
@@ -145,7 +147,8 @@ type Compaction struct {
 }
 
 type Usage struct {
-	InputTokens  int           `json:"input_tokens"`
-	OutputTokens int           `json:"output_tokens"`
-	Latency      time.Duration `json:"latency"`
+	InputTokens      int `json:"input_tokens"`
+	OutputTokens     int `json:"output_tokens"`
+	CacheReadTokens  int `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
