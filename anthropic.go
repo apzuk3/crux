@@ -18,8 +18,8 @@ func (a *Agent) newAnthropicClient() *anthropic.Client {
 		opts = append(opts, option.WithAPIKey(a.apikey))
 	}
 
-	if a.baseURL != "" {
-		opts = append(opts, option.WithBaseURL(a.baseURL))
+	if a.BaseURL != "" {
+		opts = append(opts, option.WithBaseURL(a.BaseURL))
 	}
 
 	client := anthropic.NewClient(opts...)
@@ -33,20 +33,20 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 	if err != nil {
 		return nil, err
 	}
-	tools, err := anthropicTools(a.tools)
+	tools, err := anthropicTools(a.Tools)
 	if err != nil {
 		return nil, err
 	}
 	params := anthropic.MessageNewParams{
-		Model: a.model, Messages: messages, Tools: tools,
+		Model: a.Model, Messages: messages, Tools: tools,
 		MaxTokens: 12000,
 	}
-	if a.instructions != "" {
-		params.System = []anthropic.TextBlockParam{{Text: a.instructions}}
+	if a.Instructions != "" {
+		params.System = []anthropic.TextBlockParam{{Text: a.Instructions}}
 	}
-	if a.searchOptions != nil {
+	if a.SearchOptions != nil {
 		tool := &anthropic.WebSearchTool20250305Param{}
-		if location := a.searchOptions.UserLocation; location != nil {
+		if location := a.SearchOptions.UserLocation; location != nil {
 			if location.Country != "" {
 				tool.UserLocation.Country = anthropic.String(location.Country)
 			}
@@ -64,8 +64,8 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 			OfWebSearchTool20250305: tool,
 		})
 	}
-	if a.outputSchema != nil {
-		raw, err := json.Marshal(a.outputSchema)
+	if a.OutputSchema != nil {
+		raw, err := json.Marshal(a.OutputSchema)
 		if err != nil {
 			return nil, fmt.Errorf("marshal output schema: %w", err)
 		}

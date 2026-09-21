@@ -19,7 +19,7 @@ type stateContextKey struct{}
 // StateSnapshot must not run concurrently with writes to the agent's logs.
 func (a *Agent) StateSnapshot() map[string]any {
 	state := make(map[string]any)
-	for _, entry := range a.logs {
+	for _, entry := range a.sessionLogs {
 		if entry.Kind != KindStateDelta || entry.Delta == nil {
 			continue
 		}

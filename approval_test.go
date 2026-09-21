@@ -15,7 +15,7 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 	call3 := &ToolCall{ID: "call_3", Name: "delete_user", Args: json.RawMessage(`{"id": 42}`)}
 
 	agent := &Agent{
-		tools: []Tool{
+		Tools: []Tool{
 			{
 				name:           "get_weather",
 				approvalNeeded: false,
@@ -41,7 +41,7 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 				},
 			},
 		},
-		logs: []Entry{
+		sessionLogs: []Entry{
 			{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "start"}}},
 			{Kind: KindToolCall, ToolCall: call1},
 			{Kind: KindToolCall, ToolCall: call2},
@@ -73,7 +73,7 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 	}
 
 	// Verify approval entry is in logs and no execution occurred yet
-	lastEntry := agent.logs[len(agent.logs)-1]
+	lastEntry := agent.sessionLogs[len(agent.sessionLogs)-1]
 	if lastEntry.Kind != KindApproval || lastEntry.Approval == nil || !lastEntry.Approval.Approved {
 		t.Fatalf("expected KindApproval with Approved=true, got %+v", lastEntry)
 	}
@@ -101,7 +101,7 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 	}
 
 	// Verify rejection entry is in logs
-	lastEntry = agent.logs[len(agent.logs)-1]
+	lastEntry = agent.sessionLogs[len(agent.sessionLogs)-1]
 	if lastEntry.Kind != KindApproval || lastEntry.Approval == nil || lastEntry.Approval.Approved {
 		t.Fatalf("expected KindApproval with Approved=false, got %+v", lastEntry)
 	}
@@ -113,7 +113,7 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 
 	// 5. Execute unexecuted tool calls: should execute in model order: call1, call2, call3
 	toolResults := agent.executeUnexecutedToolCalls(ctx)
-	agent.logs = append(agent.logs, toolResults...)
+	agent.sessionLogs = append(agent.sessionLogs, toolResults...)
 
 	// Tool 1 and Tool 2 were executed, Tool 3 was rejected (invoke not called)
 	if len(executionOrder) != 2 || executionOrder[0] != "get_weather" || executionOrder[1] != "transfer_funds" {
@@ -122,7 +122,7 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 
 	// Check tool results in logs
 	var results []ToolResult
-	for _, e := range agent.logs {
+	for _, e := range agent.sessionLogs {
 		if e.Kind == KindToolResult && e.ToolResult != nil {
 			results = append(results, *e.ToolResult)
 		}
@@ -188,8 +188,8 @@ func TestProvidersIgnoreKindApproval(t *testing.T) {
 func TestForkRetainsKindApproval(t *testing.T) {
 	call := &ToolCall{ID: "call_1", Name: "op", Args: json.RawMessage(`{"k":"v"}`)}
 	agent := &Agent{
-		provider: ProviderOpenAI,
-		logs: []Entry{
+		Provider: ProviderOpenAI,
+		sessionLogs: []Entry{
 			{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}},
 			{Kind: KindToolCall, ToolCall: call},
 			{Kind: KindApproval, Approval: &Approval{CallID: "call_1", Approved: true}},
@@ -201,14 +201,14 @@ func TestForkRetainsKindApproval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("agent.Fork failed: %v", err)
 	}
-	if len(fork.logs) != 4 {
-		t.Fatalf("expected 4 logs in fork, got %d", len(fork.logs))
+	if len(fork.sessionLogs) != 4 {
+		t.Fatalf("expected 4 logs in fork, got %d", len(fork.sessionLogs))
 	}
-	if fork.logs[2].Kind != KindApproval {
-		t.Fatalf("expected entry 2 to be KindApproval, got %v", fork.logs[2].Kind)
+	if fork.sessionLogs[2].Kind != KindApproval {
+		t.Fatalf("expected entry 2 to be KindApproval, got %v", fork.sessionLogs[2].Kind)
 	}
-	if fork.logs[2].Approval == nil || fork.logs[2].Approval.CallID != "call_1" || !fork.logs[2].Approval.Approved {
-		t.Fatalf("unexpected Approval in forked approval entry: %+v", fork.logs[2].Approval)
+	if fork.sessionLogs[2].Approval == nil || fork.sessionLogs[2].Approval.CallID != "call_1" || !fork.sessionLogs[2].Approval.Approved {
+		t.Fatalf("unexpected Approval in forked approval entry: %+v", fork.sessionLogs[2].Approval)
 	}
 }
 
@@ -218,8 +218,8 @@ func TestApproveRejectHonorContextCancellation(t *testing.T) {
 
 	call := &ToolCall{ID: "call_1", Name: "action", Args: json.RawMessage(`{}`)}
 	agent := &Agent{
-		tools: []Tool{{name: "action", approvalNeeded: true}},
-		logs: []Entry{
+		Tools: []Tool{{name: "action", approvalNeeded: true}},
+		sessionLogs: []Entry{
 			{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}},
 			{Kind: KindToolCall, ToolCall: call},
 		},
@@ -236,7 +236,7 @@ func TestApproveRejectHonorContextCancellation(t *testing.T) {
 
 func TestResumeIdempotentWhenAlreadyCompleted(t *testing.T) {
 	agent := &Agent{
-		logs: []Entry{
+		sessionLogs: []Entry{
 			{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hello"}}},
 			{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: "world"}}},
 		},

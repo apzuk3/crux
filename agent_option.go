@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 
+	"github.com/google/uuid"
 	"github.com/invopop/jsonschema"
 )
 
@@ -23,10 +24,10 @@ func WithTools(tools []string) AgentOption {
 			return err
 		}
 
-		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
+		a.Tools = slices.DeleteFunc(a.Tools, func(t Tool) bool {
 			return t.kind == ToolKindTool
 		})
-		a.tools = append(a.tools, selected...)
+		a.Tools = append(a.Tools, selected...)
 
 		return nil
 	}
@@ -35,7 +36,7 @@ func WithTools(tools []string) AgentOption {
 // WithoutTools removes all registry tools, preserving subagents.
 func WithoutTools() AgentOption {
 	return func(a *Agent) error {
-		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
+		a.Tools = slices.DeleteFunc(a.Tools, func(t Tool) bool {
 			return t.kind == ToolKindTool
 		})
 		return nil
@@ -45,7 +46,7 @@ func WithoutTools() AgentOption {
 // WithoutSubagents removes all subagents, preserving registry tools.
 func WithoutSubagents() AgentOption {
 	return func(a *Agent) error {
-		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
+		a.Tools = slices.DeleteFunc(a.Tools, func(t Tool) bool {
 			return t.kind == ToolKindSubagent
 		})
 		return nil
@@ -60,17 +61,21 @@ func WithToolsRegistry(tools []string, registry ToolsRegistry) AgentOption {
 			return err
 		}
 
-		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
+		a.Tools = slices.DeleteFunc(a.Tools, func(t Tool) bool {
 			return t.kind == ToolKindTool
 		})
-		a.tools = append(a.tools, selected...)
+		a.Tools = append(a.Tools, selected...)
 
 		return nil
 	}
 }
 
+func WithSessionID(sessionID uuid.UUID) AgentOption {
+	return func(a *Agent) error { a.SessionID = sessionID; return nil }
+}
+
 func WithInstructions(instructions string) AgentOption {
-	return func(a *Agent) error { a.instructions = instructions; return nil }
+	return func(a *Agent) error { a.Instructions = instructions; return nil }
 }
 
 // WithUserLocation supplies geographic context using the fields supported by
@@ -100,28 +105,28 @@ func WithWebSearch(opts ...SearchOption) AgentOption {
 		for _, opt := range opts {
 			opt(search)
 		}
-		a.searchOptions = search
+		a.SearchOptions = search
 
 		return nil
 	}
 }
 
 func WithProvider(provider Provider) AgentOption {
-	return func(a *Agent) error { a.provider = provider; return nil }
+	return func(a *Agent) error { a.Provider = provider; return nil }
 }
 
 // WithModel changes the model. When forking across providers, also set
 // WithProvider and the destination's connection settings.
 func WithModel(model string) AgentOption {
-	return func(a *Agent) error { a.model = model; return nil }
+	return func(a *Agent) error { a.Model = model; return nil }
 }
 
 func WithMaxTurns(turns int32) AgentOption {
-	return func(a *Agent) error { a.maxTurns = turns; return nil }
+	return func(a *Agent) error { a.MaxTurns = turns; return nil }
 }
 
 func WithBaseURL(url string) AgentOption {
-	return func(a *Agent) error { a.baseURL = url; return nil }
+	return func(a *Agent) error { a.BaseURL = url; return nil }
 }
 
 func WithAPIKey(apikey string) AgentOption {
@@ -139,7 +144,7 @@ func WithAPIKey(apikey string) AgentOption {
 // Local Ollama support is verified in v0.34.0. Ollama Cloud does not currently
 // support structured outputs.
 func WithOutputSchema(schema *jsonschema.Schema) AgentOption {
-	return func(a *Agent) error { a.outputSchema = schema; return nil }
+	return func(a *Agent) error { a.OutputSchema = schema; return nil }
 }
 
 // WithOutputSchemaFrom reflects T into a response schema, or disables structured
@@ -150,9 +155,9 @@ func WithOutputSchemaFrom[T any]() AgentOption {
 		var zero T
 		switch any(&zero).(type) {
 		case *string, *any:
-			a.outputSchema = nil
+			a.OutputSchema = nil
 		default:
-			a.outputSchema = jsonschema.ReflectFromType(reflect.TypeFor[T]())
+			a.OutputSchema = jsonschema.ReflectFromType(reflect.TypeFor[T]())
 		}
 
 		return nil
@@ -165,19 +170,19 @@ func WithOutputSchemaFrom[T any]() AgentOption {
 func WithSubAgent(subAgent *Agent, description string) AgentOption {
 	return func(parent *Agent) error {
 		schema := map[string]any{"type": "object", "properties": map[string]any{}}
-		if subAgent.outputSchema != nil {
+		if subAgent.OutputSchema != nil {
 			schema = nil
-			raw, err := json.Marshal(subAgent.outputSchema)
+			raw, err := json.Marshal(subAgent.OutputSchema)
 			if err != nil {
-				panic(fmt.Errorf("encode schema for subagent %q: %w", subAgent.name, err))
+				panic(fmt.Errorf("encode schema for subagent %q: %w", subAgent.Name, err))
 			}
 			if err := json.Unmarshal(raw, &schema); err != nil {
-				panic(fmt.Errorf("decode schema for subagent %q: %w", subAgent.name, err))
+				panic(fmt.Errorf("decode schema for subagent %q: %w", subAgent.Name, err))
 			}
 		}
 
 		tool := Tool{
-			name:        "agent_" + subAgent.name,
+			name:        "agent_" + subAgent.Name,
 			description: description,
 			schema:      schema,
 			kind:        ToolKindSubagent,
@@ -187,12 +192,19 @@ func WithSubAgent(subAgent *Agent, description string) AgentOption {
 					return "", nil, err
 				}
 
-				return output, &StateDelta{Set: map[string]any{subAgent.name: output}}, nil
+				return output, &StateDelta{Set: map[string]any{subAgent.Name: output}}, nil
 			},
 		}
 
-		parent.tools = append(parent.tools, tool)
+		parent.Tools = append(parent.Tools, tool)
 
+		return nil
+	}
+}
+
+func WithSessionStorer(storer Storer) AgentOption {
+	return func(a *Agent) error {
+		a.storer = storer
 		return nil
 	}
 }

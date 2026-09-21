@@ -56,10 +56,9 @@ type ContentPart struct {
 }
 
 type Entry struct {
-	Seq   uint64    `json:"seq"`
-	At    time.Time `json:"at"`
-	Kind  Kind      `json:"kind"`
-	Agent string    `json:"agent"` // which agent produced it
+	Seq  uint64    `json:"seq"`
+	At   time.Time `json:"at"`
+	Kind Kind      `json:"kind"`
 
 	Content []ContentPart `json:"content,omitempty"` // portable user or assistant content
 

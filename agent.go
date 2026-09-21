@@ -9,25 +9,36 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/invopop/jsonschema"
 )
 
+type Storer interface {
+	Store(agent *Agent, log ...Entry) error
+}
+
 type Agent struct {
-	name         string
-	maxTurns     int32
-	instructions string
+	SessionID uuid.UUID
 
-	provider     Provider
-	model        string
-	baseURL      string
-	apikey       string
-	outputSchema *jsonschema.Schema
+	// agent properties
+	Name         string
+	MaxTurns     int32
+	Instructions string
 
-	searchOptions *SearchOptions // nil disables web search
+	Provider      Provider
+	Model         string
+	BaseURL       string
+	OutputSchema  *jsonschema.Schema
+	SearchOptions *SearchOptions // nil disables web search
+	Tools         []Tool
 
-	tools []Tool
+	// API key for the provider MUST be provided or discovered from the environment and never be stored
+	// through the storer interface. When the callers resotres the session, they have to provide the
+	// key again or make sure it is available in the environment.
+	apikey string
 
-	logs []Entry
+	sessionLogs []Entry
+	storer      Storer
 }
 
 // SearchOptions configures provider-executed web search.
@@ -39,10 +50,11 @@ type SearchOption func(*SearchOptions)
 
 func NewAgent(name, model string, opts ...AgentOption) (*Agent, error) {
 	agent := &Agent{
-		name:     name,
-		model:    model,
-		maxTurns: 10,
-		tools:    make([]Tool, 0),
+		SessionID: uuid.New(),
+		Name:      name,
+		Model:     model,
+		MaxTurns:  10,
+		Tools:     make([]Tool, 0),
 	}
 	for _, opt := range opts {
 		if err := opt(agent); err != nil {
@@ -50,32 +62,32 @@ func NewAgent(name, model string, opts ...AgentOption) (*Agent, error) {
 		}
 	}
 
-	if agent.provider == "" {
-		agent.provider = inferProvider(agent.model)
+	if agent.Provider == "" {
+		agent.Provider = inferProvider(agent.Model)
 	}
 
-	if agent.provider == "" {
-		return nil, fmt.Errorf("cannot infer provider from model %q, please pass through crux.WithProvider", agent.model)
+	if agent.Provider == "" {
+		return nil, fmt.Errorf("cannot infer provider from model %q, please pass through crux.WithProvider", agent.Model)
 	}
 
 	if agent.apikey == "" {
-		agent.apikey = discoverAPIKey(agent.provider)
+		agent.apikey = discoverAPIKey(agent.Provider)
 	}
 
-	if agent.baseURL == "" {
-		switch agent.provider {
+	if agent.BaseURL == "" {
+		switch agent.Provider {
 		case ProviderOpenrouter:
-			agent.baseURL = "https://openrouter.ai/api/v1"
+			agent.BaseURL = "https://openrouter.ai/api/v1"
 		case ProviderXAI:
-			agent.baseURL = "https://api.x.ai/v1"
+			agent.BaseURL = "https://api.x.ai/v1"
 		case ProviderDeepSeek:
-			agent.baseURL = "https://api.deepseek.com"
+			agent.BaseURL = "https://api.deepseek.com"
 		case ProviderOllama:
-			agent.baseURL = "http://localhost:11434/v1"
+			agent.BaseURL = "http://localhost:11434/v1"
 		}
 	}
 
-	if agent.provider == ProviderOllama && agent.apikey == "" {
+	if agent.Provider == ProviderOllama && agent.apikey == "" {
 		agent.apikey = "ollama" // Local Ollama ignores authentication.
 	}
 
@@ -102,7 +114,7 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 		return "", ErrApprovalNeeded
 	}
 
-	if input == nil && len(a.logs) == 0 {
+	if input == nil && len(a.sessionLogs) == 0 {
 		return "", errors.New("cannot run agent with no input and empty history")
 	}
 
@@ -127,16 +139,16 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 			return "", errors.New("user input produced empty text")
 		}
 
-		a.logs = append(a.logs, entry)
+		a.sessionLogs = append(a.sessionLogs, entry)
 	}
 
 	// ---> Notify start
-	for range a.maxTurns {
+	for range a.MaxTurns {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
 
-		a.logs = append(a.logs, a.executeUnexecutedToolCalls(ctx)...)
+		a.sessionLogs = append(a.sessionLogs, a.executeUnexecutedToolCalls(ctx)...)
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -146,48 +158,48 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 			err      error
 		)
 
-		switch a.provider {
+		switch a.Provider {
 		case ProviderAnthropic:
-			produced, err = a.anthropicStep(ctx, a.logs)
+			produced, err = a.anthropicStep(ctx, a.sessionLogs)
 			if err != nil {
 				return "", err
 			}
 		case ProviderOpenAI:
-			produced, err = a.openAIstep(ctx, a.logs)
+			produced, err = a.openAIstep(ctx, a.sessionLogs)
 			if err != nil {
 				return "", err
 			}
 		case ProviderOpenrouter:
-			produced, err = a.openrouterStep(ctx, a.logs)
+			produced, err = a.openrouterStep(ctx, a.sessionLogs)
 			if err != nil {
 				return "", err
 			}
 		case ProviderGoogle:
-			produced, err = a.geminiStep(ctx, a.logs)
+			produced, err = a.geminiStep(ctx, a.sessionLogs)
 			if err != nil {
 				return "", err
 			}
 		case ProviderXAI:
-			produced, err = a.xaiStep(ctx, a.logs)
+			produced, err = a.xaiStep(ctx, a.sessionLogs)
 			if err != nil {
 				return "", err
 			}
 		case ProviderDeepSeek:
-			produced, err = a.deepseekStep(ctx, a.logs)
+			produced, err = a.deepseekStep(ctx, a.sessionLogs)
 			if err != nil {
 				return "", err
 			}
 		case ProviderOllama:
-			produced, err = a.ollamaStep(ctx, a.logs)
+			produced, err = a.ollamaStep(ctx, a.sessionLogs)
 			if err != nil {
 				return "", err
 			}
 		default:
-			return "", fmt.Errorf("unsupported provider %q", a.provider)
+			return "", fmt.Errorf("unsupported provider %q", a.Provider)
 		}
 
 		// Retain all model entries in history before dispatching local tools.
-		a.logs = append(a.logs, produced...)
+		a.sessionLogs = append(a.sessionLogs, produced...)
 
 		if len(a.PendingApprovals()) > 0 {
 			return "", ErrApprovalNeeded
@@ -213,14 +225,14 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 // FinalOutput returns the final assistant text if the latest turn completed
 // without requesting further tools, along with a boolean indicating completion.
 func (a *Agent) FinalOutput() (string, bool) {
-	if len(a.logs) == 0 || len(a.PendingApprovals()) > 0 || a.hasUnexecutedToolCalls() {
+	if len(a.sessionLogs) == 0 || len(a.PendingApprovals()) > 0 || a.hasUnexecutedToolCalls() {
 		return "", false
 	}
 
-	start := len(a.logs)
-	for i := len(a.logs) - 1; i >= 0; i-- {
-		kind := a.logs[i].Kind
-		if kind == KindUser || kind == KindToolResult || a.logs[i].HiddenFromModel() {
+	start := len(a.sessionLogs)
+	for i, v := range slices.Backward(a.sessionLogs) {
+		kind := v.Kind
+		if kind == KindUser || kind == KindToolResult || v.HiddenFromModel() {
 			start = i + 1
 			break
 		}
@@ -229,11 +241,11 @@ func (a *Agent) FinalOutput() (string, bool) {
 		}
 	}
 
-	if start >= len(a.logs) {
+	if start >= len(a.sessionLogs) {
 		return "", false
 	}
 
-	latestTurn := a.logs[start:]
+	latestTurn := a.sessionLogs[start:]
 	if _, refused := latestRefusal(latestTurn); refused {
 		return "", false
 	}
@@ -273,21 +285,21 @@ func (a *Agent) Resume(ctx context.Context) (string, error) {
 }
 
 func (a *Agent) toolRequiresApproval(name string) bool {
-	index := slices.IndexFunc(a.tools, func(tool Tool) bool { return tool.name == name })
+	index := slices.IndexFunc(a.Tools, func(tool Tool) bool { return tool.name == name })
 	if index < 0 {
 		return false
 	}
-	return a.tools[index].approvalNeeded
+	return a.Tools[index].approvalNeeded
 }
 
 func (a *Agent) hasUnexecutedToolCalls() bool {
 	resolved := make(map[string]bool)
-	for _, entry := range a.logs {
+	for _, entry := range a.sessionLogs {
 		if entry.Kind == KindToolResult && entry.ToolResult != nil && entry.ToolResult.CallID != "" {
 			resolved[entry.ToolResult.CallID] = true
 		}
 	}
-	for _, entry := range a.logs {
+	for _, entry := range a.sessionLogs {
 		if entry.Kind == KindToolCall && entry.ToolCall != nil && entry.ToolCall.ID != "" {
 			if !resolved[entry.ToolCall.ID] {
 				return true
@@ -304,7 +316,7 @@ func (a *Agent) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 
 	resolved := make(map[string]bool)
 	decisions := make(map[string]*Approval)
-	for _, entry := range a.logs {
+	for _, entry := range a.sessionLogs {
 		if entry.Kind == KindToolResult && entry.ToolResult != nil && entry.ToolResult.CallID != "" {
 			resolved[entry.ToolResult.CallID] = true
 		}
@@ -315,7 +327,7 @@ func (a *Agent) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 
 	var unexecuted []*ToolCall
 	seen := make(map[string]bool)
-	for _, entry := range a.logs {
+	for _, entry := range a.sessionLogs {
 		if entry.Kind == KindToolCall && entry.ToolCall != nil && entry.ToolCall.ID != "" {
 			id := entry.ToolCall.ID
 			if !resolved[id] && !seen[id] {
@@ -369,7 +381,7 @@ func (a *Agent) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 func (a *Agent) PendingApprovals() []*ToolCall {
 	resolved := make(map[string]bool)
 	decisions := make(map[string]bool)
-	for _, entry := range a.logs {
+	for _, entry := range a.sessionLogs {
 		if entry.Kind == KindToolResult && entry.ToolResult != nil && entry.ToolResult.CallID != "" {
 			resolved[entry.ToolResult.CallID] = true
 		}
@@ -380,7 +392,7 @@ func (a *Agent) PendingApprovals() []*ToolCall {
 
 	var pending []*ToolCall
 	seen := make(map[string]bool)
-	for _, entry := range a.logs {
+	for _, entry := range a.sessionLogs {
 		if entry.Kind == KindToolCall && entry.ToolCall != nil && entry.ToolCall.ID != "" {
 			id := entry.ToolCall.ID
 			if !resolved[id] && !decisions[id] && !seen[id] && a.toolRequiresApproval(entry.ToolCall.Name) {
@@ -409,7 +421,7 @@ func (a *Agent) Approve(ctx context.Context, callID string) error {
 		return fmt.Errorf("tool call %q is not pending approval", callID)
 	}
 
-	a.logs = append(a.logs, Entry{
+	a.sessionLogs = append(a.sessionLogs, Entry{
 		Kind: KindApproval,
 		Approval: &Approval{
 			CallID:   callID,
@@ -440,7 +452,7 @@ func (a *Agent) Reject(ctx context.Context, callID string, reason string) error 
 		reason = "tool execution declined by user"
 	}
 
-	a.logs = append(a.logs, Entry{
+	a.sessionLogs = append(a.sessionLogs, Entry{
 		Kind: KindApproval,
 		Approval: &Approval{
 			CallID:   callID,
@@ -483,13 +495,13 @@ func (a *Agent) dispatch(ctx context.Context, call *ToolCall, snapshot map[strin
 	}
 
 	result := ToolResult{CallID: call.ID}
-	index := slices.IndexFunc(a.tools, func(tool Tool) bool { return tool.name == call.Name })
+	index := slices.IndexFunc(a.Tools, func(tool Tool) bool { return tool.name == call.Name })
 	if index < 0 {
 		result.Error = fmt.Sprintf("tool %q is not allowed", call.Name)
 		return []Entry{{Kind: KindToolResult, ToolResult: &result}}, nil
 	}
 
-	tool := a.tools[index]
+	tool := a.Tools[index]
 
 	output, delta, err := tool.invoke(ContextWithState(ctx, snapshot), call.Args)
 	if err != nil {
@@ -521,10 +533,6 @@ func finalText(entries []Entry) string {
 		}
 	}
 	return text.String()
-}
-
-func (a *Agent) OutputSchema() *jsonschema.Schema {
-	return a.outputSchema
 }
 
 // decodeOutput renders the model's final text as Out. Anything that is not

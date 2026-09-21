@@ -21,10 +21,10 @@ func (a *Agent) newOpenAIClient() *openai.Client {
 	if a.apikey != "" {
 		opts = append(opts, option.WithAPIKey(a.apikey))
 	}
-	if a.baseURL != "" {
-		opts = append(opts, option.WithBaseURL(a.baseURL))
+	if a.BaseURL != "" {
+		opts = append(opts, option.WithBaseURL(a.BaseURL))
 	}
-	if a.provider != ProviderOpenAI {
+	if a.Provider != ProviderOpenAI {
 		// Construct the Responses service directly to avoid inheriting OpenAI
 		// credentials, organization, project, or custom headers from the environment.
 		opts = append(opts, option.WithHTTPClient(http.DefaultClient))
@@ -43,23 +43,23 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 	}
 
 	params := responses.ResponseNewParams{
-		Model: openai.ResponsesModel(a.model),
+		Model: openai.ResponsesModel(a.Model),
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: input},
-		Tools: openAITools(a.tools),
+		Tools: openAITools(a.Tools),
 		Store: openai.Bool(false),
 	}
 
-	switch a.provider {
+	switch a.Provider {
 	case ProviderOpenAI, ProviderOpenrouter, ProviderXAI:
 		// Nothing is kept server side, so reasoning travels with the log.
 		params.Include = []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent}
 	}
-	if a.instructions != "" {
-		params.Instructions = openai.String(a.instructions)
+	if a.Instructions != "" {
+		params.Instructions = openai.String(a.Instructions)
 	}
-	if a.searchOptions != nil {
+	if a.SearchOptions != nil {
 		tool := responses.ToolParamOfWebSearch(responses.WebSearchToolTypeWebSearch)
-		if location := a.searchOptions.UserLocation; location != nil && a.provider == ProviderOpenAI {
+		if location := a.SearchOptions.UserLocation; location != nil && a.Provider == ProviderOpenAI {
 			if location.Country != "" {
 				tool.OfWebSearch.UserLocation.Country = openai.String(location.Country)
 			}
@@ -78,8 +78,8 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 		}
 		params.Tools = append(params.Tools, tool)
 	}
-	if a.outputSchema != nil {
-		raw, err := json.Marshal(a.outputSchema)
+	if a.OutputSchema != nil {
+		raw, err := json.Marshal(a.OutputSchema)
 		if err != nil {
 			return nil, fmt.Errorf("marshal output schema: %w", err)
 		}
@@ -103,7 +103,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 	client := a.newOpenAIClient()
 	response, err := client.Responses.New(ctx, params)
 	if err != nil {
-		return nil, fmt.Errorf("%s responses: %w", a.provider, err)
+		return nil, fmt.Errorf("%s responses: %w", a.Provider, err)
 	}
 	// Scan all messages before converting items or executing any local tools.
 	for _, item := range response.Output {
@@ -111,18 +111,18 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 			for _, part := range message.Content {
 				if refusal, ok := part.AsAny().(responses.ResponseOutputRefusal); ok {
 					if refusal.Refusal != "" {
-						return nil, fmt.Errorf("%s refused the request: %s", a.provider, refusal.Refusal)
+						return nil, fmt.Errorf("%s refused the request: %s", a.Provider, refusal.Refusal)
 					}
-					return nil, fmt.Errorf("%s refused the request", a.provider)
+					return nil, fmt.Errorf("%s refused the request", a.Provider)
 				}
 			}
 		}
 	}
 	if response.Error.Code != "" || response.Status == responses.ResponseStatusFailed {
-		return nil, fmt.Errorf("%s response failed: %s: %s", a.provider, response.Error.Code, response.Error.Message)
+		return nil, fmt.Errorf("%s response failed: %s: %s", a.Provider, response.Error.Code, response.Error.Message)
 	}
 	if response.Status != responses.ResponseStatusCompleted {
-		return nil, fmt.Errorf("%s response did not complete: status %q, reason %q", a.provider, response.Status, response.IncompleteDetails.Reason)
+		return nil, fmt.Errorf("%s response did not complete: status %q, reason %q", a.Provider, response.Status, response.IncompleteDetails.Reason)
 	}
 
 	produced := make([]Entry, 0, len(response.Output))

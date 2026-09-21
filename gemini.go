@@ -19,8 +19,8 @@ func (a *Agent) newGeminiClient(ctx context.Context) (*genai.Client, error) {
 	if a.apikey != "" {
 		config.APIKey = a.apikey
 	}
-	if a.baseURL != "" {
-		config.HTTPOptions.BaseURL = a.baseURL
+	if a.BaseURL != "" {
+		config.HTTPOptions.BaseURL = a.BaseURL
 	}
 	return genai.NewClient(ctx, config)
 }
@@ -31,14 +31,14 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	tools, err := geminiTools(a.tools)
+	tools, err := geminiTools(a.Tools)
 	if err != nil {
 		return nil, err
 	}
 	config := &genai.GenerateContentConfig{Tools: tools}
-	if a.searchOptions != nil {
+	if a.SearchOptions != nil {
 		config.Tools = append(config.Tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
-		if location := a.searchOptions.UserLocation; location != nil && location.Latitude != nil && location.Longitude != nil {
+		if location := a.SearchOptions.UserLocation; location != nil && location.Latitude != nil && location.Longitude != nil {
 			config.ToolConfig = &genai.ToolConfig{
 				RetrievalConfig: &genai.RetrievalConfig{
 					LatLng: &genai.LatLng{Latitude: location.Latitude, Longitude: location.Longitude},
@@ -46,11 +46,11 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 			}
 		}
 	}
-	if a.instructions != "" {
-		config.SystemInstruction = &genai.Content{Parts: []*genai.Part{genai.NewPartFromText(a.instructions)}}
+	if a.Instructions != "" {
+		config.SystemInstruction = &genai.Content{Parts: []*genai.Part{genai.NewPartFromText(a.Instructions)}}
 	}
-	if a.outputSchema != nil {
-		raw, err := json.Marshal(a.outputSchema)
+	if a.OutputSchema != nil {
+		raw, err := json.Marshal(a.OutputSchema)
 		if err != nil {
 			return nil, fmt.Errorf("marshal output schema: %w", err)
 		}
@@ -66,7 +66,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gemini client: %w", err)
 	}
-	response, err := client.Models.GenerateContent(ctx, a.model, contents, config)
+	response, err := client.Models.GenerateContent(ctx, a.Model, contents, config)
 	if err != nil {
 		return nil, fmt.Errorf("gemini generate content: %w", err)
 	}
