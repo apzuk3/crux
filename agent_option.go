@@ -201,10 +201,3 @@ func WithSubAgent(subAgent *Agent, description string) AgentOption {
 		return nil
 	}
 }
-
-func WithSessionStorer(storer Storer) AgentOption {
-	return func(a *Agent) error {
-		a.storer = storer
-		return nil
-	}
-}

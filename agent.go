@@ -14,10 +14,6 @@ import (
 	"github.com/invopop/jsonschema"
 )
 
-type Storer interface {
-	Store(agent *Agent, log ...Entry) error
-}
-
 type Agent struct {
 	SessionID uuid.UUID
 
@@ -33,13 +29,10 @@ type Agent struct {
 	SearchOptions *SearchOptions // nil disables web search
 	Tools         []Tool
 
-	// API key for the provider MUST be provided or discovered from the environment and never be stored
-	// through the storer interface. When the callers resotres the session, they have to provide the
-	// key again or make sure it is available in the environment.
+	// API key for the provider MUST be provided or discovered from the environment.
 	apikey string
 
 	sessionLogs []Entry
-	storer      Storer
 }
 
 // SearchOptions configures provider-executed web search.
@@ -140,9 +133,7 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 			return "", errors.New("user input produced empty text")
 		}
 
-		if err := a.appendLogs(entry); err != nil {
-			return "", err
-		}
+		a.appendLogs(entry)
 	}
 
 	// ---> Notify start
@@ -152,64 +143,24 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 		}
 
 		if toolResults := a.executeUnexecutedToolCalls(ctx); len(toolResults) > 0 {
-			if err := a.appendLogs(toolResults...); err != nil {
-				return "", err
-			}
+			a.appendLogs(toolResults...)
 		}
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
 
-		var (
-			produced []Entry
-			err      error
-		)
-
-		switch a.Provider {
-		case ProviderAnthropic:
-			produced, err = a.anthropicStep(ctx, a.sessionLogs)
-			if err != nil {
-				return "", err
-			}
-		case ProviderOpenAI:
-			produced, err = a.openAIstep(ctx, a.sessionLogs)
-			if err != nil {
-				return "", err
-			}
-		case ProviderOpenrouter:
-			produced, err = a.openrouterStep(ctx, a.sessionLogs)
-			if err != nil {
-				return "", err
-			}
-		case ProviderGoogle:
-			produced, err = a.geminiStep(ctx, a.sessionLogs)
-			if err != nil {
-				return "", err
-			}
-		case ProviderXAI:
-			produced, err = a.xaiStep(ctx, a.sessionLogs)
-			if err != nil {
-				return "", err
-			}
-		case ProviderDeepSeek:
-			produced, err = a.deepseekStep(ctx, a.sessionLogs)
-			if err != nil {
-				return "", err
-			}
-		case ProviderOllama:
-			produced, err = a.ollamaStep(ctx, a.sessionLogs)
-			if err != nil {
-				return "", err
-			}
-		default:
-			return "", fmt.Errorf("unsupported provider %q", a.Provider)
+		start := time.Now()
+		produced, err := a.step(ctx, a.sessionLogs)
+		if err != nil {
+			return "", err
+		}
+		if len(produced) > 0 {
+			produced[len(produced)-1].Duration = time.Since(start)
 		}
 
 		// Retain all model entries in history before dispatching local tools.
 		if len(produced) > 0 {
-			if err := a.appendLogs(produced...); err != nil {
-				return "", err
-			}
+			a.appendLogs(produced...)
 		}
 
 		if len(a.PendingApprovals()) > 0 {
@@ -231,6 +182,27 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 	}
 
 	return "", errors.New("max turns reached")
+}
+
+func (a *Agent) step(ctx context.Context, log []Entry) ([]Entry, error) {
+	switch a.Provider {
+	case ProviderAnthropic:
+		return a.anthropicStep(ctx, log)
+	case ProviderOpenAI:
+		return a.openAIstep(ctx, log)
+	case ProviderOpenrouter:
+		return a.openrouterStep(ctx, log)
+	case ProviderGoogle:
+		return a.geminiStep(ctx, log)
+	case ProviderXAI:
+		return a.xaiStep(ctx, log)
+	case ProviderDeepSeek:
+		return a.deepseekStep(ctx, log)
+	case ProviderOllama:
+		return a.ollamaStep(ctx, log)
+	default:
+		return nil, fmt.Errorf("unsupported provider %q", a.Provider)
+	}
 }
 
 // FinalOutput returns the final assistant text if the latest turn completed
@@ -432,13 +404,14 @@ func (a *Agent) Approve(ctx context.Context, callID string) error {
 		return fmt.Errorf("tool call %q is not pending approval", callID)
 	}
 
-	return a.appendLogs(Entry{
+	a.appendLogs(Entry{
 		Kind: KindApproval,
 		Approval: &Approval{
 			CallID:   callID,
 			Approved: true,
 		},
 	})
+	return nil
 }
 
 func (a *Agent) Reject(ctx context.Context, callID string, reason string) error {
@@ -462,7 +435,7 @@ func (a *Agent) Reject(ctx context.Context, callID string, reason string) error 
 		reason = "tool execution declined by user"
 	}
 
-	return a.appendLogs(Entry{
+	a.appendLogs(Entry{
 		Kind: KindApproval,
 		Approval: &Approval{
 			CallID:   callID,
@@ -470,6 +443,7 @@ func (a *Agent) Reject(ctx context.Context, callID string, reason string) error 
 			Reason:   reason,
 		},
 	})
+	return nil
 }
 
 // Run executes the agent and decodes its final text response into Out. Anything
@@ -592,7 +566,7 @@ func (a *Agent) Logs() []Entry {
 	return cloneEntries(a.sessionLogs)
 }
 
-func (a *Agent) appendLogs(entries ...Entry) error {
+func (a *Agent) appendLogs(entries ...Entry) {
 	now := time.Now().UTC()
 	for i := range entries {
 		if entries[i].Seq == 0 {
@@ -603,10 +577,4 @@ func (a *Agent) appendLogs(entries ...Entry) error {
 		}
 		a.sessionLogs = append(a.sessionLogs, entries[i])
 	}
-	if a.storer != nil && len(entries) > 0 {
-		if err := a.storer.Store(a, entries...); err != nil {
-			return err
-		}
-	}
-	return nil
 }

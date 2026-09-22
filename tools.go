@@ -94,8 +94,8 @@ func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, 
 }
 
 // selected returns registered tools in the order of the given names.
-// Unknown names are skipped and repeated names are included only once.
-// The returned slice is non-nil even when no tools are selected.
+// Repeated names are included only once. If any name is not registered,
+// selected returns an error wrapping ErrToolNotFound with the missing tool name.
 func (r *ToolsRegistry) selected(names []string) ([]Tool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -109,7 +109,7 @@ func (r *ToolsRegistry) selected(names []string) ([]Tool, error) {
 		seen[name] = true
 		tool, ok := r.tools[name]
 		if !ok {
-			return nil, ErrToolNotFound
+			return nil, fmt.Errorf("%w: %q", ErrToolNotFound, name)
 		}
 		tools = append(tools, tool)
 	}

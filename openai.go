@@ -102,9 +102,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 	}
 
 	client := a.newOpenAIClient()
-	start := time.Now()
 	response, err := client.Responses.New(ctx, params)
-	duration := time.Since(start)
 	if err != nil {
 		return nil, fmt.Errorf("%s responses: %w", a.Provider, err)
 	}
@@ -141,8 +139,8 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 		produced = append(produced, entry)
 	}
 
-	// Usage and duration are reported per response, so they hang on the last thing
-	// the model produced rather than being spread over the entries.
+	// Usage is reported per response, so it hangs on the last thing the model
+	// produced rather than being spread over the entries.
 	if len(produced) > 0 {
 		var cacheRead, cacheWrite int
 		if response.Usage.InputTokensDetails.CachedTokens > 0 {
@@ -151,7 +149,6 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 		if response.Usage.InputTokensDetails.CacheWriteTokens > 0 {
 			cacheWrite = int(response.Usage.InputTokensDetails.CacheWriteTokens)
 		}
-		produced[len(produced)-1].Duration = duration
 		produced[len(produced)-1].Usage = &Usage{
 			InputTokens:      int(response.Usage.InputTokens),
 			OutputTokens:     int(response.Usage.OutputTokens),

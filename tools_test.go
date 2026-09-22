@@ -3,6 +3,7 @@ package crux
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +32,9 @@ func TestToolsRegistrySelected(t *testing.T) {
 			if tt.expectErr != nil {
 				if !errors.Is(err, tt.expectErr) {
 					t.Fatalf("selected error = %v, want %v", err, tt.expectErr)
+				}
+				if !strings.Contains(err.Error(), "missing") {
+					t.Fatalf("selected error %q does not contain missing tool name", err)
 				}
 				return
 			}

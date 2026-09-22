@@ -13,9 +13,7 @@ func TestAppendLogsPopulatesSeqAndAt(t *testing.T) {
 	e1 := Entry{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}}
 	e2 := Entry{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: "hello"}}}
 
-	if err := agent.appendLogs(e1, e2); err != nil {
-		t.Fatalf("appendLogs failed: %v", err)
-	}
+	agent.appendLogs(e1, e2)
 
 	logs := agent.Logs()
 	if len(logs) != 2 {
@@ -38,9 +36,7 @@ func TestAppendLogsPopulatesSeqAndAt(t *testing.T) {
 
 	// Appending more should continue the sequence
 	e3 := Entry{Kind: KindToolCall, ToolCall: &ToolCall{ID: "c1", Name: "t1"}}
-	if err := agent.appendLogs(e3); err != nil {
-		t.Fatalf("appendLogs failed: %v", err)
-	}
+	agent.appendLogs(e3)
 
 	logs = agent.Logs()
 	if len(logs) != 3 {

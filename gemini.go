@@ -67,9 +67,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gemini client: %w", err)
 	}
-	start := time.Now()
 	response, err := client.Models.GenerateContent(ctx, a.Model, contents, config)
-	duration := time.Since(start)
 	if err != nil {
 		return nil, fmt.Errorf("gemini generate content: %w", err)
 	}
@@ -108,7 +106,6 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 		produced[len(produced)-1].Opaque[geminiGroundingMetadataOpaqueKey] = raw
 	}
 	if len(produced) > 0 {
-		produced[len(produced)-1].Duration = duration
 		if usage := response.UsageMetadata; usage != nil {
 			var cacheRead int
 			if usage.CachedContentTokenCount > 0 {

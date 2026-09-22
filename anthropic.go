@@ -79,7 +79,6 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 		}
 	}
 	client := a.newAnthropicClient()
-	start := time.Now()
 	now := time.Now().UTC()
 	// Bound server-side continuation independently of the agent's tool turns.
 	const maxContinuations = 10
@@ -90,6 +89,10 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 		totalCacheReadTokens  int
 		totalCacheWriteTokens int
 	)
+
+	// anthropic has internal tool calling limitations. Once it's reach the maximum
+	// it will pause and wait until the content is sent back to continue
+	// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons#pause-turn
 	for continuations := 0; ; continuations++ {
 		response, err := client.Messages.New(ctx, params)
 		if err != nil {
@@ -122,7 +125,6 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 
 		if response.StopReason != anthropic.StopReasonPauseTurn {
 			if len(produced) > 0 {
-				produced[len(produced)-1].Duration = time.Since(start)
 				produced[len(produced)-1].Usage = &Usage{
 					InputTokens:      totalInputTokens,
 					OutputTokens:     totalOutputTokens,
