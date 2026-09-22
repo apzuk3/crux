@@ -43,7 +43,9 @@ type SearchOptions struct {
 
 type SearchOption func(*SearchOptions)
 
-func NewAgent(name, model string, opts ...AgentOption) (*Agent, error) {
+var NewAgent = New
+
+func New(name, model string, opts ...AgentOption) (*Agent, error) {
 	agent := &Agent{
 		SessionID: uuid.New(),
 		Name:      name,

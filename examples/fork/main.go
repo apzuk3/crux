@@ -20,7 +20,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	agent := crux.Must(crux.NewAgent(
+	agent := crux.Must(crux.New(
 		"travel-planner",
 		crux.ChatModelGPT4_1Mini,
 		crux.WithProvider(crux.ProviderOpenAI),

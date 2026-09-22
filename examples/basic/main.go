@@ -234,7 +234,7 @@ type Output struct {
 }
 
 func main() {
-	agent := crux.Must(crux.NewAgent(
+	agent := crux.Must(crux.New(
 		"day-trip-planner",
 		crux.ClaudeHaiku4_5,
 		crux.WithInstructions(`You are a day-trip planner working with fictional demo data.

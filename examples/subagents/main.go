@@ -38,7 +38,7 @@ func run() error {
 			return "TrailLight is a fictional camping lantern. It weighs 180 grams, lasts 12 hours per charge, costs $39, and is splash-resistant but not waterproof.", nil, nil
 		})
 
-	researcher := crux.Must(crux.NewAgent("researcher", crux.ChatModelGPT4_1Mini,
+	researcher := crux.Must(crux.New("researcher", crux.ChatModelGPT4_1Mini,
 		crux.WithAPIKey(key),
 		crux.WithToolsRegistry([]string{"get_product_facts"}, registry),
 		crux.WithInstructions(`Read the task in the input's text field.
@@ -46,14 +46,14 @@ You must call get_product_facts to retrieve the fictional product facts.
 Return a concise factual brief in the output's text field, preserving all numbers and limitations.`),
 		crux.WithOutputSchemaFrom[Message](),
 	))
-	editor := crux.Must(crux.NewAgent("editor", crux.ChatModelGPT4_1Mini,
+	editor := crux.Must(crux.New("editor", crux.ChatModelGPT4_1Mini,
 		crux.WithAPIKey(key),
 		crux.WithInstructions(`Read the brief in the input's text field.
 Rewrite it as a friendly two-sentence product description in the output's text field.
 Preserve the price and splash-resistant-but-not-waterproof limitation. Do not invent facts.`),
 		crux.WithOutputSchemaFrom[Message](),
 	))
-	mainAgent := crux.Must(crux.NewAgent("coordinator", crux.ChatModelGPT4_1Mini,
+	mainAgent := crux.Must(crux.New("coordinator", crux.ChatModelGPT4_1Mini,
 		crux.WithAPIKey(key),
 		crux.WithInstructions(`You coordinate specialists. You must delegate rather than write the description yourself.
 First call researcher with a task in its text argument asking for a factual TrailLight brief.

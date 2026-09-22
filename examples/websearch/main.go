@@ -102,7 +102,7 @@ func run() int {
 		if *baseURL != "" {
 			opts = append(opts, crux.WithBaseURL(*baseURL))
 		}
-		agent := crux.Must(crux.NewAgent(fmt.Sprintf("websearch-%s", c.provider), c.model, opts...))
+		agent := crux.Must(crux.New(fmt.Sprintf("websearch-%s", c.provider), c.model, opts...))
 		requestCtx, cancel := context.WithTimeout(ctx, *timeout)
 		start := time.Now()
 		answer, err := agent.Run(requestCtx, *prompt)
