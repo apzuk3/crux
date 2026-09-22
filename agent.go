@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -446,26 +447,14 @@ func (a *Agent) Reject(ctx context.Context, callID string, reason string) error 
 	return nil
 }
 
-// Run executes the agent and decodes its final text response into Out. Anything
-// that is not text is read back as JSON.
-func Run[Out any](ctx context.Context, a *Agent, input any) (Out, error) {
+// RunInto executes the agent and decodes its final response into target.
+// target must be a non-nil pointer. Anything that is not text is decoded as JSON.
+func (a *Agent) RunInto(ctx context.Context, input any, target any) error {
 	text, err := a.Run(ctx, input)
 	if err != nil {
-		var zero Out
-		return zero, err
+		return err
 	}
-	return decodeOutput[Out](text)
-}
-
-// Resume executes the agent to continue after tool approvals/rejections and decodes
-// its final text response into Out.
-func Resume[Out any](ctx context.Context, a *Agent) (Out, error) {
-	text, err := a.Resume(ctx)
-	if err != nil {
-		var zero Out
-		return zero, err
-	}
-	return decodeOutput[Out](text)
+	return decodeInto(text, target)
 }
 
 // dispatch runs a tool call locally. A failure is reported to the model rather
@@ -520,23 +509,34 @@ func finalText(entries []Entry) string {
 	return text.String()
 }
 
-// decodeOutput renders the model's final text as Out. Anything that is not
-// text is read back as JSON.
-func decodeOutput[Out any](text string) (Out, error) {
-	var output Out
+func decodeInto(text string, target any) error {
+	if target == nil {
+		return errors.New("decode target cannot be nil")
+	}
 
-	switch target := any(&output).(type) {
+	rv := reflect.ValueOf(target)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return fmt.Errorf("decode target must be a non-nil pointer, got %T", target)
+	}
+
+	switch dest := target.(type) {
 	case *string:
-		*target = text
-		return output, nil
+		*dest = text
+		return nil
 	case *any:
-		*target = text
-		return output, nil
+		*dest = text
+		return nil
+	case *[]byte:
+		*dest = []byte(text)
+		return nil
+	case *json.RawMessage:
+		*dest = json.RawMessage(text)
+		return nil
 	}
 
 	clean := strings.TrimSpace(text)
-	if err := json.Unmarshal([]byte(clean), &output); err == nil {
-		return output, nil
+	if err := json.Unmarshal([]byte(clean), target); err == nil {
+		return nil
 	}
 
 	if start := strings.Index(clean, "```"); start != -1 {
@@ -549,16 +549,16 @@ func decodeOutput[Out any](text string) (Out, error) {
 				block = block[4:]
 			}
 			block = strings.TrimSpace(block)
-			if err := json.Unmarshal([]byte(block), &output); err == nil {
-				return output, nil
+			if err := json.Unmarshal([]byte(block), target); err == nil {
+				return nil
 			}
 		}
 	}
 
-	if err := json.Unmarshal([]byte(clean), &output); err != nil {
-		return output, fmt.Errorf("decode agent output as %T: %w", output, err)
+	if err := json.Unmarshal([]byte(clean), target); err != nil {
+		return fmt.Errorf("decode agent output as %T: %w", target, err)
 	}
-	return output, nil
+	return nil
 }
 
 // Logs returns a clone of the agent's session log entries.

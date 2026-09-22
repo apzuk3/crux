@@ -79,10 +79,18 @@ func NewUserEntry(input any) (Entry, error) {
 	switch v := any(input).(type) {
 	case string:
 		text = v
+	case []byte:
+		text = string(v)
+	case json.RawMessage:
+		text = string(v)
 	case fmt.Stringer:
 		text = v.String()
 	default:
-		return Entry{}, fmt.Errorf("unsupported user input type %T", input)
+		raw, err := json.Marshal(input)
+		if err != nil {
+			return Entry{}, fmt.Errorf("unsupported user input type %T: %w", input, err)
+		}
+		text = string(raw)
 	}
 	return Entry{
 		At:      time.Now().UTC(),
