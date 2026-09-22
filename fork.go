@@ -3,6 +3,8 @@ package crux
 import (
 	"fmt"
 	"slices"
+
+	"github.com/google/uuid"
 )
 
 // Fork creates an agent with the full retained history and inherited
@@ -33,6 +35,7 @@ func (a *Agent) ForkFrom(from int, opts ...AgentOption) (*Agent, error) {
 	}
 
 	fork := *a
+	fork.SessionID = uuid.New()
 	fork.sessionLogs = cloneEntries(a.sessionLogs[:from])
 	fork.Tools = slices.Clone(a.Tools)
 	if a.SearchOptions != nil {

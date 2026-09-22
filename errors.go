@@ -1,8 +1,8 @@
 package crux
 
-import "fmt"
+import "errors"
 
 var (
-	ErrToolNotFound   = fmt.Errorf("tool not found")
-	ErrApprovalNeeded = fmt.Errorf("approval needed")
+	ErrToolNotFound   = errors.New("tool not found")
+	ErrApprovalNeeded = errors.New("approval needed")
 )

@@ -174,10 +174,10 @@ func WithSubAgent(subAgent *Agent, description string) AgentOption {
 			schema = nil
 			raw, err := json.Marshal(subAgent.OutputSchema)
 			if err != nil {
-				panic(fmt.Errorf("encode schema for subagent %q: %w", subAgent.Name, err))
+				return fmt.Errorf("encode schema for subagent %q: %w", subAgent.Name, err)
 			}
 			if err := json.Unmarshal(raw, &schema); err != nil {
-				panic(fmt.Errorf("decode schema for subagent %q: %w", subAgent.Name, err))
+				return fmt.Errorf("decode schema for subagent %q: %w", subAgent.Name, err)
 			}
 		}
 

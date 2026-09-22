@@ -1,0 +1,40 @@
+# Binaries and build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go workspace file
+go.work
+
+# Dependencies and cache
+vendor/
+
+# Test coverage
+coverage.txt
+coverage.out
+*.coverprofile
+
+# Environment variables and local configs
+.env
+.env.*
+!.env.example
+
+# OS metadata
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
