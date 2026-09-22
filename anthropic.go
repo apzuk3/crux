@@ -23,6 +23,10 @@ func (a *Agent) newAnthropicClient() *anthropic.Client {
 		opts = append(opts, option.WithBaseURL(a.BaseURL))
 	}
 
+	if a.HTTPClient != nil {
+		opts = append(opts, option.WithHTTPClient(a.HTTPClient))
+	}
+
 	client := anthropic.NewClient(opts...)
 	return &client
 }

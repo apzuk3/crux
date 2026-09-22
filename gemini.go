@@ -23,6 +23,9 @@ func (a *Agent) newGeminiClient(ctx context.Context) (*genai.Client, error) {
 	if a.BaseURL != "" {
 		config.HTTPOptions.BaseURL = a.BaseURL
 	}
+	if a.HTTPClient != nil {
+		config.HTTPClient = a.HTTPClient
+	}
 	return genai.NewClient(ctx, config)
 }
 

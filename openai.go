@@ -25,10 +25,14 @@ func (a *Agent) newOpenAIClient() *openai.Client {
 	if a.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(a.BaseURL))
 	}
-	if a.Provider != ProviderOpenAI {
+	if a.HTTPClient != nil {
+		opts = append(opts, option.WithHTTPClient(a.HTTPClient))
+	} else if a.Provider != ProviderOpenAI {
 		// Construct the Responses service directly to avoid inheriting OpenAI
 		// credentials, organization, project, or custom headers from the environment.
 		opts = append(opts, option.WithHTTPClient(http.DefaultClient))
+	}
+	if a.Provider != ProviderOpenAI {
 		return &openai.Client{Options: opts, Responses: responses.NewResponseService(opts...)}
 	}
 
@@ -89,6 +93,8 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 		if err := json.Unmarshal(raw, &schema); err != nil {
 			return nil, fmt.Errorf("decode output schema: %w", err)
 		}
+		delete(schema, "$schema")
+		delete(schema, "$id")
 
 		params.Text = responses.ResponseTextConfigParam{
 			Format: responses.ResponseFormatTextConfigUnionParam{

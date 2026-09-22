@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"reflect"
 	"slices"
 
@@ -129,6 +130,11 @@ func WithBaseURL(url string) AgentOption {
 	return func(a *Agent) error { a.BaseURL = url; return nil }
 }
 
+// WithHTTPClient configures a custom HTTP client for API requests across all providers.
+func WithHTTPClient(client *http.Client) AgentOption {
+	return func(a *Agent) error { a.HTTPClient = client; return nil }
+}
+
 func WithAPIKey(apikey string) AgentOption {
 	return func(a *Agent) error { a.apikey = apikey; return nil }
 }
@@ -147,6 +153,11 @@ func WithOutputSchema(schema *jsonschema.Schema) AgentOption {
 	return func(a *Agent) error { a.OutputSchema = schema; return nil }
 }
 
+var outputReflector = &jsonschema.Reflector{
+	Anonymous:      true,
+	ExpandedStruct: true,
+}
+
 // WithOutputSchemaFrom reflects T into a response schema, or disables structured
 // output for string and any. T must satisfy WithOutputSchema's requirements;
 // reflection does not normalize optional fields or maps for OpenAI strict mode.
@@ -157,7 +168,9 @@ func WithOutputSchemaFrom[T any]() AgentOption {
 		case *string, *any:
 			a.OutputSchema = nil
 		default:
-			a.OutputSchema = jsonschema.ReflectFromType(reflect.TypeFor[T]())
+			schema := outputReflector.ReflectFromType(reflect.TypeFor[T]())
+			schema.Version = ""
+			a.OutputSchema = schema
 		}
 
 		return nil

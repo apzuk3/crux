@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"reflect"
 	"slices"
 	"strings"
@@ -26,6 +27,7 @@ type Agent struct {
 	Provider      Provider
 	Model         string
 	BaseURL       string
+	HTTPClient    *http.Client
 	OutputSchema  *jsonschema.Schema
 	SearchOptions *SearchOptions // nil disables web search
 	Tools         []Tool

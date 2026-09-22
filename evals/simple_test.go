@@ -23,9 +23,12 @@ func Test_ExecuteSimplePrompt(t *testing.T) {
 		t.Run(modelname, func(t *testing.T) {
 			executeSayHelloPromptWithInstructions(t, modelname)
 		})
+
+		t.Run(modelname+"_structured", func(t *testing.T) {
+			executeSayHelloPromptWithInstructionsStructuredOutput(t, modelname)
+		})
 	}
 }
-
 func executeSayHelloPromptWithInstructions(t *testing.T, modelname string) {
 	t.Parallel()
 
@@ -36,6 +39,29 @@ func executeSayHelloPromptWithInstructions(t *testing.T, modelname string) {
 		modelname,
 		crux.WithInstructions(prompt),
 		crux.WithOutputSchemaFrom[string](),
+	)
+	require.NoError(t, err)
+
+	output, err := agent.Run(context.Background(), "Hello, how are you?")
+	require.NoError(t, err)
+
+	require.Contains(t, output, "Hello! How are you")
+}
+
+func executeSayHelloPromptWithInstructionsStructuredOutput(t *testing.T, modelname string) {
+	t.Parallel()
+
+	type Output struct {
+		Text string `json:"text"`
+	}
+
+	prompt := `You are a friendly chatbot that responds to the user's message with "Hello! How are you" and nothing else.`
+
+	agent, err := crux.New(
+		"test-agent",
+		modelname,
+		crux.WithInstructions(prompt),
+		crux.WithOutputSchemaFrom[Output](),
 	)
 	require.NoError(t, err)
 
