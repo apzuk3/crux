@@ -1,3 +1,26 @@
+// Scenario: Baseline Single-Turn Prompts & Schema Enforcement
+//
+// This live evaluation test verifies Crux's fundamental baseline integration across all supported
+// model providers (OpenAI, Anthropic, Gemini, xAI, OpenRouter) in a clean, non-tool environment.
+//
+// Core Objectives:
+// 1. System Instruction & Prompt Delivery:
+//    - Tests that Crux correctly configures provider-specific system prompts / instructions:
+//      * OpenAI / xAI: Developer / system message parameter.
+//      * Anthropic: Top-level system parameter.
+//      * Gemini: SystemInstruction content parts.
+//    - Validates that strict behavioral constraints ("respond with 'Hello! How are you' and nothing else")
+//      are respected across all provider adapters.
+//
+// 2. Output Schema Enforcement:
+//    - Standard Text Mode: Verifies agent.Run() with crux.WithOutputSchemaFrom[string]().
+//    - Structured Output Mode: Verifies agent.Run() with crux.WithOutputSchemaFrom[Output]()
+//      enforcing a JSON schema { text: string } via provider-native structured output / response format APIs.
+//
+// 3. Provider Parity:
+//    - Validates consistent client initialization, error propagation, and response decoding
+//      across Google Gemini, OpenAI, Anthropic Claude, and xAI Grok.
+
 package evals
 
 import (

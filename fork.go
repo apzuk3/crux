@@ -51,7 +51,29 @@ func (a *Agent) ForkFrom(from int, opts ...AgentOption) (*Agent, error) {
 		}
 	}
 
+	if fork.Provider == a.Provider && fork.Model != a.Model {
+		if inferred := inferProvider(fork.Model); inferred != "" {
+			fork.Provider = inferred
+		}
+	}
+
 	if fork.Provider != a.Provider {
+		if fork.apikey == a.apikey {
+			fork.apikey = discoverAPIKey(fork.Provider)
+		}
+		if fork.BaseURL == a.BaseURL {
+			fork.BaseURL = ""
+			switch fork.Provider {
+			case ProviderOpenrouter:
+				fork.BaseURL = "https://openrouter.ai/api/v1"
+			case ProviderXAI:
+				fork.BaseURL = "https://api.x.ai/v1"
+			case ProviderDeepSeek:
+				fork.BaseURL = "https://api.deepseek.com"
+			case ProviderOllama:
+				fork.BaseURL = "http://localhost:11434/v1"
+			}
+		}
 		for i := range fork.sessionLogs {
 			fork.sessionLogs[i].Opaque = nil
 		}
