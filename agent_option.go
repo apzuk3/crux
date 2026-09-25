@@ -139,16 +139,9 @@ func WithAPIKey(apikey string) AgentOption {
 	return func(a *Agent) error { a.apikey = apikey; return nil }
 }
 
-// WithOutputSchema sets the response schema. For OpenAI, it must satisfy strict
-// Structured Outputs requirements: an object root, all properties required, and
-// additionalProperties: false on every object.
-// For Anthropic, the schema must satisfy its supported JSON Schema subset;
-// it is sent unchanged through output_config.format.
-// For Gemini, the schema must satisfy its supported JSON Schema subset;
-// it is sent unchanged through responseJsonSchema.
-// xAI, DeepSeek, and local Ollama use the OpenAI Responses schema format.
-// Local Ollama support is verified in v0.34.0. Ollama Cloud does not currently
-// support structured outputs.
+// WithOutputSchema sets the response schema. Crux automatically adapts the schema
+// for each provider's wire requirements (strict object closure, property nullability,
+// and constraint placement).
 func WithOutputSchema(schema *jsonschema.Schema) AgentOption {
 	return func(a *Agent) error { a.OutputSchema = schema; return nil }
 }
@@ -167,9 +160,54 @@ var outputReflector = &jsonschema.Reflector{
 	ExpandedStruct: true,
 }
 
+func makeOptionalNullable(schema *jsonschema.Schema) {
+	if schema == nil {
+		return
+	}
+	seen := make(map[*jsonschema.Schema]bool)
+	var visit func(*jsonschema.Schema)
+	visit = func(s *jsonschema.Schema) {
+		if s == nil || seen[s] {
+			return
+		}
+		seen[s] = true
+		if s.Properties != nil {
+			reqSet := make(map[string]bool, len(s.Required))
+			for _, r := range s.Required {
+				reqSet[r] = true
+			}
+			for pair := s.Properties.Oldest(); pair != nil; pair = pair.Next() {
+				visit(pair.Value)
+				if !reqSet[pair.Key] {
+					s.Properties.Set(pair.Key, &jsonschema.Schema{
+						AnyOf: []*jsonschema.Schema{pair.Value, {Type: "null"}},
+					})
+				}
+			}
+		}
+		if s.Definitions != nil {
+			for _, def := range s.Definitions {
+				visit(def)
+			}
+		}
+		if s.Items != nil {
+			visit(s.Items)
+		}
+		for _, anyOf := range s.AnyOf {
+			visit(anyOf)
+		}
+		for _, oneOf := range s.OneOf {
+			visit(oneOf)
+		}
+		for _, allOf := range s.AllOf {
+			visit(allOf)
+		}
+	}
+	visit(schema)
+}
+
 // WithOutputSchemaFrom reflects T into a response schema, or disables structured
-// output for string and any. T must satisfy WithOutputSchema's requirements;
-// reflection does not normalize optional fields or maps for OpenAI strict mode.
+// output for string and any. Optional properties also permit null.
 func WithOutputSchemaFrom[T any]() AgentOption {
 	return func(a *Agent) error {
 		var zero T
@@ -179,6 +217,7 @@ func WithOutputSchemaFrom[T any]() AgentOption {
 		default:
 			schema := outputReflector.ReflectFromType(reflect.TypeFor[T]())
 			schema.Version = ""
+			makeOptionalNullable(schema)
 			a.OutputSchema = schema
 		}
 

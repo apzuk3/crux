@@ -118,10 +118,15 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 		return "", errors.New("cannot run agent with no input and empty history")
 	}
 
+	validator, err := compileValidator(a.OutputSchema)
+	if err != nil {
+		return "", fmt.Errorf("invalid output schema: %w", err)
+	}
+
 	if input == nil {
 		if text, ok := a.FinalOutput(); ok {
-			if a.OutputSchema != nil {
-				if err := validateOutput(a.OutputSchema, text); err != nil {
+			if validator != nil {
+				if err := validateOutput(validator, text); err != nil {
 					return "", err
 				}
 			}
@@ -188,8 +193,8 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 
 		// If the latest turn produced the final answer without requesting further tools:
 		if text, ok := a.FinalOutput(); ok {
-			if a.OutputSchema != nil {
-				if valErr := validateOutput(a.OutputSchema, text); valErr != nil {
+			if validator != nil {
+				if valErr := validateOutput(validator, text); valErr != nil {
 					if repairsLeft > 0 && turn+1 < int(a.MaxTurns) {
 						repairsLeft--
 						repairMsg := fmt.Sprintf("Return corrected JSON. Output validation failed: %v", valErr)

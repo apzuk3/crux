@@ -6,6 +6,7 @@ import (
 
 	"github.com/apzuk3/crux"
 	"github.com/apzuk3/crux/cruxtest"
+	"github.com/invopop/jsonschema"
 	"github.com/stretchr/testify/require"
 )
 
@@ -134,4 +135,86 @@ func TestRunIntoValidatesBeforeMutatingTarget(t *testing.T) {
 	require.Equal(t, "original", answer.Status)
 	require.Equal(t, 42, answer.Score)
 	mock.AssertAllConsumed(t)
+}
+
+type withMapAnswer struct {
+	Labels map[string]string `json:"labels"`
+}
+
+func TestMapOutputSchemaCompatibility(t *testing.T) {
+	t.Run("gemini preserves map schema", func(t *testing.T) {
+		mock := cruxtest.NewMock(cruxtest.WithProvider(crux.ProviderGoogle))
+		mock.Expect().ReturnText(`{"labels":{"env":"prod"}}`)
+		a, err := crux.New("map-gemini", "test-model",
+			crux.WithProvider(crux.ProviderGoogle), crux.WithAPIKey("mock"),
+			crux.WithHTTPClient(mock.Client()),
+			crux.WithOutputSchemaFrom[withMapAnswer]())
+		require.NoError(t, err)
+		var res withMapAnswer
+		require.NoError(t, a.RunInto(context.Background(), "get labels", &res))
+		require.Equal(t, "prod", res.Labels["env"])
+
+		var body map[string]any
+		require.NoError(t, mock.Requests()[0].UnmarshalBody(&body))
+		schema := body["generationConfig"].(map[string]any)["responseJsonSchema"].(map[string]any)
+		props := schema["properties"].(map[string]any)
+		labelsProp := props["labels"].(map[string]any)
+		require.NotEqual(t, false, labelsProp["additionalProperties"])
+	})
+
+	t.Run("openai rejects dynamic map schema before request", func(t *testing.T) {
+		mock := cruxtest.NewMock(cruxtest.WithProvider(crux.ProviderOpenAI))
+		a, err := crux.New("map-openai", "test-model",
+			crux.WithProvider(crux.ProviderOpenAI), crux.WithAPIKey("mock"),
+			crux.WithHTTPClient(mock.Client()),
+			crux.WithOutputSchemaFrom[withMapAnswer]())
+		require.NoError(t, err)
+		var res withMapAnswer
+		err = a.RunInto(context.Background(), "get labels", &res)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "does not support dynamic map schemas")
+		mock.AssertTurnCount(t, 0)
+	})
+}
+
+func TestInvalidSchemaFailsEarlyZeroRequests(t *testing.T) {
+	mock := cruxtest.NewMock()
+	// Directly provide a jsonschema.Schema with a bad ref
+	schema := &jsonschema.Schema{
+		Ref: "#/$defs/DoesNotExist",
+	}
+	a, err := crux.New("bad-schema", "test-model",
+		crux.WithProvider(crux.ProviderOpenAI), crux.WithAPIKey("mock"),
+		crux.WithHTTPClient(mock.Client()),
+		crux.WithOutputSchema(schema))
+	require.NoError(t, err)
+
+	_, err = a.Run(context.Background(), "run")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid output schema")
+	mock.AssertTurnCount(t, 0)
+}
+
+type largeNumberAnswer struct {
+	ID uint64 `json:"id" jsonschema:"enum=9007199254740993"`
+}
+
+func TestLargeNumberPrecisionPreserved(t *testing.T) {
+	mock := cruxtest.NewMock()
+	// 9007199254740993 (2^53 + 1) would be rounded to 9007199254740992 if parsed as float64
+	mock.Expect().ReturnText(`{"id": 9007199254740993}`)
+	a, err := crux.New("large-num", "test-model",
+		crux.WithProvider(crux.ProviderOpenAI), crux.WithAPIKey("mock"),
+		crux.WithHTTPClient(mock.Client()),
+		crux.WithOutputSchemaFrom[largeNumberAnswer]())
+	require.NoError(t, err)
+
+	var res largeNumberAnswer
+	require.NoError(t, a.RunInto(context.Background(), "get id", &res))
+	require.Equal(t, uint64(9007199254740993), res.ID)
+
+	// Off-by-one rounded number must fail validation
+	mock.Expect().ReturnText(`{"id": 9007199254740992}`)
+	_, err = a.Run(context.Background(), "get id again")
+	require.ErrorIs(t, err, crux.ErrOutputValidation)
 }
