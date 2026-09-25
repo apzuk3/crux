@@ -84,17 +84,10 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 		params.Tools = append(params.Tools, tool)
 	}
 	if a.OutputSchema != nil {
-		raw, err := json.Marshal(a.OutputSchema)
+		schema, err := wireSchemaFor(a.OutputSchema, a.Provider)
 		if err != nil {
-			return nil, fmt.Errorf("marshal output schema: %w", err)
+			return nil, err
 		}
-
-		var schema map[string]any
-		if err := json.Unmarshal(raw, &schema); err != nil {
-			return nil, fmt.Errorf("decode output schema: %w", err)
-		}
-		delete(schema, "$schema")
-		delete(schema, "$id")
 
 		params.Text = responses.ResponseTextConfigParam{
 			Format: responses.ResponseFormatTextConfigUnionParam{
@@ -174,6 +167,7 @@ func openAITools(tools []Tool) []responses.ToolUnionParam {
 				Name:        tool.name,
 				Description: openai.String(tool.description),
 				Parameters:  tool.schema,
+				Strict:      openai.Bool(false),
 			},
 		})
 	}

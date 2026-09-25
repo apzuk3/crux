@@ -153,6 +153,15 @@ func WithOutputSchema(schema *jsonschema.Schema) AgentOption {
 	return func(a *Agent) error { a.OutputSchema = schema; return nil }
 }
 
+// WithMaxRepairs sets the number of attempts the agent will make
+// to ask the model to repair its response if output validation fails.
+func WithMaxRepairs(repairs int) AgentOption {
+	return func(a *Agent) error {
+		a.MaxRepairs = repairs
+		return nil
+	}
+}
+
 var outputReflector = &jsonschema.Reflector{
 	Anonymous:      true,
 	ExpandedStruct: true,

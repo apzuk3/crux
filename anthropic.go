@@ -70,13 +70,9 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 		})
 	}
 	if a.OutputSchema != nil {
-		raw, err := json.Marshal(a.OutputSchema)
+		schema, err := wireSchemaFor(a.OutputSchema, a.Provider)
 		if err != nil {
-			return nil, fmt.Errorf("marshal output schema: %w", err)
-		}
-		var schema map[string]any
-		if err := json.Unmarshal(raw, &schema); err != nil {
-			return nil, fmt.Errorf("decode output schema: %w", err)
+			return nil, err
 		}
 		params.OutputConfig = anthropic.OutputConfigParam{
 			Format: anthropic.JSONOutputFormatParam{Schema: schema},

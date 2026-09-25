@@ -29,6 +29,7 @@ type Agent struct {
 	BaseURL       string
 	HTTPClient    *http.Client
 	OutputSchema  *jsonschema.Schema
+	MaxRepairs    int
 	SearchOptions *SearchOptions // nil disables web search
 	Tools         []Tool
 
@@ -119,6 +120,11 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 
 	if input == nil {
 		if text, ok := a.FinalOutput(); ok {
+			if a.OutputSchema != nil {
+				if err := validateOutput(a.OutputSchema, text); err != nil {
+					return "", err
+				}
+			}
 			return text, nil
 		}
 	}
@@ -141,8 +147,9 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 		a.appendLogs(entry)
 	}
 
+	repairsLeft := a.MaxRepairs
 	// ---> Notify start
-	for range a.MaxTurns {
+	for turn := 0; turn < int(a.MaxTurns); turn++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -181,6 +188,21 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 
 		// If the latest turn produced the final answer without requesting further tools:
 		if text, ok := a.FinalOutput(); ok {
+			if a.OutputSchema != nil {
+				if valErr := validateOutput(a.OutputSchema, text); valErr != nil {
+					if repairsLeft > 0 && turn+1 < int(a.MaxTurns) {
+						repairsLeft--
+						repairMsg := fmt.Sprintf("Return corrected JSON. Output validation failed: %v", valErr)
+						entry, err := NewUserEntry(repairMsg)
+						if err != nil {
+							return "", err
+						}
+						a.appendLogs(entry)
+						continue
+					}
+					return "", valErr
+				}
+			}
 			// ---> Notify end
 			return text, nil
 		}
@@ -454,11 +476,26 @@ func (a *Agent) Reject(ctx context.Context, callID string, reason string) error 
 // RunInto executes the agent and decodes its final response into target.
 // target must be a non-nil pointer. Anything that is not text is decoded as JSON.
 func (a *Agent) RunInto(ctx context.Context, input any, target any) error {
+	if target == nil {
+		return errors.New("decode target cannot be nil")
+	}
+
+	rv := reflect.ValueOf(target)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return fmt.Errorf("decode target must be a non-nil pointer, got %T", target)
+	}
+
 	text, err := a.Run(ctx, input)
 	if err != nil {
 		return err
 	}
-	return decodeInto(text, target)
+
+	temp := reflect.New(rv.Elem().Type())
+	if err := decodeInto(text, temp.Interface()); err != nil {
+		return err
+	}
+	rv.Elem().Set(temp.Elem())
+	return nil
 }
 
 // dispatch runs a tool call locally. A failure is reported to the model rather
