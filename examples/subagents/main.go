@@ -66,14 +66,15 @@ Finally return the editor's product description to the user.`),
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	fmt.Println("Running coordinator → researcher → editor...")
-	output, err := mainAgent.Run(ctx, "Create a short product description for the fictional TrailLight lantern using both specialists.")
+	session := crux.MustSession(crux.NewSession(mainAgent))
+	output, err := session.Run(ctx, "Create a short product description for the fictional TrailLight lantern using both specialists.")
 	if err != nil {
 		return fmt.Errorf("run coordinator: %w", err)
 	}
 
 	// WithSubAgent stores each successful child's output under its name.
 	// Check this instead of trusting a claim of delegation in the final answer.
-	state := mainAgent.StateSnapshot()
+	state := session.StateSnapshot()
 	for _, name := range []string{"researcher", "editor"} {
 		raw, ok := state[name].(string)
 		if !ok {

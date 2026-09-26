@@ -133,16 +133,18 @@ func TestDecodeInto(t *testing.T) {
 	})
 }
 
-func TestAgentRunInto(t *testing.T) {
-	agent := &Agent{
-		sessionLogs: []Entry{
-			{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "get answer"}}},
-			{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: `{"answer": "yes", "score": 10}`}}},
-		},
+func TestSessionRunInto(t *testing.T) {
+	agent := &Agent{}
+	session, err := NewSession(agent, WithSessionLogs([]Entry{
+		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "get answer"}}},
+		{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: `{"answer": "yes", "score": 10}`}}},
+	}))
+	if err != nil {
+		t.Fatalf("NewSession failed: %v", err)
 	}
 
 	var out sampleOutput
-	if err := agent.RunInto(context.Background(), nil, &out); err != nil {
+	if err := session.RunInto(context.Background(), nil, &out); err != nil {
 		t.Fatalf("RunInto failed: %v", err)
 	}
 	if out.Answer != "yes" || out.Score != 10 {
@@ -150,7 +152,7 @@ func TestAgentRunInto(t *testing.T) {
 	}
 
 	var rawStr string
-	if err := agent.RunInto(context.Background(), nil, &rawStr); err != nil {
+	if err := session.RunInto(context.Background(), nil, &rawStr); err != nil {
 		t.Fatalf("RunInto string failed: %v", err)
 	}
 	if rawStr != `{"answer": "yes", "score": 10}` {

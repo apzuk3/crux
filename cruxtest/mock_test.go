@@ -35,7 +35,10 @@ func TestOpenAIMock_TextPrompt(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	out, err := agent.Run(context.Background(), "Hi")
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
+	out, err := sess.Run(context.Background(), "Hi")
 	require.NoError(t, err)
 	require.Equal(t, "Hello from OpenAI mock!", out)
 
@@ -65,7 +68,10 @@ func TestOpenAIMock_ToolCalling(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	out, err := agent.Run(context.Background(), "What's the weather in Paris?")
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
+	out, err := sess.Run(context.Background(), "What's the weather in Paris?")
 	require.NoError(t, err)
 	require.Equal(t, "The weather in Paris is Sunny 22C.", out)
 
@@ -94,8 +100,11 @@ func TestOpenAIMock_StructuredOutput(t *testing.T) {
 	)
 	require.NoError(t, err)
 
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
 	var res SentimentResult
-	err = agent.RunInto(context.Background(), "I love Crux!", &res)
+	err = sess.RunInto(context.Background(), "I love Crux!", &res)
 	require.NoError(t, err)
 	require.Equal(t, "positive", res.Sentiment)
 	require.Equal(t, 0.98, res.Score)
@@ -115,7 +124,10 @@ func TestAnthropicMock_TextPrompt(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	out, err := agent.Run(context.Background(), "Hello Claude")
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
+	out, err := sess.Run(context.Background(), "Hello Claude")
 	require.NoError(t, err)
 	require.Equal(t, "Hello from Anthropic mock!", out)
 
@@ -139,7 +151,10 @@ func TestAnthropicMock_ToolCalling(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	out, err := agent.Run(context.Background(), "How is Tokyo?")
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
+	out, err := sess.Run(context.Background(), "How is Tokyo?")
 	require.NoError(t, err)
 	require.Equal(t, "The weather in Tokyo is Sunny 22C in Tokyo.", out)
 
@@ -159,7 +174,10 @@ func TestAnthropicMock_Refusal(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = agent.Run(context.Background(), "Do something bad")
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
+	_, err = sess.Run(context.Background(), "Do something bad")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "refused")
 }
@@ -176,7 +194,10 @@ func TestGeminiMock_TextPrompt(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	out, err := agent.Run(context.Background(), "Hello Gemini")
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
+	out, err := sess.Run(context.Background(), "Hello Gemini")
 	require.NoError(t, err)
 	require.Equal(t, "Hello from Gemini mock!", out)
 
@@ -200,7 +221,10 @@ func TestGeminiMock_ToolCalling(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	out, err := agent.Run(context.Background(), "How is Berlin?")
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
+	out, err := sess.Run(context.Background(), "How is Berlin?")
 	require.NoError(t, err)
 	require.Equal(t, "The weather in Berlin is Sunny 22C in Berlin.", out)
 
@@ -220,7 +244,10 @@ func TestMock_ErrorStatus(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = agent.Run(context.Background(), "Trigger 429")
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
+	_, err = sess.Run(context.Background(), "Trigger 429")
 	require.Error(t, err)
 }
 
@@ -236,7 +263,10 @@ func TestMock_UnexpectedRequestError(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = agent.Run(context.Background(), "Hi")
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
+	_, err = sess.Run(context.Background(), "Hi")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no more expected turns")
 }
@@ -252,7 +282,10 @@ func TestMock_AgentOptionsHelper(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	out, err := agent.Run(context.Background(), "Test helper")
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
+	out, err := sess.Run(context.Background(), "Test helper")
 	require.NoError(t, err)
 	require.Equal(t, "Works with AgentOptions!", out)
 }
@@ -276,11 +309,14 @@ func TestMock_TokenUsage(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	out, err := agent.Run(context.Background(), "Test usage")
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
+	out, err := sess.Run(context.Background(), "Test usage")
 	require.NoError(t, err)
 	require.Equal(t, "Response with usage", out)
 
-	entries := agent.Logs()
+	entries := sess.Logs()
 	require.NotEmpty(t, entries)
 	lastEntry := entries[len(entries)-1]
 	require.NotNil(t, lastEntry.Usage)
@@ -315,7 +351,10 @@ func TestMock_ParallelToolCalls(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	out, err := agent.Run(context.Background(), "Execute both")
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
+	out, err := sess.Run(context.Background(), "Execute both")
 	require.NoError(t, err)
 	require.Equal(t, "Both tools executed successfully.", out)
 
@@ -337,7 +376,10 @@ func TestMock_OpenRouterAndDeepSeek(t *testing.T) {
 			)
 			require.NoError(t, err)
 
-			out, err := agent.Run(context.Background(), "Ping")
+			sess, err := crux.NewSession(agent)
+			require.NoError(t, err)
+
+			out, err := sess.Run(context.Background(), "Ping")
 			require.NoError(t, err)
 			require.Equal(t, "Hello from "+model, out)
 

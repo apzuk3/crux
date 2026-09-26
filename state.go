@@ -11,15 +11,15 @@ type stateContextKey struct{}
 
 // StateSnapshot reconstructs the current state by replaying state deltas in log
 // order. Set replaces whole values; Delete is applied after Set in each delta.
-// An agent without state deltas returns an empty, non-nil map.
+// A session without state deltas returns an empty, non-nil map.
 //
 // Snapshots recursively copy JSON-like values (map[string]any and []any), byte
 // slices, and json.RawMessage. Other values are copied by assignment; callers
 // must treat other reference-bearing types as immutable. Values must be acyclic.
-// StateSnapshot must not run concurrently with writes to the agent's logs.
-func (a *Agent) StateSnapshot() map[string]any {
+// StateSnapshot must not run concurrently with writes to the session's logs.
+func (s *Session) StateSnapshot() map[string]any {
 	state := make(map[string]any)
-	for _, entry := range a.sessionLogs {
+	for _, entry := range s.logs {
 		if entry.Kind != KindStateDelta || entry.Delta == nil {
 			continue
 		}

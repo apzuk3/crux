@@ -7,15 +7,15 @@ import (
 	"github.com/google/uuid"
 )
 
-// Fork creates an agent with the full retained history and inherited
-// configuration, then applies opts in order. See ForkFrom for copying rules.
-// Fork must not run concurrently with writes to the agent.
-func (a *Agent) Fork(opts ...AgentOption) (*Agent, error) {
-	return a.ForkFrom(len(a.sessionLogs), opts...)
+// Fork creates a session with the full retained history and inherited
+// configuration, then applies opts in order to the session's agent. See ForkFrom for copying rules.
+// Fork must not run concurrently with writes to the session.
+func (s *Session) Fork(opts ...AgentOption) (*Session, error) {
+	return s.ForkFrom(len(s.logs), opts...)
 }
 
-// ForkFrom creates an agent with logs[:from] and inherited configuration, then
-// applies opts in order. from is an exclusive slice offset, not an Entry.Seq.
+// ForkFrom creates a session with logs[:from] and inherited configuration, then
+// applies opts in order to the session's agent. from is an exclusive slice offset, not an Entry.Seq.
 // Empty history is valid; a prefix with an unfinished local tool exchange or
 // an unmatched tool result is not.
 // Changing providers clears opaque data and removes provider-only tool events
@@ -25,63 +25,96 @@ func (a *Agent) Fork(opts ...AgentOption) (*Agent, error) {
 // follow StateSnapshot's copying rules. Bound tools are inherited unless tool
 // options are supplied, which resolve a fresh selection from the registry.
 // The tools registry and output schema remain shared unless overridden.
-// Fork must not run concurrently with writes to the agent.
-func (a *Agent) ForkFrom(from int, opts ...AgentOption) (*Agent, error) {
-	if from < 0 || from > len(a.sessionLogs) {
-		return nil, fmt.Errorf("cannot fork at offset %d: must be between 0 and %d", from, len(a.sessionLogs))
+// Fork must not run concurrently with writes to the session.
+func (s *Session) ForkFrom(from int, opts ...AgentOption) (*Session, error) {
+	if from < 0 || from > len(s.logs) {
+		return nil, fmt.Errorf("cannot fork at offset %d: must be between 0 and %d", from, len(s.logs))
 	}
-	if err := validateForkHistory(a.sessionLogs[:from]); err != nil {
+	if err := validateForkHistory(s.logs[:from]); err != nil {
 		return nil, fmt.Errorf("cannot fork at offset %d: %w", from, err)
 	}
 
-	fork := *a
-	fork.SessionID = uuid.New()
-	fork.sessionLogs = cloneEntries(a.sessionLogs[:from])
-	fork.Tools = slices.Clone(a.Tools)
-	if a.SearchOptions != nil {
-		search := *a.SearchOptions
-		if search.UserLocation != nil {
-			WithUserLocation(*search.UserLocation)(&search)
-		}
-		fork.SearchOptions = &search
-	}
-	for _, opt := range opts {
-		if err := opt(&fork); err != nil {
-			return nil, err
-		}
+	clonedAgent, err := s.agent.clone(opts...)
+	if err != nil {
+		return nil, err
 	}
 
-	if fork.Provider == a.Provider && fork.Model != a.Model {
-		if inferred := inferProvider(fork.Model); inferred != "" {
-			fork.Provider = inferred
+	forkedLogs := cloneEntries(s.logs[:from])
+	if clonedAgent.Provider != s.agent.Provider {
+		for i := range forkedLogs {
+			forkedLogs[i].Opaque = nil
 		}
-	}
-
-	if fork.Provider != a.Provider {
-		if fork.apikey == a.apikey {
-			fork.apikey = discoverAPIKey(fork.Provider)
-		}
-		if fork.BaseURL == a.BaseURL {
-			fork.BaseURL = ""
-			switch fork.Provider {
-			case ProviderOpenrouter:
-				fork.BaseURL = "https://openrouter.ai/api/v1"
-			case ProviderXAI:
-				fork.BaseURL = "https://api.x.ai/v1"
-			case ProviderDeepSeek:
-				fork.BaseURL = "https://api.deepseek.com"
-			case ProviderOllama:
-				fork.BaseURL = "http://localhost:11434/v1"
-			}
-		}
-		for i := range fork.sessionLogs {
-			fork.sessionLogs[i].Opaque = nil
-		}
-		fork.sessionLogs = slices.DeleteFunc(fork.sessionLogs, func(entry Entry) bool {
+		forkedLogs = slices.DeleteFunc(forkedLogs, func(entry Entry) bool {
 			return entry.Kind == KindProviderTool
 		})
 	}
-	return &fork, nil
+
+	return &Session{
+		id:         uuid.New(),
+		agent:      clonedAgent,
+		logs:       forkedLogs,
+		httpClient: s.httpClient,
+	}, nil
+}
+
+func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {
+	allOpts := make([]AgentOption, 0, len(opts)+2)
+
+	allOpts = append(allOpts, func(fork *Agent) error {
+		fork.maxTurns = a.maxTurns
+		fork.instructions = a.instructions
+		fork.Provider = a.Provider
+		fork.baseURL = a.baseURL
+		fork.httpClient = a.httpClient
+		fork.outputSchema = a.outputSchema
+		fork.maxRepairs = a.maxRepairs
+		fork.apiKey = a.apiKey
+		fork.tools = slices.Clone(a.tools)
+		fork.searchOptions = cloneSearchOptions(a.searchOptions)
+		return nil
+	})
+
+	allOpts = append(allOpts, opts...)
+
+	allOpts = append(allOpts, func(fork *Agent) error {
+		if fork.Provider == a.Provider && fork.model != a.model {
+			if inferred := inferProvider(fork.model); inferred != "" {
+				fork.Provider = inferred
+			}
+		}
+
+		if fork.Provider != a.Provider {
+			if fork.apiKey == a.apiKey {
+				fork.apiKey = ""
+			}
+			if fork.baseURL == a.baseURL {
+				fork.baseURL = ""
+			}
+		}
+		return nil
+	})
+
+	return New(a.name, a.model, allOpts...)
+}
+
+func cloneSearchOptions(s *SearchOptions) *SearchOptions {
+	if s == nil {
+		return nil
+	}
+	search := *s
+	if s.UserLocation != nil {
+		loc := *s.UserLocation
+		if s.UserLocation.Latitude != nil {
+			lat := *s.UserLocation.Latitude
+			loc.Latitude = &lat
+		}
+		if s.UserLocation.Longitude != nil {
+			long := *s.UserLocation.Longitude
+			loc.Longitude = &long
+		}
+		search.UserLocation = &loc
+	}
+	return &search
 }
 
 func validateForkHistory(entries []Entry) error {

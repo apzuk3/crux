@@ -15,7 +15,7 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 	call3 := &ToolCall{ID: "call_3", Name: "delete_user", Args: json.RawMessage(`{"id": 42}`)}
 
 	agent := &Agent{
-		Tools: []Tool{
+		tools: []Tool{
 			{
 				name:           "get_weather",
 				approvalNeeded: false,
@@ -41,16 +41,19 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 				},
 			},
 		},
-		sessionLogs: []Entry{
-			{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "start"}}},
-			{Kind: KindToolCall, ToolCall: call1},
-			{Kind: KindToolCall, ToolCall: call2},
-			{Kind: KindToolCall, ToolCall: call3},
-		},
+	}
+	session, err := NewSession(agent, WithSessionLogs([]Entry{
+		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "start"}}},
+		{Kind: KindToolCall, ToolCall: call1},
+		{Kind: KindToolCall, ToolCall: call2},
+		{Kind: KindToolCall, ToolCall: call3},
+	}))
+	if err != nil {
+		t.Fatalf("NewSession failed: %v", err)
 	}
 
 	// 1. Pending approvals should only include call2 and call3 (call1 doesn't need approval)
-	pending := agent.PendingApprovals()
+	pending := session.PendingApprovals()
 	if len(pending) != 2 {
 		t.Fatalf("expected 2 pending approvals, got %d", len(pending))
 	}
@@ -60,20 +63,20 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 
 	// 2. Attempting to resume before all approvals are decided should fail with ErrApprovalNeeded
 	ctx := context.Background()
-	if _, err := agent.Resume(ctx); !errors.Is(err, ErrApprovalNeeded) {
+	if _, err := session.Resume(ctx); !errors.Is(err, ErrApprovalNeeded) {
 		t.Fatalf("expected ErrApprovalNeeded, got %v", err)
 	}
-	if res := agent.executeUnexecutedToolCalls(ctx); len(res) != 0 || len(executionOrder) != 0 {
+	if res := session.executeUnexecutedToolCalls(ctx); len(res) != 0 || len(executionOrder) != 0 {
 		t.Fatalf("expected 0 tools executed before approvals, got res=%v, order=%v", res, executionOrder)
 	}
 
 	// 3. User approves call2
-	if err := agent.Approve(ctx, "call_2"); err != nil {
+	if err := session.Approve(ctx, "call_2"); err != nil {
 		t.Fatalf("Approve call_2 failed: %v", err)
 	}
 
 	// Verify approval entry is in logs and no execution occurred yet
-	lastEntry := agent.sessionLogs[len(agent.sessionLogs)-1]
+	lastEntry := session.logs[len(session.logs)-1]
 	if lastEntry.Kind != KindApproval || lastEntry.Approval == nil || !lastEntry.Approval.Approved {
 		t.Fatalf("expected KindApproval with Approved=true, got %+v", lastEntry)
 	}
@@ -82,38 +85,38 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 	}
 
 	// Still 1 pending approval (call3)
-	pending = agent.PendingApprovals()
+	pending = session.PendingApprovals()
 	if len(pending) != 1 || pending[0].ID != "call_3" {
 		t.Fatalf("expected call_3 pending, got %+v", pending)
 	}
 
 	// Still blocked because call3 is not decided
-	if _, err := agent.Resume(ctx); !errors.Is(err, ErrApprovalNeeded) {
+	if _, err := session.Resume(ctx); !errors.Is(err, ErrApprovalNeeded) {
 		t.Fatalf("expected ErrApprovalNeeded while call_3 undecided, got %v", err)
 	}
-	if res := agent.executeUnexecutedToolCalls(ctx); len(res) != 0 || len(executionOrder) != 0 {
+	if res := session.executeUnexecutedToolCalls(ctx); len(res) != 0 || len(executionOrder) != 0 {
 		t.Fatalf("tool 1 must not execute ahead of undecided tool 3: res=%v, order=%v", res, executionOrder)
 	}
 
 	// 4. User rejects call3
-	if err := agent.Reject(ctx, "call_3", "permission denied by policy"); err != nil {
+	if err := session.Reject(ctx, "call_3", "permission denied by policy"); err != nil {
 		t.Fatalf("Reject call_3 failed: %v", err)
 	}
 
 	// Verify rejection entry is in logs
-	lastEntry = agent.sessionLogs[len(agent.sessionLogs)-1]
+	lastEntry = session.logs[len(session.logs)-1]
 	if lastEntry.Kind != KindApproval || lastEntry.Approval == nil || lastEntry.Approval.Approved {
 		t.Fatalf("expected KindApproval with Approved=false, got %+v", lastEntry)
 	}
 
 	// Now 0 pending approvals
-	if len(agent.PendingApprovals()) != 0 {
-		t.Fatalf("expected 0 pending approvals after reject, got %d", len(agent.PendingApprovals()))
+	if len(session.PendingApprovals()) != 0 {
+		t.Fatalf("expected 0 pending approvals after reject, got %d", len(session.PendingApprovals()))
 	}
 
 	// 5. Execute unexecuted tool calls: should execute in model order: call1, call2, call3
-	toolResults := agent.executeUnexecutedToolCalls(ctx)
-	agent.sessionLogs = append(agent.sessionLogs, toolResults...)
+	toolResults := session.executeUnexecutedToolCalls(ctx)
+	session.logs = append(session.logs, toolResults...)
 
 	// Tool 1 and Tool 2 were executed, Tool 3 was rejected (invoke not called)
 	if len(executionOrder) != 2 || executionOrder[0] != "get_weather" || executionOrder[1] != "transfer_funds" {
@@ -122,7 +125,7 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 
 	// Check tool results in logs
 	var results []ToolResult
-	for _, e := range agent.sessionLogs {
+	for _, e := range session.logs {
 		if e.Kind == KindToolResult && e.ToolResult != nil {
 			results = append(results, *e.ToolResult)
 		}
@@ -142,7 +145,7 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 	}
 
 	// No unexecuted calls remain
-	if agent.hasUnexecutedToolCalls() {
+	if session.hasUnexecutedToolCalls() {
 		t.Fatalf("expected all tool calls to be resolved")
 	}
 }
@@ -189,26 +192,29 @@ func TestForkRetainsKindApproval(t *testing.T) {
 	call := &ToolCall{ID: "call_1", Name: "op", Args: json.RawMessage(`{"k":"v"}`)}
 	agent := &Agent{
 		Provider: ProviderOpenAI,
-		sessionLogs: []Entry{
-			{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}},
-			{Kind: KindToolCall, ToolCall: call},
-			{Kind: KindApproval, Approval: &Approval{CallID: "call_1", Approved: true}},
-			{Kind: KindToolResult, ToolResult: &ToolResult{CallID: "call_1", Output: "done"}},
-		},
+	}
+	session, err := NewSession(agent, WithSessionLogs([]Entry{
+		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}},
+		{Kind: KindToolCall, ToolCall: call},
+		{Kind: KindApproval, Approval: &Approval{CallID: "call_1", Approved: true}},
+		{Kind: KindToolResult, ToolResult: &ToolResult{CallID: "call_1", Output: "done"}},
+	}))
+	if err != nil {
+		t.Fatalf("NewSession failed: %v", err)
 	}
 
-	fork, err := agent.Fork()
+	fork, err := session.Fork()
 	if err != nil {
-		t.Fatalf("agent.Fork failed: %v", err)
+		t.Fatalf("session.Fork failed: %v", err)
 	}
-	if len(fork.sessionLogs) != 4 {
-		t.Fatalf("expected 4 logs in fork, got %d", len(fork.sessionLogs))
+	if len(fork.logs) != 4 {
+		t.Fatalf("expected 4 logs in fork, got %d", len(fork.logs))
 	}
-	if fork.sessionLogs[2].Kind != KindApproval {
-		t.Fatalf("expected entry 2 to be KindApproval, got %v", fork.sessionLogs[2].Kind)
+	if fork.logs[2].Kind != KindApproval {
+		t.Fatalf("expected entry 2 to be KindApproval, got %v", fork.logs[2].Kind)
 	}
-	if fork.sessionLogs[2].Approval == nil || fork.sessionLogs[2].Approval.CallID != "call_1" || !fork.sessionLogs[2].Approval.Approved {
-		t.Fatalf("unexpected Approval in forked approval entry: %+v", fork.sessionLogs[2].Approval)
+	if fork.logs[2].Approval == nil || fork.logs[2].Approval.CallID != "call_1" || !fork.logs[2].Approval.Approved {
+		t.Fatalf("unexpected Approval in forked approval entry: %+v", fork.logs[2].Approval)
 	}
 }
 
@@ -218,31 +224,36 @@ func TestApproveRejectHonorContextCancellation(t *testing.T) {
 
 	call := &ToolCall{ID: "call_1", Name: "action", Args: json.RawMessage(`{}`)}
 	agent := &Agent{
-		Tools: []Tool{{name: "action", approvalNeeded: true}},
-		sessionLogs: []Entry{
-			{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}},
-			{Kind: KindToolCall, ToolCall: call},
-		},
+		tools: []Tool{{name: "action", approvalNeeded: true}},
+	}
+	session, err := NewSession(agent, WithSessionLogs([]Entry{
+		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}},
+		{Kind: KindToolCall, ToolCall: call},
+	}))
+	if err != nil {
+		t.Fatalf("NewSession failed: %v", err)
 	}
 
-	if err := agent.Approve(ctx, "call_1"); !errors.Is(err, context.Canceled) {
+	if err := session.Approve(ctx, "call_1"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled from Approve, got %v", err)
 	}
 
-	if err := agent.Reject(ctx, "call_1", "reason"); !errors.Is(err, context.Canceled) {
+	if err := session.Reject(ctx, "call_1", "reason"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled from Reject, got %v", err)
 	}
 }
 
 func TestResumeIdempotentWhenAlreadyCompleted(t *testing.T) {
-	agent := &Agent{
-		sessionLogs: []Entry{
-			{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hello"}}},
-			{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: "world"}}},
-		},
+	agent := &Agent{}
+	session, err := NewSession(agent, WithSessionLogs([]Entry{
+		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hello"}}},
+		{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: "world"}}},
+	}))
+	if err != nil {
+		t.Fatalf("NewSession failed: %v", err)
 	}
 
-	out, err := agent.Resume(context.Background())
+	out, err := session.Resume(context.Background())
 	if err != nil {
 		t.Fatalf("expected Resume on completed agent to succeed, got %v", err)
 	}

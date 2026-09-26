@@ -133,13 +133,16 @@ func Test_WebSearchEval(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 
+			sess, err := crux.NewSession(agent)
+			require.NoError(t, err)
+
 			// Turn 1: Execute prompt requiring live web search and official citations
-			out1, err := agent.Run(ctx, webSearchUserPrompt)
+			out1, err := sess.Run(ctx, webSearchUserPrompt)
 			require.NoError(t, err, "turn 1 web search query failed")
 			require.NotEmpty(t, out1, "expected non-empty response from web search turn")
 			t.Logf("[%s] Turn 1 Output:\n%s", tc.name, out1)
 
-			logs := agent.Logs()
+			logs := sess.Logs()
 
 			// Validate URL links or citations in the final response
 			hasURLOrCitation := urlPattern.MatchString(out1)
@@ -193,7 +196,7 @@ func Test_WebSearchEval(t *testing.T) {
 			}
 
 			// Turn 2: Verify multi-turn execution following search turn does not fail to serialize provider tool entries
-			out2, err := agent.Run(ctx, webSearchTurn2Prompt)
+			out2, err := sess.Run(ctx, webSearchTurn2Prompt)
 			require.NoError(t, err, "turn 2 multi-turn execution failed after search turn")
 			require.NotEmpty(t, out2, "expected non-empty response from turn 2")
 			t.Logf("[%s] Turn 2 Output:\n%s", tc.name, out2)

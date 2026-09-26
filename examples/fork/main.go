@@ -28,7 +28,9 @@ func main() {
 		crux.WithInstructions("You are a helpful travel planner. Keep answers concise."),
 	))
 
-	response, err := agent.Run(ctx, "Plan a one-day visit to Rome for two adults with a 150 euro budget. We prefer history and vegetarian food.")
+	session := crux.MustSession(crux.NewSession(agent))
+
+	response, err := session.Run(ctx, "Plan a one-day visit to Rome for two adults with a 150 euro budget. We prefer history and vegetarian food.")
 	if err != nil {
 		log.Fatalf("OpenAI: %v", err)
 	}
@@ -36,7 +38,7 @@ func main() {
 
 	// Fork at the end of the completed conversation, retaining its full history.
 	// Connection settings are inherited, so explicitly use Gemini's credentials.
-	fork, err := agent.Fork(
+	fork, err := session.Fork(
 		crux.WithProvider(crux.ProviderGoogle),
 		crux.WithModel(crux.Gemini2_5Flash),
 		crux.WithAPIKey(geminiKey),

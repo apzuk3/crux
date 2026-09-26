@@ -111,7 +111,10 @@ func Test_SubAgentDelegation(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 
-			finalAnswer, err := parentAgent.Run(ctx, incidentReportPrompt)
+			parentSess, err := crux.NewSession(parentAgent)
+			require.NoError(t, err)
+
+			finalAnswer, err := parentSess.Run(ctx, incidentReportPrompt)
 			require.NoError(t, err)
 			require.NotEmpty(t, finalAnswer)
 			t.Logf("[%s] Parent final answer: %s", tc.name, finalAnswer)
@@ -120,7 +123,7 @@ func Test_SubAgentDelegation(t *testing.T) {
 			var toolCallID string
 			var sawSubAgentToolCall bool
 			var sawSubAgentToolResult bool
-			for _, entry := range parentAgent.Logs() {
+			for _, entry := range parentSess.Logs() {
 				if entry.Kind == crux.KindToolCall && entry.ToolCall != nil && entry.ToolCall.Name == "agent_summary-agent" {
 					sawSubAgentToolCall = true
 					toolCallID = entry.ToolCall.ID
@@ -134,13 +137,10 @@ func Test_SubAgentDelegation(t *testing.T) {
 			require.True(t, sawSubAgentToolCall, "expected parent to invoke agent_summary-agent")
 			require.True(t, sawSubAgentToolResult, "expected parent to receive tool result from agent_summary-agent")
 
-			// 4. Assert subagent executed its own live turn
-			require.NotEmpty(t, subAgent.Logs(), "expected subagent to have executed turn logs")
-
-			// 5. Assert state delta populated: Set[subAgent.Name]
-			state := parentAgent.StateSnapshot()
-			rawVal, exists := state[subAgent.Name]
-			require.True(t, exists, "expected parent state snapshot to contain key for subagent %q", subAgent.Name)
+			// 4. Assert state delta populated: Set[subAgent.Name()]
+			state := parentSess.StateSnapshot()
+			rawVal, exists := state[subAgent.Name()]
+			require.True(t, exists, "expected parent state snapshot to contain key for subagent %q", subAgent.Name())
 
 			rawOutput, ok := rawVal.(string)
 			require.True(t, ok, "expected subagent state value to be string")

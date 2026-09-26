@@ -152,11 +152,13 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 			t.Run("nullable_and_pointers", func(t *testing.T) {
 				agent := newAgent(t, "nullable-test", tc.provider, tc.model,
 					crux.WithOutputSchemaFrom[NullableOutput]())
+				sess, err := crux.NewSession(agent)
+				require.NoError(t, err)
 
 				var out NullableOutput
 				prompt := `Return JSON for a person named "Alice". Include email "alice@example.com", score 95, active true, and metadata {"role": "admin"}.`
 
-				err := agent.RunInto(ctx, prompt, &out)
+				err = sess.RunInto(ctx, prompt, &out)
 				require.NoError(t, err)
 				require.Equal(t, "Alice", out.Name)
 				require.NotNil(t, out.Email)
@@ -171,11 +173,13 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 			t.Run("numeric_precision", func(t *testing.T) {
 				agent := newAgent(t, "numeric-test", tc.provider, tc.model,
 					crux.WithOutputSchemaFrom[NumericOutput]())
+				sess, err := crux.NewSession(agent)
+				require.NoError(t, err)
 
 				var out NumericOutput
 				prompt := `Return id=9007199254740993, big_id=123456789012345678, float_val=123.456, count=42.`
 
-				err := agent.RunInto(ctx, prompt, &out)
+				err = sess.RunInto(ctx, prompt, &out)
 				require.NoError(t, err)
 				require.Equal(t, uint64(9007199254740993), out.ID) // tests decodeJSONNumber + UseNumber()
 				require.Equal(t, uint64(123456789012345678), out.BigID)
@@ -188,11 +192,13 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 				t.Run("maps_and_nesting_gemini", func(t *testing.T) {
 					agent := newAgent(t, "nested-test", tc.provider, tc.model,
 						crux.WithOutputSchemaFrom[NestedOutput]())
+					sess, err := crux.NewSession(agent)
+					require.NoError(t, err)
 
 					var out NestedOutput
 					prompt := `Return title="Test", items=["a","b"], details={"x":1,"y":2}, and two children.`
 
-					err := agent.RunInto(ctx, prompt, &out)
+					err = sess.RunInto(ctx, prompt, &out)
 					require.NoError(t, err)
 					require.Equal(t, "Test", out.Title)
 					require.Len(t, out.Items, 2)
@@ -215,11 +221,13 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 			t.Run("markdown_wrapped_json", func(t *testing.T) {
 				agent := newAgent(t, "markdown-test", tc.provider, tc.model,
 					crux.WithOutputSchemaFrom[MarkdownWrappedOutput]())
+				sess, err := crux.NewSession(agent)
+				require.NoError(t, err)
 
 				var out MarkdownWrappedOutput
 				prompt := `First think step by step, then output a JSON code block containing: status="success", message="hello from markdown", count=7. Wrap the final answer in a json code block.`
 
-				err := agent.RunInto(ctx, prompt, &out)
+				err = sess.RunInto(ctx, prompt, &out)
 				require.NoError(t, err, "should successfully extract JSON from markdown fence")
 				require.Equal(t, "success", out.Status)
 				require.Contains(t, out.Message, "markdown")

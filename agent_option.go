@@ -17,6 +17,20 @@ type AgentConfig struct {
 
 type AgentOption func(*Agent) error
 
+type SessionOption func(*Session) error
+
+func WithSessionID(id uuid.UUID) SessionOption {
+	return func(s *Session) error { s.id = id; return nil }
+}
+
+func WithSessionLogs(logs []Entry) SessionOption {
+	return func(s *Session) error { s.logs = cloneEntries(logs); return nil }
+}
+
+func WithSessionHTTPClient(client *http.Client) SessionOption {
+	return func(s *Session) error { s.httpClient = client; return nil }
+}
+
 // WithTools replaces existing registry tools with the selected ones, preserving subagents.
 func WithTools(tools []string) AgentOption {
 	return func(a *Agent) error {
@@ -25,10 +39,10 @@ func WithTools(tools []string) AgentOption {
 			return err
 		}
 
-		a.Tools = slices.DeleteFunc(a.Tools, func(t Tool) bool {
+		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
 			return t.kind == ToolKindTool
 		})
-		a.Tools = append(a.Tools, selected...)
+		a.tools = append(a.tools, selected...)
 
 		return nil
 	}
@@ -37,7 +51,7 @@ func WithTools(tools []string) AgentOption {
 // WithoutTools removes all registry tools, preserving subagents.
 func WithoutTools() AgentOption {
 	return func(a *Agent) error {
-		a.Tools = slices.DeleteFunc(a.Tools, func(t Tool) bool {
+		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
 			return t.kind == ToolKindTool
 		})
 		return nil
@@ -47,7 +61,7 @@ func WithoutTools() AgentOption {
 // WithoutSubagents removes all subagents, preserving registry tools.
 func WithoutSubagents() AgentOption {
 	return func(a *Agent) error {
-		a.Tools = slices.DeleteFunc(a.Tools, func(t Tool) bool {
+		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
 			return t.kind == ToolKindSubagent
 		})
 		return nil
@@ -62,21 +76,17 @@ func WithToolsRegistry(tools []string, registry ToolsRegistry) AgentOption {
 			return err
 		}
 
-		a.Tools = slices.DeleteFunc(a.Tools, func(t Tool) bool {
+		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
 			return t.kind == ToolKindTool
 		})
-		a.Tools = append(a.Tools, selected...)
+		a.tools = append(a.tools, selected...)
 
 		return nil
 	}
 }
 
-func WithSessionID(sessionID uuid.UUID) AgentOption {
-	return func(a *Agent) error { a.SessionID = sessionID; return nil }
-}
-
 func WithInstructions(instructions string) AgentOption {
-	return func(a *Agent) error { a.Instructions = instructions; return nil }
+	return func(a *Agent) error { a.instructions = instructions; return nil }
 }
 
 // WithUserLocation supplies geographic context using the fields supported by
@@ -106,7 +116,7 @@ func WithWebSearch(opts ...SearchOption) AgentOption {
 		for _, opt := range opts {
 			opt(search)
 		}
-		a.SearchOptions = search
+		a.searchOptions = search
 
 		return nil
 	}
@@ -119,38 +129,38 @@ func WithProvider(provider Provider) AgentOption {
 // WithModel changes the model. When forking across providers, also set
 // WithProvider and the destination's connection settings.
 func WithModel(model string) AgentOption {
-	return func(a *Agent) error { a.Model = model; return nil }
+	return func(a *Agent) error { a.model = model; return nil }
 }
 
 func WithMaxTurns(turns int32) AgentOption {
-	return func(a *Agent) error { a.MaxTurns = turns; return nil }
+	return func(a *Agent) error { a.maxTurns = turns; return nil }
 }
 
 func WithBaseURL(url string) AgentOption {
-	return func(a *Agent) error { a.BaseURL = url; return nil }
+	return func(a *Agent) error { a.baseURL = url; return nil }
 }
 
 // WithHTTPClient configures a custom HTTP client for API requests across all providers.
 func WithHTTPClient(client *http.Client) AgentOption {
-	return func(a *Agent) error { a.HTTPClient = client; return nil }
+	return func(a *Agent) error { a.httpClient = client; return nil }
 }
 
 func WithAPIKey(apikey string) AgentOption {
-	return func(a *Agent) error { a.apikey = apikey; return nil }
+	return func(a *Agent) error { a.apiKey = apikey; return nil }
 }
 
 // WithOutputSchema sets the response schema. Crux automatically adapts the schema
 // for each provider's wire requirements (strict object closure, property nullability,
 // and constraint placement).
 func WithOutputSchema(schema *jsonschema.Schema) AgentOption {
-	return func(a *Agent) error { a.OutputSchema = schema; return nil }
+	return func(a *Agent) error { a.outputSchema = schema; return nil }
 }
 
 // WithMaxRepairs sets the number of attempts the agent will make
 // to ask the model to repair its response if output validation fails.
 func WithMaxRepairs(repairs int) AgentOption {
 	return func(a *Agent) error {
-		a.MaxRepairs = repairs
+		a.maxRepairs = repairs
 		return nil
 	}
 }
@@ -213,12 +223,12 @@ func WithOutputSchemaFrom[T any]() AgentOption {
 		var zero T
 		switch any(&zero).(type) {
 		case *string, *any:
-			a.OutputSchema = nil
+			a.outputSchema = nil
 		default:
 			schema := outputReflector.ReflectFromType(reflect.TypeFor[T]())
 			schema.Version = ""
 			makeOptionalNullable(schema)
-			a.OutputSchema = schema
+			a.outputSchema = schema
 		}
 
 		return nil
@@ -231,33 +241,37 @@ func WithOutputSchemaFrom[T any]() AgentOption {
 func WithSubAgent(subAgent *Agent, description string) AgentOption {
 	return func(parent *Agent) error {
 		schema := map[string]any{"type": "object", "properties": map[string]any{}}
-		if subAgent.OutputSchema != nil {
+		if subAgent.outputSchema != nil {
 			schema = nil
-			raw, err := json.Marshal(subAgent.OutputSchema)
+			raw, err := json.Marshal(subAgent.outputSchema)
 			if err != nil {
-				return fmt.Errorf("encode schema for subagent %q: %w", subAgent.Name, err)
+				return fmt.Errorf("encode schema for subagent %q: %w", subAgent.name, err)
 			}
 			if err := json.Unmarshal(raw, &schema); err != nil {
-				return fmt.Errorf("decode schema for subagent %q: %w", subAgent.Name, err)
+				return fmt.Errorf("decode schema for subagent %q: %w", subAgent.name, err)
 			}
 		}
 
 		tool := Tool{
-			name:        "agent_" + subAgent.Name,
+			name:        "agent_" + subAgent.name,
 			description: description,
 			schema:      schema,
 			kind:        ToolKindSubagent,
 			invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
-				output, err := subAgent.Run(ctx, string(args))
+				sess, err := NewSession(subAgent)
+				if err != nil {
+					return "", nil, err
+				}
+				output, err := sess.Run(ctx, string(args))
 				if err != nil {
 					return "", nil, err
 				}
 
-				return output, &StateDelta{Set: map[string]any{subAgent.Name: output}}, nil
+				return output, &StateDelta{Set: map[string]any{subAgent.name: output}}, nil
 			},
 		}
 
-		parent.Tools = append(parent.Tools, tool)
+		parent.tools = append(parent.tools, tool)
 
 		return nil
 	}

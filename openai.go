@@ -17,16 +17,17 @@ import (
 
 const openAIOutputItemOpaqueKey = "openai.response.output_item"
 
-func (a *Agent) newOpenAIClient() *openai.Client {
+func (a *Agent) newOpenAIClient(httpClient *http.Client) *openai.Client {
 	var opts []option.RequestOption
-	if a.apikey != "" {
-		opts = append(opts, option.WithAPIKey(a.apikey))
+	if a.apiKey != "" {
+		opts = append(opts, option.WithAPIKey(a.apiKey))
 	}
-	if a.BaseURL != "" {
-		opts = append(opts, option.WithBaseURL(a.BaseURL))
+	if a.baseURL != "" {
+		opts = append(opts, option.WithBaseURL(a.baseURL))
 	}
-	if a.HTTPClient != nil {
-		opts = append(opts, option.WithHTTPClient(a.HTTPClient))
+	client := a.effectiveHTTPClient(httpClient)
+	if client != nil {
+		opts = append(opts, option.WithHTTPClient(client))
 	} else if a.Provider != ProviderOpenAI {
 		// Construct the Responses service directly to avoid inheriting OpenAI
 		// credentials, organization, project, or custom headers from the environment.
@@ -36,21 +37,21 @@ func (a *Agent) newOpenAIClient() *openai.Client {
 		return &openai.Client{Options: opts, Responses: responses.NewResponseService(opts...)}
 	}
 
-	client := openai.NewClient(opts...)
-	return &client
+	c := openai.NewClient(opts...)
+	return &c
 }
 
 // openAIstep sends the log and returns the model's entries with usage attached.
-func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
+func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Client) ([]Entry, error) {
 	input, err := toOpenAIResponseInput(log)
 	if err != nil {
 		return nil, err
 	}
 
 	params := responses.ResponseNewParams{
-		Model: openai.ResponsesModel(a.Model),
+		Model: openai.ResponsesModel(a.model),
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: input},
-		Tools: openAITools(a.Tools),
+		Tools: openAITools(a.tools),
 		Store: openai.Bool(false),
 	}
 
@@ -59,12 +60,12 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 		// Nothing is kept server side, so reasoning travels with the log.
 		params.Include = []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent}
 	}
-	if a.Instructions != "" {
-		params.Instructions = openai.String(a.Instructions)
+	if a.instructions != "" {
+		params.Instructions = openai.String(a.instructions)
 	}
-	if a.SearchOptions != nil {
+	if a.searchOptions != nil {
 		tool := responses.ToolParamOfWebSearch(responses.WebSearchToolTypeWebSearch)
-		if location := a.SearchOptions.UserLocation; location != nil && a.Provider == ProviderOpenAI {
+		if location := a.searchOptions.UserLocation; location != nil && a.Provider == ProviderOpenAI {
 			if location.Country != "" {
 				tool.OfWebSearch.UserLocation.Country = openai.String(location.Country)
 			}
@@ -83,8 +84,8 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 		}
 		params.Tools = append(params.Tools, tool)
 	}
-	if a.OutputSchema != nil {
-		schema, err := wireSchemaFor(a.OutputSchema, a.Provider)
+	if a.outputSchema != nil {
+		schema, err := wireSchemaFor(a.outputSchema, a.Provider)
 		if err != nil {
 			return nil, err
 		}
@@ -100,7 +101,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry) ([]Entry, error) {
 		}
 	}
 
-	client := a.newOpenAIClient()
+	client := a.newOpenAIClient(httpClient)
 	response, err := client.Responses.New(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("%s responses: %w", a.Provider, err)

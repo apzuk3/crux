@@ -134,9 +134,12 @@ func Test_ComplexStructuredOutputValidation(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 
+			sess, err := crux.NewSession(agent)
+			require.NoError(t, err)
+
 			var report ProjectReport
-			err = agent.RunInto(ctx, complexSchemaPrompt, &report)
-			require.NoError(t, err, "agent.RunInto should execute and decode response into ProjectReport struct")
+			err = sess.RunInto(ctx, complexSchemaPrompt, &report)
+			require.NoError(t, err, "sess.RunInto should execute and decode response into ProjectReport struct")
 
 			// Validate top-level scalar and numeric fields
 			require.Equal(t, "Apollo", report.Name, "project name should match")
@@ -167,7 +170,7 @@ func Test_ComplexStructuredOutputValidation(t *testing.T) {
 			require.False(t, beta.Completed, "Beta should not be completed")
 
 			// Verify session history integrity
-			logs := agent.Logs()
+			logs := sess.Logs()
 			require.NotEmpty(t, logs, "session history should contain entries")
 			var hasAssistantEntry bool
 			for _, entry := range logs {

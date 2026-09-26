@@ -16,27 +16,86 @@ import (
 	"github.com/invopop/jsonschema"
 )
 
+// Agent is the immutable blueprint defining an agent's identity,
+// capabilities, instructions, and provider connection.
+// It is completely stateless and safe for concurrent use.
 type Agent struct {
-	SessionID uuid.UUID
+	name         string
+	model        string
+	instructions string
+	Provider     Provider
+	apiKey       string
+	baseURL      string
+	httpClient   *http.Client
 
-	// agent properties
-	Name         string
-	MaxTurns     int32
-	Instructions string
+	// Capabilities & Schemas
+	tools         []Tool
+	searchOptions *SearchOptions // nil disables web search
+	outputSchema  *jsonschema.Schema
 
-	Provider      Provider
-	Model         string
-	BaseURL       string
-	HTTPClient    *http.Client
-	OutputSchema  *jsonschema.Schema
-	MaxRepairs    int
-	SearchOptions *SearchOptions // nil disables web search
-	Tools         []Tool
+	// Execution Policies & Limits
+	maxTurns   int32
+	maxRepairs int
+}
 
-	// API key for the provider MUST be provided or discovered from the environment.
-	apikey string
+type Session struct {
+	id         uuid.UUID
+	agent      *Agent
+	logs       []Entry
+	httpClient *http.Client
+}
 
-	sessionLogs []Entry
+func NewSession(agent *Agent, opts ...SessionOption) (*Session, error) {
+	if agent == nil {
+		return nil, errors.New("agent cannot be nil")
+	}
+
+	session := &Session{
+		id:    uuid.New(),
+		agent: agent,
+		logs:  make([]Entry, 0),
+	}
+
+	for _, opt := range opts {
+		if err := opt(session); err != nil {
+			return nil, err
+		}
+	}
+
+	return session, nil
+}
+
+func MustSession(session *Session, err error) *Session {
+	if err != nil {
+		panic(err)
+	}
+
+	return session
+}
+
+func (s *Session) ID() uuid.UUID {
+	return s.id
+}
+
+func (s *Session) Agent() *Agent {
+	return s.agent
+}
+
+func (s *Session) Logs() []Entry {
+	return cloneEntries(s.logs)
+}
+
+func (s *Session) appendLogs(entries ...Entry) {
+	now := time.Now().UTC()
+	for i := range entries {
+		if entries[i].Seq == 0 {
+			entries[i].Seq = uint64(len(s.logs) + 1)
+		}
+		if entries[i].At.IsZero() {
+			entries[i].At = now
+		}
+		s.logs = append(s.logs, entries[i])
+	}
 }
 
 // SearchOptions configures provider-executed web search.
@@ -50,11 +109,10 @@ var NewAgent = New
 
 func New(name, model string, opts ...AgentOption) (*Agent, error) {
 	agent := &Agent{
-		SessionID: uuid.New(),
-		Name:      name,
-		Model:     model,
-		MaxTurns:  10,
-		Tools:     make([]Tool, 0),
+		name:     name,
+		model:    model,
+		maxTurns: 10,
+		tools:    make([]Tool, 0),
 	}
 	for _, opt := range opts {
 		if err := opt(agent); err != nil {
@@ -63,32 +121,32 @@ func New(name, model string, opts ...AgentOption) (*Agent, error) {
 	}
 
 	if agent.Provider == "" {
-		agent.Provider = inferProvider(agent.Model)
+		agent.Provider = inferProvider(agent.model)
 	}
 
 	if agent.Provider == "" {
-		return nil, fmt.Errorf("cannot infer provider from model %q, please pass through crux.WithProvider", agent.Model)
+		return nil, fmt.Errorf("cannot infer provider from model %q, please pass through crux.WithProvider", agent.model)
 	}
 
-	if agent.apikey == "" {
-		agent.apikey = discoverAPIKey(agent.Provider)
+	if agent.apiKey == "" {
+		agent.apiKey = discoverAPIKey(agent.Provider)
 	}
 
-	if agent.BaseURL == "" {
+	if agent.baseURL == "" {
 		switch agent.Provider {
 		case ProviderOpenrouter:
-			agent.BaseURL = "https://openrouter.ai/api/v1"
+			agent.baseURL = "https://openrouter.ai/api/v1"
 		case ProviderXAI:
-			agent.BaseURL = "https://api.x.ai/v1"
+			agent.baseURL = "https://api.x.ai/v1"
 		case ProviderDeepSeek:
-			agent.BaseURL = "https://api.deepseek.com"
+			agent.baseURL = "https://api.deepseek.com"
 		case ProviderOllama:
-			agent.BaseURL = "http://localhost:11434/v1"
+			agent.baseURL = "http://localhost:11434/v1"
 		}
 	}
 
-	if agent.Provider == ProviderOllama && agent.apikey == "" {
-		agent.apikey = "ollama" // Local Ollama ignores authentication.
+	if agent.Provider == ProviderOllama && agent.apiKey == "" {
+		agent.apiKey = "ollama" // Local Ollama ignores authentication.
 	}
 
 	return agent, nil
@@ -102,29 +160,33 @@ func Must(agent *Agent, err error) *Agent {
 	return agent
 }
 
+func (a *Agent) Name() string {
+	return a.name
+}
+
 // Run continues the retained conversation and returns its final text response.
 // User inputs, model entries, and tool results are retained even if a later step
-// fails. Run must not execute concurrently with other operations on the agent.
-func (a *Agent) Run(ctx context.Context, input any) (string, error) {
+// fails. Run must not execute concurrently with other operations on the session.
+func (s *Session) Run(ctx context.Context, input any) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 
-	if len(a.PendingApprovals()) > 0 {
+	if len(s.PendingApprovals()) > 0 {
 		return "", ErrApprovalNeeded
 	}
 
-	if input == nil && len(a.sessionLogs) == 0 {
+	if input == nil && len(s.logs) == 0 {
 		return "", errors.New("cannot run agent with no input and empty history")
 	}
 
-	validator, err := compileValidator(a.OutputSchema)
+	validator, err := compileValidator(s.agent.outputSchema)
 	if err != nil {
 		return "", fmt.Errorf("invalid output schema: %w", err)
 	}
 
 	if input == nil {
-		if text, ok := a.FinalOutput(); ok {
+		if text, ok := s.FinalOutput(); ok {
 			if validator != nil {
 				if err := validateOutput(validator, text); err != nil {
 					return "", err
@@ -134,7 +196,7 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 		}
 	}
 
-	if input != nil && a.hasUnexecutedToolCalls() {
+	if input != nil && s.hasUnexecutedToolCalls() {
 		return "", errors.New("cannot run agent with new user input while tool calls are pending execution; call Resume first")
 	}
 
@@ -149,25 +211,25 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 			return "", errors.New("user input produced empty text")
 		}
 
-		a.appendLogs(entry)
+		s.appendLogs(entry)
 	}
 
-	repairsLeft := a.MaxRepairs
+	repairsLeft := s.agent.maxRepairs
 	// ---> Notify start
-	for turn := 0; turn < int(a.MaxTurns); turn++ {
+	for turn := 0; turn < int(s.agent.maxTurns); turn++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
 
-		if toolResults := a.executeUnexecutedToolCalls(ctx); len(toolResults) > 0 {
-			a.appendLogs(toolResults...)
+		if toolResults := s.executeUnexecutedToolCalls(ctx); len(toolResults) > 0 {
+			s.appendLogs(toolResults...)
 		}
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
 
 		start := time.Now()
-		produced, err := a.step(ctx, a.sessionLogs)
+		produced, err := s.step(ctx, s.logs)
 		if err != nil {
 			return "", err
 		}
@@ -177,10 +239,10 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 
 		// Retain all model entries in history before dispatching local tools.
 		if len(produced) > 0 {
-			a.appendLogs(produced...)
+			s.appendLogs(produced...)
 		}
 
-		if len(a.PendingApprovals()) > 0 {
+		if len(s.PendingApprovals()) > 0 {
 			return "", ErrApprovalNeeded
 		}
 
@@ -192,17 +254,17 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 		}
 
 		// If the latest turn produced the final answer without requesting further tools:
-		if text, ok := a.FinalOutput(); ok {
+		if text, ok := s.FinalOutput(); ok {
 			if validator != nil {
 				if valErr := validateOutput(validator, text); valErr != nil {
-					if repairsLeft > 0 && turn+1 < int(a.MaxTurns) {
+					if repairsLeft > 0 && turn+1 < int(s.agent.maxTurns) {
 						repairsLeft--
 						repairMsg := fmt.Sprintf("Return corrected JSON. Output validation failed: %v", valErr)
 						entry, err := NewUserEntry(repairMsg)
 						if err != nil {
 							return "", err
 						}
-						a.appendLogs(entry)
+						s.appendLogs(entry)
 						continue
 					}
 					return "", valErr
@@ -216,22 +278,34 @@ func (a *Agent) Run(ctx context.Context, input any) (string, error) {
 	return "", errors.New("max turns reached")
 }
 
-func (a *Agent) step(ctx context.Context, log []Entry) ([]Entry, error) {
+func (s *Session) step(ctx context.Context, log []Entry) ([]Entry, error) {
+	return s.agent.step(ctx, log, s.httpClient)
+}
+
+func (a *Agent) effectiveHTTPClient(sessionClient *http.Client) *http.Client {
+	if sessionClient != nil {
+		return sessionClient
+	}
+	return a.httpClient
+}
+
+func (a *Agent) step(ctx context.Context, log []Entry, httpClient *http.Client) ([]Entry, error) {
+	client := a.effectiveHTTPClient(httpClient)
 	switch a.Provider {
 	case ProviderAnthropic:
-		return a.anthropicStep(ctx, log)
+		return a.anthropicStep(ctx, log, client)
 	case ProviderOpenAI:
-		return a.openAIstep(ctx, log)
+		return a.openAIstep(ctx, log, client)
 	case ProviderOpenrouter:
-		return a.openrouterStep(ctx, log)
+		return a.openrouterStep(ctx, log, client)
 	case ProviderGoogle:
-		return a.geminiStep(ctx, log)
+		return a.geminiStep(ctx, log, client)
 	case ProviderXAI:
-		return a.xaiStep(ctx, log)
+		return a.xaiStep(ctx, log, client)
 	case ProviderDeepSeek:
-		return a.deepseekStep(ctx, log)
+		return a.deepseekStep(ctx, log, client)
 	case ProviderOllama:
-		return a.ollamaStep(ctx, log)
+		return a.ollamaStep(ctx, log, client)
 	default:
 		return nil, fmt.Errorf("unsupported provider %q", a.Provider)
 	}
@@ -239,13 +313,13 @@ func (a *Agent) step(ctx context.Context, log []Entry) ([]Entry, error) {
 
 // FinalOutput returns the final assistant text if the latest turn completed
 // without requesting further tools, along with a boolean indicating completion.
-func (a *Agent) FinalOutput() (string, bool) {
-	if len(a.sessionLogs) == 0 || len(a.PendingApprovals()) > 0 || a.hasUnexecutedToolCalls() {
+func (s *Session) FinalOutput() (string, bool) {
+	if len(s.logs) == 0 || len(s.PendingApprovals()) > 0 || s.hasUnexecutedToolCalls() {
 		return "", false
 	}
 
-	start := len(a.sessionLogs)
-	for i, v := range slices.Backward(a.sessionLogs) {
+	start := len(s.logs)
+	for i, v := range slices.Backward(s.logs) {
 		kind := v.Kind
 		if kind == KindUser || kind == KindToolResult || v.HiddenFromModel() {
 			start = i + 1
@@ -256,11 +330,11 @@ func (a *Agent) FinalOutput() (string, bool) {
 		}
 	}
 
-	if start >= len(a.sessionLogs) {
+	if start >= len(s.logs) {
 		return "", false
 	}
 
-	latestTurn := a.sessionLogs[start:]
+	latestTurn := s.logs[start:]
 	if _, refused := latestRefusal(latestTurn); refused {
 		return "", false
 	}
@@ -295,26 +369,26 @@ func latestRefusal(entries []Entry) (string, bool) {
 	return "", false
 }
 
-func (a *Agent) Resume(ctx context.Context) (string, error) {
-	return a.Run(ctx, nil)
+func (s *Session) Resume(ctx context.Context) (string, error) {
+	return s.Run(ctx, nil)
 }
 
 func (a *Agent) toolRequiresApproval(name string) bool {
-	index := slices.IndexFunc(a.Tools, func(tool Tool) bool { return tool.name == name })
+	index := slices.IndexFunc(a.tools, func(tool Tool) bool { return tool.name == name })
 	if index < 0 {
 		return false
 	}
-	return a.Tools[index].approvalNeeded
+	return a.tools[index].approvalNeeded
 }
 
-func (a *Agent) hasUnexecutedToolCalls() bool {
+func (s *Session) hasUnexecutedToolCalls() bool {
 	resolved := make(map[string]bool)
-	for _, entry := range a.sessionLogs {
+	for _, entry := range s.logs {
 		if entry.Kind == KindToolResult && entry.ToolResult != nil && entry.ToolResult.CallID != "" {
 			resolved[entry.ToolResult.CallID] = true
 		}
 	}
-	for _, entry := range a.sessionLogs {
+	for _, entry := range s.logs {
 		if entry.Kind == KindToolCall && entry.ToolCall != nil && entry.ToolCall.ID != "" {
 			if !resolved[entry.ToolCall.ID] {
 				return true
@@ -324,14 +398,14 @@ func (a *Agent) hasUnexecutedToolCalls() bool {
 	return false
 }
 
-func (a *Agent) executeUnexecutedToolCalls(ctx context.Context) []Entry {
-	if len(a.PendingApprovals()) > 0 {
+func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
+	if len(s.PendingApprovals()) > 0 {
 		return nil
 	}
 
 	resolved := make(map[string]bool)
 	decisions := make(map[string]*Approval)
-	for _, entry := range a.sessionLogs {
+	for _, entry := range s.logs {
 		if entry.Kind == KindToolResult && entry.ToolResult != nil && entry.ToolResult.CallID != "" {
 			resolved[entry.ToolResult.CallID] = true
 		}
@@ -342,7 +416,7 @@ func (a *Agent) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 
 	var unexecuted []*ToolCall
 	seen := make(map[string]bool)
-	for _, entry := range a.sessionLogs {
+	for _, entry := range s.logs {
 		if entry.Kind == KindToolCall && entry.ToolCall != nil && entry.ToolCall.ID != "" {
 			id := entry.ToolCall.ID
 			if !resolved[id] && !seen[id] {
@@ -356,7 +430,7 @@ func (a *Agent) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 		return nil
 	}
 
-	state := a.StateSnapshot()
+	state := s.StateSnapshot()
 	var entries []Entry
 	// Execute in the exact order requested by the model.
 	for _, call := range unexecuted {
@@ -378,7 +452,7 @@ func (a *Agent) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 			continue
 		}
 
-		results, delta := a.dispatch(ctx, call, state)
+		results, delta := s.dispatch(ctx, call, state)
 		entries = append(entries, results...)
 		if delta != nil {
 			if delta.Set != nil {
@@ -393,10 +467,10 @@ func (a *Agent) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 	return entries
 }
 
-func (a *Agent) PendingApprovals() []*ToolCall {
+func (s *Session) PendingApprovals() []*ToolCall {
 	resolved := make(map[string]bool)
 	decisions := make(map[string]bool)
-	for _, entry := range a.sessionLogs {
+	for _, entry := range s.logs {
 		if entry.Kind == KindToolResult && entry.ToolResult != nil && entry.ToolResult.CallID != "" {
 			resolved[entry.ToolResult.CallID] = true
 		}
@@ -407,10 +481,10 @@ func (a *Agent) PendingApprovals() []*ToolCall {
 
 	var pending []*ToolCall
 	seen := make(map[string]bool)
-	for _, entry := range a.sessionLogs {
+	for _, entry := range s.logs {
 		if entry.Kind == KindToolCall && entry.ToolCall != nil && entry.ToolCall.ID != "" {
 			id := entry.ToolCall.ID
-			if !resolved[id] && !decisions[id] && !seen[id] && a.toolRequiresApproval(entry.ToolCall.Name) {
+			if !resolved[id] && !decisions[id] && !seen[id] && s.agent.toolRequiresApproval(entry.ToolCall.Name) {
 				seen[id] = true
 				pending = append(pending, entry.ToolCall)
 			}
@@ -419,7 +493,7 @@ func (a *Agent) PendingApprovals() []*ToolCall {
 	return pending
 }
 
-func (a *Agent) Approve(ctx context.Context, callID string) error {
+func (s *Session) Approve(ctx context.Context, callID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -428,7 +502,7 @@ func (a *Agent) Approve(ctx context.Context, callID string) error {
 		return errors.New("tool call ID cannot be empty")
 	}
 
-	pending := a.PendingApprovals()
+	pending := s.PendingApprovals()
 	idx := slices.IndexFunc(pending, func(p *ToolCall) bool {
 		return p.ID == callID
 	})
@@ -436,7 +510,7 @@ func (a *Agent) Approve(ctx context.Context, callID string) error {
 		return fmt.Errorf("tool call %q is not pending approval", callID)
 	}
 
-	a.appendLogs(Entry{
+	s.appendLogs(Entry{
 		Kind: KindApproval,
 		Approval: &Approval{
 			CallID:   callID,
@@ -446,7 +520,7 @@ func (a *Agent) Approve(ctx context.Context, callID string) error {
 	return nil
 }
 
-func (a *Agent) Reject(ctx context.Context, callID string, reason string) error {
+func (s *Session) Reject(ctx context.Context, callID string, reason string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -455,7 +529,7 @@ func (a *Agent) Reject(ctx context.Context, callID string, reason string) error 
 		return errors.New("tool call ID cannot be empty")
 	}
 
-	pending := a.PendingApprovals()
+	pending := s.PendingApprovals()
 	idx := slices.IndexFunc(pending, func(p *ToolCall) bool {
 		return p.ID == callID
 	})
@@ -467,7 +541,7 @@ func (a *Agent) Reject(ctx context.Context, callID string, reason string) error 
 		reason = "tool execution declined by user"
 	}
 
-	a.appendLogs(Entry{
+	s.appendLogs(Entry{
 		Kind: KindApproval,
 		Approval: &Approval{
 			CallID:   callID,
@@ -480,7 +554,7 @@ func (a *Agent) Reject(ctx context.Context, callID string, reason string) error 
 
 // RunInto executes the agent and decodes its final response into target.
 // target must be a non-nil pointer. Anything that is not text is decoded as JSON.
-func (a *Agent) RunInto(ctx context.Context, input any, target any) error {
+func (s *Session) RunInto(ctx context.Context, input any, target any) error {
 	if target == nil {
 		return errors.New("decode target cannot be nil")
 	}
@@ -490,7 +564,7 @@ func (a *Agent) RunInto(ctx context.Context, input any, target any) error {
 		return fmt.Errorf("decode target must be a non-nil pointer, got %T", target)
 	}
 
-	text, err := a.Run(ctx, input)
+	text, err := s.Run(ctx, input)
 	if err != nil {
 		return err
 	}
@@ -507,19 +581,19 @@ func (a *Agent) RunInto(ctx context.Context, input any, target any) error {
 // than returned, because the call is still owed an answer.
 //
 // dispatch returns the tool result entry and any state delta that the tool introduced.
-func (a *Agent) dispatch(ctx context.Context, call *ToolCall, snapshot map[string]any) ([]Entry, *StateDelta) {
+func (s *Session) dispatch(ctx context.Context, call *ToolCall, snapshot map[string]any) ([]Entry, *StateDelta) {
 	if call == nil {
 		return nil, nil
 	}
 
 	result := ToolResult{CallID: call.ID}
-	index := slices.IndexFunc(a.Tools, func(tool Tool) bool { return tool.name == call.Name })
+	index := slices.IndexFunc(s.agent.tools, func(tool Tool) bool { return tool.name == call.Name })
 	if index < 0 {
 		result.Error = fmt.Sprintf("tool %q is not allowed", call.Name)
 		return []Entry{{Kind: KindToolResult, ToolResult: &result}}, nil
 	}
 
-	tool := a.Tools[index]
+	tool := s.agent.tools[index]
 
 	start := time.Now()
 	output, delta, err := tool.invoke(ContextWithState(ctx, snapshot), call.Args)
@@ -605,22 +679,4 @@ func decodeInto(text string, target any) error {
 		return fmt.Errorf("decode agent output as %T: %w", target, err)
 	}
 	return nil
-}
-
-// Logs returns a clone of the agent's session log entries.
-func (a *Agent) Logs() []Entry {
-	return cloneEntries(a.sessionLogs)
-}
-
-func (a *Agent) appendLogs(entries ...Entry) {
-	now := time.Now().UTC()
-	for i := range entries {
-		if entries[i].Seq == 0 {
-			entries[i].Seq = uint64(len(a.sessionLogs) + 1)
-		}
-		if entries[i].At.IsZero() {
-			entries[i].At = now
-		}
-		a.sessionLogs = append(a.sessionLogs, entries[i])
-	}
 }

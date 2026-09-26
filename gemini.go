@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"google.golang.org/genai"
@@ -15,34 +16,35 @@ const geminiPartOpaqueKey = "gemini.content.part"
 // Candidate metadata is retained for sources/display, not replayed as a part.
 const geminiGroundingMetadataOpaqueKey = "gemini.candidate.grounding_metadata"
 
-func (a *Agent) newGeminiClient(ctx context.Context) (*genai.Client, error) {
+func (a *Agent) newGeminiClient(ctx context.Context, httpClient *http.Client) (*genai.Client, error) {
 	config := &genai.ClientConfig{Backend: genai.BackendGeminiAPI}
-	if a.apikey != "" {
-		config.APIKey = a.apikey
+	if a.apiKey != "" {
+		config.APIKey = a.apiKey
 	}
-	if a.BaseURL != "" {
-		config.HTTPOptions.BaseURL = a.BaseURL
+	if a.baseURL != "" {
+		config.HTTPOptions.BaseURL = a.baseURL
 	}
-	if a.HTTPClient != nil {
-		config.HTTPClient = a.HTTPClient
+	client := a.effectiveHTTPClient(httpClient)
+	if client != nil {
+		config.HTTPClient = client
 	}
 	return genai.NewClient(ctx, config)
 }
 
 // geminiStep returns the model's ordered parts with usage attached.
-func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
+func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Client) ([]Entry, error) {
 	contents, err := toGeminiContents(log)
 	if err != nil {
 		return nil, err
 	}
-	tools, err := geminiTools(a.Tools)
+	tools, err := geminiTools(a.tools)
 	if err != nil {
 		return nil, err
 	}
 	config := &genai.GenerateContentConfig{Tools: tools}
-	if a.SearchOptions != nil {
+	if a.searchOptions != nil {
 		config.Tools = append(config.Tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
-		if location := a.SearchOptions.UserLocation; location != nil && location.Latitude != nil && location.Longitude != nil {
+		if location := a.searchOptions.UserLocation; location != nil && location.Latitude != nil && location.Longitude != nil {
 			config.ToolConfig = &genai.ToolConfig{
 				RetrievalConfig: &genai.RetrievalConfig{
 					LatLng: &genai.LatLng{Latitude: location.Latitude, Longitude: location.Longitude},
@@ -50,11 +52,11 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 			}
 		}
 	}
-	if a.Instructions != "" {
-		config.SystemInstruction = &genai.Content{Parts: []*genai.Part{genai.NewPartFromText(a.Instructions)}}
+	if a.instructions != "" {
+		config.SystemInstruction = &genai.Content{Parts: []*genai.Part{genai.NewPartFromText(a.instructions)}}
 	}
-	if a.OutputSchema != nil {
-		schema, err := wireSchemaFor(a.OutputSchema, a.Provider)
+	if a.outputSchema != nil {
+		schema, err := wireSchemaFor(a.outputSchema, a.Provider)
 		if err != nil {
 			return nil, err
 		}
@@ -62,11 +64,11 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry) ([]Entry, error) {
 		config.ResponseJsonSchema = schema
 	}
 	// The SDK constructor can fail, so initialization errors flow through Run.
-	client, err := a.newGeminiClient(ctx)
+	client, err := a.newGeminiClient(ctx, httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("gemini client: %w", err)
 	}
-	response, err := client.Models.GenerateContent(ctx, a.Model, contents, config)
+	response, err := client.Models.GenerateContent(ctx, a.model, contents, config)
 	if err != nil {
 		return nil, fmt.Errorf("gemini generate content: %w", err)
 	}

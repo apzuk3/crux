@@ -171,26 +171,29 @@ func executeRejectionPrompt(t *testing.T, modelname string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
 	// 1. Initial run: Model requests wipe_disk, which requires approval
-	output, err := agent.Run(ctx, rejectionPrompt)
+	output, err := sess.Run(ctx, rejectionPrompt)
 	require.Error(t, err, "agent.Run should halt when approval is required")
 	require.ErrorIs(t, err, crux.ErrApprovalNeeded, "agent.Run must return ErrApprovalNeeded")
 	require.Empty(t, output, "output should be empty when approval is needed")
 
 	// 2. Inspect pending approvals
-	pending := agent.PendingApprovals()
+	pending := sess.PendingApprovals()
 	require.Len(t, pending, 1, "expected exactly one pending approval")
 	require.Equal(t, "wipe_disk", pending[0].Name)
 	require.Contains(t, string(pending[0].Args), "/var/log")
 	require.False(t, wipeExecuted.Load(), "wipe_disk tool handler must not execute before approval")
 
 	// 3. User rejects the tool call
-	err = agent.Reject(ctx, pending[0].ID, rejectionPolicyReason)
+	err = sess.Reject(ctx, pending[0].ID, rejectionPolicyReason)
 	require.NoError(t, err, "agent.Reject should succeed")
-	require.Empty(t, agent.PendingApprovals(), "pending approvals should be empty after rejection")
+	require.Empty(t, sess.PendingApprovals(), "pending approvals should be empty after rejection")
 
 	// 4. Resume the agent session with rejection feedback injected
-	resumedOutput, err := agent.Resume(ctx)
+	resumedOutput, err := sess.Resume(ctx)
 	require.NoError(t, err, "agent.Resume should succeed after rejection")
 	require.NotEmpty(t, resumedOutput, "agent should provide a response after resumption")
 
@@ -201,7 +204,7 @@ func executeRejectionPrompt(t *testing.T, modelname string) {
 		rejectionFound   bool
 	)
 
-	for _, entry := range agent.Logs() {
+	for _, entry := range sess.Logs() {
 		if entry.Kind == crux.KindApproval && entry.Approval != nil && !entry.Approval.Approved {
 			rejectionFound = true
 			continue

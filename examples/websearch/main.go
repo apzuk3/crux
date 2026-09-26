@@ -103,9 +103,10 @@ func run() int {
 			opts = append(opts, crux.WithBaseURL(*baseURL))
 		}
 		agent := crux.Must(crux.New(fmt.Sprintf("websearch-%s", c.provider), c.model, opts...))
+		session := crux.MustSession(crux.NewSession(agent))
 		requestCtx, cancel := context.WithTimeout(ctx, *timeout)
 		start := time.Now()
-		answer, err := agent.Run(requestCtx, *prompt)
+		answer, err := session.Run(requestCtx, *prompt)
 		elapsed := time.Since(start).Round(time.Millisecond)
 		cancel()
 		if err == nil && strings.TrimSpace(answer) == "" {

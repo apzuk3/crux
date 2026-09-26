@@ -142,7 +142,10 @@ func executeToolCallsPrompt(t *testing.T, modelname string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	output, err := agent.Run(ctx, "What is the tracking number, tracking status, and estimated delivery for order ORD-9921?")
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
+	output, err := sess.Run(ctx, "What is the tracking number, tracking status, and estimated delivery for order ORD-9921?")
 	require.NoError(t, err)
 
 	require.Contains(t, strings.ToLower(output), "tomorrow")
@@ -150,7 +153,7 @@ func executeToolCallsPrompt(t *testing.T, modelname string) {
 
 	// Verify tool call chain occurred in history
 	var sawOrderLookup, sawTrackingInfo bool
-	for _, entry := range agent.Logs() {
+	for _, entry := range sess.Logs() {
 		if entry.Kind == crux.KindToolCall && entry.ToolCall != nil {
 			if entry.ToolCall.Name == "lookup_order" {
 				sawOrderLookup = true
@@ -182,8 +185,11 @@ func executeToolCallsPromptStructuredOutput(t *testing.T, modelname string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
 	var report DeliveryReport
-	err = agent.RunInto(ctx, "What is the tracking number, tracking status, and estimated delivery for order ORD-9921?", &report)
+	err = sess.RunInto(ctx, "What is the tracking number, tracking status, and estimated delivery for order ORD-9921?", &report)
 	require.NoError(t, err)
 
 	require.Equal(t, "ORD-9921", report.OrderID)
@@ -192,7 +198,7 @@ func executeToolCallsPromptStructuredOutput(t *testing.T, modelname string) {
 
 	// Verify tool call chain occurred in history
 	var sawOrderLookup, sawTrackingInfo bool
-	for _, entry := range agent.Logs() {
+	for _, entry := range sess.Logs() {
 		if entry.Kind == crux.KindToolCall && entry.ToolCall != nil {
 			if entry.ToolCall.Name == "lookup_order" {
 				sawOrderLookup = true

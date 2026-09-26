@@ -161,15 +161,18 @@ func Test_CrossProviderForking(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 
+			sess, err := crux.NewSession(agent)
+			require.NoError(t, err)
+
 			// Turn 1 on Provider A
-			out1, err := agent.Run(ctx, turn1Prompt)
+			out1, err := sess.Run(ctx, turn1Prompt)
 			require.NoError(t, err)
 			require.NotEmpty(t, out1)
 			t.Logf("[%s] Turn 1 out: %s", tc.name, out1)
 
 			// Verify Provider A invoked calculate_tax tool
 			var sawTaxToolCall bool
-			for _, entry := range agent.Logs() {
+			for _, entry := range sess.Logs() {
 				if entry.Kind == crux.KindToolCall && entry.ToolCall != nil && entry.ToolCall.Name == "calculate_tax" {
 					sawTaxToolCall = true
 					t.Logf("[%s] ToolCall Args: %s", tc.name, string(entry.ToolCall.Args))
@@ -181,19 +184,19 @@ func Test_CrossProviderForking(t *testing.T) {
 			require.True(t, sawTaxToolCall, "expected Turn 1 to invoke calculate_tax tool")
 
 			// Fork onto Provider B
-			forkedAgent, err := agent.Fork(
+			forkedSession, err := sess.Fork(
 				crux.WithModel(tc.targetModel),
 				crux.WithInstructions(forkedInstructions),
 			)
 			require.NoError(t, err)
 
 			// Verify forking strips Opaque provider-specific entries without crashing
-			for _, entry := range forkedAgent.Logs() {
+			for _, entry := range forkedSession.Logs() {
 				require.Empty(t, entry.Opaque, "expected Opaque entries to be stripped across providers")
 			}
 
 			// Turn 2 on Provider B
-			out2, err := forkedAgent.Run(ctx, forkedPrompt)
+			out2, err := forkedSession.Run(ctx, forkedPrompt)
 			require.NoError(t, err)
 			require.NotEmpty(t, out2)
 			t.Logf("[%s] Turn 2 out: %s", tc.name, out2)

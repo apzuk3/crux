@@ -26,14 +26,16 @@ func TestStructuredOutputWireAndValidation(t *testing.T) {
 				crux.WithProvider(provider), crux.WithAPIKey("mock"), crux.WithHTTPClient(mock.Client()),
 				crux.WithOutputSchemaFrom[structuredAnswer]())
 			require.NoError(t, err)
+			sess, err := crux.NewSession(a)
+			require.NoError(t, err)
 			var answer structuredAnswer
-			require.NoError(t, a.RunInto(context.Background(), "extract", &answer))
+			require.NoError(t, sess.RunInto(context.Background(), "extract", &answer))
 			require.Equal(t, "ok", answer.Status)
 			require.Equal(t, 2, answer.Score)
-			_, err = a.Run(context.Background(), "extract again")
+			_, err = sess.Run(context.Background(), "extract again")
 			require.ErrorIs(t, err, crux.ErrOutputValidation)
 			// Retained invalid output must not bypass validation on Resume.
-			_, err = a.Run(context.Background(), nil)
+			_, err = sess.Run(context.Background(), nil)
 			require.ErrorIs(t, err, crux.ErrOutputValidation)
 			var body map[string]any
 			require.NoError(t, mock.Requests()[0].UnmarshalBody(&body))
@@ -87,7 +89,9 @@ func TestStructuredOutputRepair(t *testing.T) {
 				crux.WithHTTPClient(mock.Client()), crux.WithAPIKey("mock"),
 				crux.WithOutputSchemaFrom[structuredAnswer](), crux.WithMaxRepairs(tc.retries), crux.WithMaxTurns(tc.turns))
 			require.NoError(t, err)
-			_, err = a.Run(context.Background(), "extract")
+			sess, err := crux.NewSession(a)
+			require.NoError(t, err)
+			_, err = sess.Run(context.Background(), "extract")
 			if tc.wantError {
 				require.ErrorIs(t, err, crux.ErrOutputValidation)
 			} else {
@@ -111,7 +115,9 @@ func TestStructuredOutputAcrossToolTurns(t *testing.T) {
 		crux.WithAPIKey("mock"), crux.WithHTTPClient(mock.Client()),
 		crux.WithOutputSchemaFrom[structuredAnswer](), crux.WithToolsRegistry([]string{"get_weather"}, reg))
 	require.NoError(t, err)
-	_, err = a.Run(context.Background(), "check the weather")
+	sess, err := crux.NewSession(a)
+	require.NoError(t, err)
+	_, err = sess.Run(context.Background(), "check the weather")
 	require.NoError(t, err)
 	var first, second map[string]any
 	require.NoError(t, mock.Requests()[0].UnmarshalBody(&first))
@@ -127,10 +133,12 @@ func TestRunIntoValidatesBeforeMutatingTarget(t *testing.T) {
 	a, err := crux.New("validate", "test-model", crux.WithProvider(crux.ProviderAnthropic),
 		crux.WithHTTPClient(mock.Client()), crux.WithAPIKey("mock"), crux.WithOutputSchemaFrom[structuredAnswer]())
 	require.NoError(t, err)
-	require.Error(t, a.RunInto(context.Background(), "extract", nil))
+	sess, err := crux.NewSession(a)
+	require.NoError(t, err)
+	require.Error(t, sess.RunInto(context.Background(), "extract", nil))
 	mock.AssertTurnCount(t, 0)
 	answer := structuredAnswer{Status: "original", Score: 42}
-	err = a.RunInto(context.Background(), "extract", &answer)
+	err = sess.RunInto(context.Background(), "extract", &answer)
 	require.ErrorIs(t, err, crux.ErrOutputValidation)
 	require.Equal(t, "original", answer.Status)
 	require.Equal(t, 42, answer.Score)
@@ -150,8 +158,10 @@ func TestMapOutputSchemaCompatibility(t *testing.T) {
 			crux.WithHTTPClient(mock.Client()),
 			crux.WithOutputSchemaFrom[withMapAnswer]())
 		require.NoError(t, err)
+		sess, err := crux.NewSession(a)
+		require.NoError(t, err)
 		var res withMapAnswer
-		require.NoError(t, a.RunInto(context.Background(), "get labels", &res))
+		require.NoError(t, sess.RunInto(context.Background(), "get labels", &res))
 		require.Equal(t, "prod", res.Labels["env"])
 
 		var body map[string]any
@@ -169,8 +179,10 @@ func TestMapOutputSchemaCompatibility(t *testing.T) {
 			crux.WithHTTPClient(mock.Client()),
 			crux.WithOutputSchemaFrom[withMapAnswer]())
 		require.NoError(t, err)
+		sess, err := crux.NewSession(a)
+		require.NoError(t, err)
 		var res withMapAnswer
-		err = a.RunInto(context.Background(), "get labels", &res)
+		err = sess.RunInto(context.Background(), "get labels", &res)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "does not support dynamic map schemas")
 		mock.AssertTurnCount(t, 0)
@@ -189,7 +201,9 @@ func TestInvalidSchemaFailsEarlyZeroRequests(t *testing.T) {
 		crux.WithOutputSchema(schema))
 	require.NoError(t, err)
 
-	_, err = a.Run(context.Background(), "run")
+	sess, err := crux.NewSession(a)
+	require.NoError(t, err)
+	_, err = sess.Run(context.Background(), "run")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid output schema")
 	mock.AssertTurnCount(t, 0)
@@ -209,12 +223,14 @@ func TestLargeNumberPrecisionPreserved(t *testing.T) {
 		crux.WithOutputSchemaFrom[largeNumberAnswer]())
 	require.NoError(t, err)
 
+	sess, err := crux.NewSession(a)
+	require.NoError(t, err)
 	var res largeNumberAnswer
-	require.NoError(t, a.RunInto(context.Background(), "get id", &res))
+	require.NoError(t, sess.RunInto(context.Background(), "get id", &res))
 	require.Equal(t, uint64(9007199254740993), res.ID)
 
 	// Off-by-one rounded number must fail validation
 	mock.Expect().ReturnText(`{"id": 9007199254740992}`)
-	_, err = a.Run(context.Background(), "get id again")
+	_, err = sess.Run(context.Background(), "get id again")
 	require.ErrorIs(t, err, crux.ErrOutputValidation)
 }

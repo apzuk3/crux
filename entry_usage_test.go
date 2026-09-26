@@ -9,13 +9,17 @@ import (
 
 func TestAppendLogsPopulatesSeqAndAt(t *testing.T) {
 	agent := &Agent{}
+	session, err := NewSession(agent)
+	if err != nil {
+		t.Fatalf("NewSession failed: %v", err)
+	}
 
 	e1 := Entry{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}}
 	e2 := Entry{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: "hello"}}}
 
-	agent.appendLogs(e1, e2)
+	session.appendLogs(e1, e2)
 
-	logs := agent.Logs()
+	logs := session.Logs()
 	if len(logs) != 2 {
 		t.Fatalf("expected 2 logs, got %d", len(logs))
 	}
@@ -36,9 +40,9 @@ func TestAppendLogsPopulatesSeqAndAt(t *testing.T) {
 
 	// Appending more should continue the sequence
 	e3 := Entry{Kind: KindToolCall, ToolCall: &ToolCall{ID: "c1", Name: "t1"}}
-	agent.appendLogs(e3)
+	session.appendLogs(e3)
 
-	logs = agent.Logs()
+	logs = session.Logs()
 	if len(logs) != 3 {
 		t.Fatalf("expected 3 logs, got %d", len(logs))
 	}
@@ -50,7 +54,7 @@ func TestAppendLogsPopulatesSeqAndAt(t *testing.T) {
 func TestToolDispatchRecordsDuration(t *testing.T) {
 	sleepDuration := 20 * time.Millisecond
 	agent := &Agent{
-		Tools: []Tool{
+		tools: []Tool{
 			{
 				name: "timed_tool",
 				invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
@@ -60,9 +64,13 @@ func TestToolDispatchRecordsDuration(t *testing.T) {
 			},
 		},
 	}
+	session, err := NewSession(agent)
+	if err != nil {
+		t.Fatalf("NewSession failed: %v", err)
+	}
 
 	call := &ToolCall{ID: "call_timed", Name: "timed_tool", Args: json.RawMessage(`{}`)}
-	entries, _ := agent.dispatch(context.Background(), call, nil)
+	entries, _ := session.dispatch(context.Background(), call, nil)
 
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
@@ -86,25 +94,28 @@ func TestToolDispatchRecordsDuration(t *testing.T) {
 func TestUsageAndDurationClonedOnFork(t *testing.T) {
 	agent := &Agent{
 		Provider: ProviderOpenAI,
-		Model:    "gpt-4o",
-		sessionLogs: []Entry{
-			{
-				Seq:      1,
-				At:       time.Now().UTC(),
-				Duration: 150 * time.Millisecond,
-				Kind:     KindAssistant,
-				Content:  []ContentPart{{Kind: ContentKindText, Text: "test"}},
-				Usage: &Usage{
-					InputTokens:      100,
-					OutputTokens:     50,
-					CacheReadTokens:  20,
-					CacheWriteTokens: 10,
-				},
+		model:    "gpt-4o",
+	}
+	session, err := NewSession(agent, WithSessionLogs([]Entry{
+		{
+			Seq:      1,
+			At:       time.Now().UTC(),
+			Duration: 150 * time.Millisecond,
+			Kind:     KindAssistant,
+			Content:  []ContentPart{{Kind: ContentKindText, Text: "test"}},
+			Usage: &Usage{
+				InputTokens:      100,
+				OutputTokens:     50,
+				CacheReadTokens:  20,
+				CacheWriteTokens: 10,
 			},
 		},
+	}))
+	if err != nil {
+		t.Fatalf("NewSession failed: %v", err)
 	}
 
-	forked, err := agent.Fork()
+	forked, err := session.Fork()
 	if err != nil {
 		t.Fatalf("Fork failed: %v", err)
 	}
@@ -127,7 +138,7 @@ func TestUsageAndDurationClonedOnFork(t *testing.T) {
 
 	// Ensure mutation of fork does not affect parent
 	fEntry.Usage.InputTokens = 999
-	if agent.sessionLogs[0].Usage.InputTokens == 999 {
+	if session.logs[0].Usage.InputTokens == 999 {
 		t.Errorf("mutating fork usage affected parent")
 	}
 }

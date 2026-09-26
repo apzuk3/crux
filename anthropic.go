@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -13,45 +14,46 @@ import (
 
 const anthropicContentBlockOpaqueKey = "anthropic.message.content_block"
 
-func (a *Agent) newAnthropicClient() *anthropic.Client {
+func (a *Agent) newAnthropicClient(httpClient *http.Client) *anthropic.Client {
 	var opts []option.RequestOption
-	if a.apikey != "" {
-		opts = append(opts, option.WithAPIKey(a.apikey))
+	if a.apiKey != "" {
+		opts = append(opts, option.WithAPIKey(a.apiKey))
 	}
 
-	if a.BaseURL != "" {
-		opts = append(opts, option.WithBaseURL(a.BaseURL))
+	if a.baseURL != "" {
+		opts = append(opts, option.WithBaseURL(a.baseURL))
 	}
 
-	if a.HTTPClient != nil {
-		opts = append(opts, option.WithHTTPClient(a.HTTPClient))
+	client := a.effectiveHTTPClient(httpClient)
+	if client != nil {
+		opts = append(opts, option.WithHTTPClient(client))
 	}
 
-	client := anthropic.NewClient(opts...)
-	return &client
+	c := anthropic.NewClient(opts...)
+	return &c
 }
 
 // anthropicStep returns ordered blocks with usage, resuming paused server turns
 // internally until the model finishes or requests a local tool.
-func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error) {
+func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http.Client) ([]Entry, error) {
 	messages, err := toAnthropicMessages(log)
 	if err != nil {
 		return nil, err
 	}
-	tools, err := anthropicTools(a.Tools)
+	tools, err := anthropicTools(a.tools)
 	if err != nil {
 		return nil, err
 	}
 	params := anthropic.MessageNewParams{
-		Model: a.Model, Messages: messages, Tools: tools,
+		Model: a.model, Messages: messages, Tools: tools,
 		MaxTokens: 12000,
 	}
-	if a.Instructions != "" {
-		params.System = []anthropic.TextBlockParam{{Text: a.Instructions}}
+	if a.instructions != "" {
+		params.System = []anthropic.TextBlockParam{{Text: a.instructions}}
 	}
-	if a.SearchOptions != nil {
+	if a.searchOptions != nil {
 		tool := &anthropic.WebSearchTool20250305Param{}
-		if location := a.SearchOptions.UserLocation; location != nil {
+		if location := a.searchOptions.UserLocation; location != nil {
 			if location.Country != "" {
 				tool.UserLocation.Country = anthropic.String(location.Country)
 			}
@@ -69,8 +71,8 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 			OfWebSearchTool20250305: tool,
 		})
 	}
-	if a.OutputSchema != nil {
-		schema, err := wireSchemaFor(a.OutputSchema, a.Provider)
+	if a.outputSchema != nil {
+		schema, err := wireSchemaFor(a.outputSchema, a.Provider)
 		if err != nil {
 			return nil, err
 		}
@@ -78,7 +80,7 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry) ([]Entry, error)
 			Format: anthropic.JSONOutputFormatParam{Schema: schema},
 		}
 	}
-	client := a.newAnthropicClient()
+	client := a.newAnthropicClient(httpClient)
 	now := time.Now().UTC()
 	// Bound server-side continuation independently of the agent's tool turns.
 	const maxContinuations = 10

@@ -130,7 +130,10 @@ func executeErrorRecovery(t *testing.T, modelname string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	output, err := agent.Run(ctx, errorRecoveryPrompt)
+	sess, err := crux.NewSession(agent)
+	require.NoError(t, err)
+
+	output, err := sess.Run(ctx, errorRecoveryPrompt)
 	require.NoError(t, err, "agent should not fail when a tool returns an error")
 
 	// Collect tool calls and results from agent logs
@@ -141,7 +144,7 @@ func executeErrorRecovery(t *testing.T, modelname string) {
 		secondToolCallIdx  = -1
 	)
 
-	logs := agent.Logs()
+	logs := sess.Logs()
 	for idx, entry := range logs {
 		if entry.Kind == crux.KindToolCall && entry.ToolCall != nil {
 			toolCalls = append(toolCalls, *entry.ToolCall)
