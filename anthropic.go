@@ -35,7 +35,7 @@ func (a *Agent) newAnthropicClient(httpClient *http.Client) *anthropic.Client {
 
 // anthropicStep returns ordered blocks with usage, resuming paused server turns
 // internally until the model finishes or requests a local tool.
-func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http.Client) ([]Entry, error) {
+func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
 	messages, err := toAnthropicMessages(log)
 	if err != nil {
 		return nil, err
@@ -96,7 +96,12 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 	// it will pause and wait until the content is sent back to continue
 	// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons#pause-turn
 	for continuations := 0; ; continuations++ {
-		response, err := client.Messages.New(ctx, params)
+		var response *anthropic.Message
+		if emit == nil {
+			response, err = client.Messages.New(ctx, params)
+		} else {
+			response, err = streamAnthropic(ctx, client, params, emit)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("anthropic messages: %w", err)
 		}
@@ -142,6 +147,53 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 		// Replay all returned blocks unchanged, keeping the same tools and config.
 		params.Messages = append(params.Messages, response.ToParam())
 	}
+}
+
+func streamAnthropic(ctx context.Context, client *anthropic.Client, params anthropic.MessageNewParams, emit chunkSink) (*anthropic.Message, error) {
+	stream := client.Messages.NewStreaming(ctx, params)
+	defer stream.Close()
+	var response anthropic.Message
+	complete := false
+	for stream.Next() {
+		event := stream.Current()
+		if err := response.Accumulate(event); err != nil {
+			return nil, err
+		}
+		var err error
+		switch event.Type {
+		case "content_block_start":
+			switch event.ContentBlock.Type {
+			case "text":
+				err = emitChunk(emit, ChunkText, event.ContentBlock.Text)
+			case "thinking":
+				err = emitChunk(emit, ChunkReasoning, event.ContentBlock.Thinking)
+			}
+		case "content_block_delta":
+			switch event.Delta.Type {
+			case "text_delta":
+				err = emitChunk(emit, ChunkText, event.Delta.Text)
+			case "thinking_delta":
+				err = emitChunk(emit, ChunkReasoning, event.Delta.Thinking)
+			}
+		case "message_stop":
+			complete = true
+		case "error":
+			return nil, fmt.Errorf("anthropic stream error: %s", event.RawJSON())
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !complete {
+		return nil, errors.New("anthropic stream ended without message_stop")
+	}
+	return &response, nil
 }
 
 func anthropicTools(selected []Tool) ([]anthropic.ToolUnionParam, error) {

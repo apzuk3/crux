@@ -32,7 +32,7 @@ func (a *Agent) newGeminiClient(ctx context.Context, httpClient *http.Client) (*
 }
 
 // geminiStep returns the model's ordered parts with usage attached.
-func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Client) ([]Entry, error) {
+func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
 	contents, err := toGeminiContents(log)
 	if err != nil {
 		return nil, err
@@ -68,7 +68,12 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 	if err != nil {
 		return nil, fmt.Errorf("gemini client: %w", err)
 	}
-	response, err := client.Models.GenerateContent(ctx, a.model, contents, config)
+	var response *genai.GenerateContentResponse
+	if emit == nil {
+		response, err = client.Models.GenerateContent(ctx, a.model, contents, config)
+	} else {
+		response, err = streamGemini(ctx, client, a.model, contents, config, emit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("gemini generate content: %w", err)
 	}
@@ -120,6 +125,54 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		}
 	}
 	return produced, nil
+}
+
+func streamGemini(ctx context.Context, client *genai.Client, model string, contents []*genai.Content, config *genai.GenerateContentConfig, emit chunkSink) (*genai.GenerateContentResponse, error) {
+	// Preserve streamed parts verbatim, including signature-only parts and tool
+	// calls. Joining their text for display must not discard replay metadata.
+	candidate := &genai.Candidate{Content: &genai.Content{Role: "model"}}
+	response := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{candidate}}
+	for chunk, err := range client.Models.GenerateContentStream(ctx, model, contents, config) {
+		if err != nil {
+			return nil, err
+		}
+		if chunk == nil {
+			return nil, errors.New("gemini returned a nil stream chunk")
+		}
+		if chunk.UsageMetadata != nil {
+			response.UsageMetadata = chunk.UsageMetadata
+		}
+		if len(chunk.Candidates) == 0 {
+			continue
+		}
+		current := chunk.Candidates[0]
+		if current.FinishReason != "" {
+			candidate.FinishReason = current.FinishReason
+		}
+		if current.GroundingMetadata != nil {
+			candidate.GroundingMetadata = current.GroundingMetadata
+		}
+		if current.Content == nil {
+			continue
+		}
+		for _, part := range current.Content.Parts {
+			if part == nil {
+				return nil, errors.New("gemini returned a nil part")
+			}
+			candidate.Content.Parts = append(candidate.Content.Parts, part)
+			kind := ChunkText
+			if part.Thought {
+				kind = ChunkReasoning
+			}
+			if err := emitChunk(emit, kind, part.Text); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return response, nil
 }
 
 func geminiTools(selected []Tool) ([]*genai.Tool, error) {

@@ -2,6 +2,7 @@ package cruxtest
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -167,6 +168,20 @@ func (m *Mock) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	header := make(http.Header)
 	header.Set("Content-Type", "application/json")
+	var request struct {
+		Stream bool `json:"stream"`
+	}
+	_ = json.Unmarshal(bodyBytes, &request)
+	if (request.Stream || strings.Contains(req.URL.Path, ":streamGenerateContent")) && statusCode == http.StatusOK {
+		header.Set("Content-Type", "text/event-stream")
+		// Raw fixtures may supply exact SSE, including malformed/truncated streams.
+		if len(turn.RawBody) == 0 {
+			respBytes, err = buildStreamResponse(provider, respBytes)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	resp := &http.Response{
 		StatusCode:    statusCode,
@@ -184,7 +199,7 @@ func detectProvider(req *http.Request) crux.Provider {
 	path := req.URL.Path
 	host := req.URL.Host
 
-	if strings.Contains(path, ":generateContent") || strings.Contains(host, "googleapis.com") {
+	if strings.Contains(path, ":generateContent") || strings.Contains(path, ":streamGenerateContent") || strings.Contains(host, "googleapis.com") {
 		return crux.ProviderGoogle
 	}
 	if strings.Contains(path, "/messages") || req.Header.Get("anthropic-version") != "" || strings.Contains(host, "anthropic.com") {

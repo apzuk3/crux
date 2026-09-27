@@ -42,7 +42,7 @@ func (a *Agent) newOpenAIClient(httpClient *http.Client) *openai.Client {
 }
 
 // openAIstep sends the log and returns the model's entries with usage attached.
-func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Client) ([]Entry, error) {
+func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
 	input, err := toOpenAIResponseInput(log)
 	if err != nil {
 		return nil, err
@@ -102,7 +102,12 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 	}
 
 	client := a.newOpenAIClient(httpClient)
-	response, err := client.Responses.New(ctx, params)
+	var response *responses.Response
+	if emit == nil {
+		response, err = client.Responses.New(ctx, params)
+	} else {
+		response, err = streamOpenAI(ctx, client, params, emit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%s responses: %w", a.Provider, err)
 	}
@@ -158,6 +163,40 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 	}
 
 	return produced, nil
+}
+
+func streamOpenAI(ctx context.Context, client *openai.Client, params responses.ResponseNewParams, emit chunkSink) (*responses.Response, error) {
+	stream := client.Responses.NewStreaming(ctx, params)
+	defer stream.Close()
+	var response *responses.Response
+	for stream.Next() {
+		event := stream.Current()
+		var err error
+		switch event.Type {
+		case "response.output_text.delta":
+			err = emitChunk(emit, ChunkText, event.Delta)
+		case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
+			err = emitChunk(emit, ChunkReasoning, event.Delta)
+		case "response.completed", "response.failed", "response.incomplete":
+			value := event.Response
+			response = &value
+		case "error":
+			return nil, fmt.Errorf("provider stream error: %s", event.RawJSON())
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if response == nil {
+		return nil, errors.New("provider stream ended without a terminal response")
+	}
+	return response, nil
 }
 
 func openAITools(tools []Tool) []responses.ToolUnionParam {

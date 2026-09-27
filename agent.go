@@ -294,6 +294,10 @@ func (a *Agent) ToolNames() []string {
 // User inputs, model entries, and tool results are retained even if a later step
 // fails. Run must not execute concurrently with other operations on the session.
 func (s *Session) Run(ctx context.Context, input any) (string, error) {
+	return s.run(ctx, input, nil)
+}
+
+func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -359,7 +363,14 @@ func (s *Session) Run(ctx context.Context, input any) (string, error) {
 		}
 
 		start := time.Now()
-		produced, err := s.step(ctx, s.logs)
+		var sink chunkSink
+		if emit != nil {
+			sink = func(chunk Chunk) error {
+				chunk.Turn = turn + 1
+				return emit(chunk)
+			}
+		}
+		produced, err := s.step(ctx, s.logs, sink)
 		if err != nil {
 			return "", err
 		}
@@ -412,8 +423,8 @@ func (s *Session) Run(ctx context.Context, input any) (string, error) {
 	return "", errors.New("max turns reached")
 }
 
-func (s *Session) step(ctx context.Context, log []Entry) ([]Entry, error) {
-	return s.agent.step(ctx, log, s.httpClient)
+func (s *Session) step(ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error) {
+	return s.agent.step(ctx, log, s.httpClient, emit)
 }
 
 func (a *Agent) effectiveHTTPClient(sessionClient *http.Client) *http.Client {
@@ -423,23 +434,23 @@ func (a *Agent) effectiveHTTPClient(sessionClient *http.Client) *http.Client {
 	return a.httpClient
 }
 
-func (a *Agent) step(ctx context.Context, log []Entry, httpClient *http.Client) ([]Entry, error) {
+func (a *Agent) step(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
 	client := a.effectiveHTTPClient(httpClient)
 	switch a.Provider {
 	case ProviderAnthropic:
-		return a.anthropicStep(ctx, log, client)
+		return a.anthropicStep(ctx, log, client, emit)
 	case ProviderOpenAI:
-		return a.openAIstep(ctx, log, client)
+		return a.openAIstep(ctx, log, client, emit)
 	case ProviderOpenrouter:
-		return a.openrouterStep(ctx, log, client)
+		return a.openrouterStep(ctx, log, client, emit)
 	case ProviderGoogle:
-		return a.geminiStep(ctx, log, client)
+		return a.geminiStep(ctx, log, client, emit)
 	case ProviderXAI:
-		return a.xaiStep(ctx, log, client)
+		return a.xaiStep(ctx, log, client, emit)
 	case ProviderDeepSeek:
-		return a.deepseekStep(ctx, log, client)
+		return a.deepseekStep(ctx, log, client, emit)
 	case ProviderOllama:
-		return a.ollamaStep(ctx, log, client)
+		return a.ollamaStep(ctx, log, client, emit)
 	default:
 		return nil, fmt.Errorf("unsupported provider %q", a.Provider)
 	}
