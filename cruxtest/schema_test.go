@@ -26,7 +26,7 @@ func TestStructuredOutputWireAndValidation(t *testing.T) {
 				crux.WithProvider(provider), crux.WithAPIKey("mock"), crux.WithHTTPClient(mock.Client()),
 				crux.WithOutputSchemaFrom[structuredAnswer]())
 			require.NoError(t, err)
-			sess, err := crux.NewSession(a)
+			sess, err := crux.NewSession(t.Context(), a)
 			require.NoError(t, err)
 			var answer structuredAnswer
 			require.NoError(t, sess.RunInto(context.Background(), "extract", &answer))
@@ -89,7 +89,7 @@ func TestStructuredOutputRepair(t *testing.T) {
 				crux.WithHTTPClient(mock.Client()), crux.WithAPIKey("mock"),
 				crux.WithOutputSchemaFrom[structuredAnswer](), crux.WithMaxRepairs(tc.retries), crux.WithMaxTurns(tc.turns))
 			require.NoError(t, err)
-			sess, err := crux.NewSession(a)
+			sess, err := crux.NewSession(t.Context(), a)
 			require.NoError(t, err)
 			_, err = sess.Run(context.Background(), "extract")
 			if tc.wantError {
@@ -115,7 +115,7 @@ func TestStructuredOutputAcrossToolTurns(t *testing.T) {
 		crux.WithAPIKey("mock"), crux.WithHTTPClient(mock.Client()),
 		crux.WithOutputSchemaFrom[structuredAnswer](), crux.WithToolsRegistry([]string{"get_weather"}, reg))
 	require.NoError(t, err)
-	sess, err := crux.NewSession(a)
+	sess, err := crux.NewSession(t.Context(), a)
 	require.NoError(t, err)
 	_, err = sess.Run(context.Background(), "check the weather")
 	require.NoError(t, err)
@@ -133,7 +133,7 @@ func TestRunIntoValidatesBeforeMutatingTarget(t *testing.T) {
 	a, err := crux.New("validate", "test-model", crux.WithProvider(crux.ProviderAnthropic),
 		crux.WithHTTPClient(mock.Client()), crux.WithAPIKey("mock"), crux.WithOutputSchemaFrom[structuredAnswer]())
 	require.NoError(t, err)
-	sess, err := crux.NewSession(a)
+	sess, err := crux.NewSession(t.Context(), a)
 	require.NoError(t, err)
 	require.Error(t, sess.RunInto(context.Background(), "extract", nil))
 	mock.AssertTurnCount(t, 0)
@@ -158,7 +158,7 @@ func TestMapOutputSchemaCompatibility(t *testing.T) {
 			crux.WithHTTPClient(mock.Client()),
 			crux.WithOutputSchemaFrom[withMapAnswer]())
 		require.NoError(t, err)
-		sess, err := crux.NewSession(a)
+		sess, err := crux.NewSession(t.Context(), a)
 		require.NoError(t, err)
 		var res withMapAnswer
 		require.NoError(t, sess.RunInto(context.Background(), "get labels", &res))
@@ -179,7 +179,7 @@ func TestMapOutputSchemaCompatibility(t *testing.T) {
 			crux.WithHTTPClient(mock.Client()),
 			crux.WithOutputSchemaFrom[withMapAnswer]())
 		require.NoError(t, err)
-		sess, err := crux.NewSession(a)
+		sess, err := crux.NewSession(t.Context(), a)
 		require.NoError(t, err)
 		var res withMapAnswer
 		err = sess.RunInto(context.Background(), "get labels", &res)
@@ -201,7 +201,7 @@ func TestInvalidSchemaFailsEarlyZeroRequests(t *testing.T) {
 		crux.WithOutputSchema(schema))
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(a)
+	sess, err := crux.NewSession(t.Context(), a)
 	require.NoError(t, err)
 	_, err = sess.Run(context.Background(), "run")
 	require.Error(t, err)
@@ -223,7 +223,7 @@ func TestLargeNumberPrecisionPreserved(t *testing.T) {
 		crux.WithOutputSchemaFrom[largeNumberAnswer]())
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(a)
+	sess, err := crux.NewSession(t.Context(), a)
 	require.NoError(t, err)
 	var res largeNumberAnswer
 	require.NoError(t, sess.RunInto(context.Background(), "get id", &res))

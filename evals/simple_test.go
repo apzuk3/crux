@@ -65,7 +65,7 @@ func executeSayHelloPromptWithInstructions(t *testing.T, modelname string) {
 	)
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(agent)
+	sess, err := crux.NewSession(context.Background(), agent)
 	require.NoError(t, err)
 
 	output, err := sess.Run(context.Background(), "Hello, how are you?")
@@ -91,7 +91,7 @@ func executeSayHelloPromptWithInstructionsStructuredOutput(t *testing.T, modelna
 	)
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(agent)
+	sess, err := crux.NewSession(context.Background(), agent)
 	require.NoError(t, err)
 
 	output, err := sess.Run(context.Background(), "Hello, how are you?")

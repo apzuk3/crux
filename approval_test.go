@@ -42,7 +42,7 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 			},
 		},
 	}
-	session, err := NewSession(agent, WithSessionLogs([]Entry{
+	session, err := NewSession(t.Context(), agent, WithSessionLogs([]Entry{
 		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "start"}}},
 		{Kind: KindToolCall, ToolCall: call1},
 		{Kind: KindToolCall, ToolCall: call2},
@@ -193,7 +193,7 @@ func TestForkRetainsKindApproval(t *testing.T) {
 	agent := &Agent{
 		Provider: ProviderOpenAI,
 	}
-	session, err := NewSession(agent, WithSessionLogs([]Entry{
+	session, err := NewSession(t.Context(), agent, WithSessionLogs([]Entry{
 		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}},
 		{Kind: KindToolCall, ToolCall: call},
 		{Kind: KindApproval, Approval: &Approval{CallID: "call_1", Approved: true}},
@@ -203,7 +203,7 @@ func TestForkRetainsKindApproval(t *testing.T) {
 		t.Fatalf("NewSession failed: %v", err)
 	}
 
-	fork, err := session.Fork()
+	fork, err := session.Fork(t.Context())
 	if err != nil {
 		t.Fatalf("session.Fork failed: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestApproveRejectHonorContextCancellation(t *testing.T) {
 	agent := &Agent{
 		tools: []Tool{{name: "action", approvalNeeded: true}},
 	}
-	session, err := NewSession(agent, WithSessionLogs([]Entry{
+	session, err := NewSession(context.Background(), agent, WithSessionLogs([]Entry{
 		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}},
 		{Kind: KindToolCall, ToolCall: call},
 	}))
@@ -245,7 +245,7 @@ func TestApproveRejectHonorContextCancellation(t *testing.T) {
 
 func TestResumeIdempotentWhenAlreadyCompleted(t *testing.T) {
 	agent := &Agent{}
-	session, err := NewSession(agent, WithSessionLogs([]Entry{
+	session, err := NewSession(t.Context(), agent, WithSessionLogs([]Entry{
 		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hello"}}},
 		{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: "world"}}},
 	}))

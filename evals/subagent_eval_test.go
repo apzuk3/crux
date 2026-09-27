@@ -111,7 +111,7 @@ func Test_SubAgentDelegation(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 
-			parentSess, err := crux.NewSession(parentAgent)
+			parentSess, err := crux.NewSession(ctx, parentAgent)
 			require.NoError(t, err)
 
 			finalAnswer, err := parentSess.Run(ctx, incidentReportPrompt)

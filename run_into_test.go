@@ -135,7 +135,7 @@ func TestDecodeInto(t *testing.T) {
 
 func TestSessionRunInto(t *testing.T) {
 	agent := &Agent{}
-	session, err := NewSession(agent, WithSessionLogs([]Entry{
+	session, err := NewSession(t.Context(), agent, WithSessionLogs([]Entry{
 		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "get answer"}}},
 		{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: `{"answer": "yes", "score": 10}`}}},
 	}))

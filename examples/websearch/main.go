@@ -103,7 +103,7 @@ func run() int {
 			opts = append(opts, crux.WithBaseURL(*baseURL))
 		}
 		agent := crux.Must(crux.New(fmt.Sprintf("websearch-%s", c.provider), c.model, opts...))
-		session := crux.MustSession(crux.NewSession(agent))
+		session := crux.MustSession(crux.NewSession(ctx, agent))
 		requestCtx, cancel := context.WithTimeout(ctx, *timeout)
 		start := time.Now()
 		answer, err := session.Run(requestCtx, *prompt)

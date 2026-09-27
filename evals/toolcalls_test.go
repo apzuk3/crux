@@ -142,7 +142,7 @@ func executeToolCallsPrompt(t *testing.T, modelname string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	sess, err := crux.NewSession(agent)
+	sess, err := crux.NewSession(ctx, agent)
 	require.NoError(t, err)
 
 	output, err := sess.Run(ctx, "What is the tracking number, tracking status, and estimated delivery for order ORD-9921?")
@@ -185,7 +185,7 @@ func executeToolCallsPromptStructuredOutput(t *testing.T, modelname string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	sess, err := crux.NewSession(agent)
+	sess, err := crux.NewSession(ctx, agent)
 	require.NoError(t, err)
 
 	var report DeliveryReport

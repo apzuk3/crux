@@ -130,7 +130,7 @@ func executeErrorRecovery(t *testing.T, modelname string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	sess, err := crux.NewSession(agent)
+	sess, err := crux.NewSession(ctx, agent)
 	require.NoError(t, err)
 
 	output, err := sess.Run(ctx, errorRecoveryPrompt)

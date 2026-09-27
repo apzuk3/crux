@@ -9,7 +9,7 @@ import (
 
 func TestAppendLogsPopulatesSeqAndAt(t *testing.T) {
 	agent := &Agent{}
-	session, err := NewSession(agent)
+	session, err := NewSession(t.Context(), agent)
 	if err != nil {
 		t.Fatalf("NewSession failed: %v", err)
 	}
@@ -17,7 +17,7 @@ func TestAppendLogsPopulatesSeqAndAt(t *testing.T) {
 	e1 := Entry{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}}
 	e2 := Entry{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: "hello"}}}
 
-	session.appendLogs(e1, e2)
+	session.appendLogs(context.Background(), e1, e2)
 
 	logs := session.Logs()
 	if len(logs) != 2 {
@@ -40,7 +40,7 @@ func TestAppendLogsPopulatesSeqAndAt(t *testing.T) {
 
 	// Appending more should continue the sequence
 	e3 := Entry{Kind: KindToolCall, ToolCall: &ToolCall{ID: "c1", Name: "t1"}}
-	session.appendLogs(e3)
+	session.appendLogs(context.Background(), e3)
 
 	logs = session.Logs()
 	if len(logs) != 3 {
@@ -64,7 +64,7 @@ func TestToolDispatchRecordsDuration(t *testing.T) {
 			},
 		},
 	}
-	session, err := NewSession(agent)
+	session, err := NewSession(t.Context(), agent)
 	if err != nil {
 		t.Fatalf("NewSession failed: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestUsageAndDurationClonedOnFork(t *testing.T) {
 		Provider: ProviderOpenAI,
 		model:    "gpt-4o",
 	}
-	session, err := NewSession(agent, WithSessionLogs([]Entry{
+	session, err := NewSession(t.Context(), agent, WithSessionLogs([]Entry{
 		{
 			Seq:      1,
 			At:       time.Now().UTC(),
@@ -115,7 +115,7 @@ func TestUsageAndDurationClonedOnFork(t *testing.T) {
 		t.Fatalf("NewSession failed: %v", err)
 	}
 
-	forked, err := session.Fork()
+	forked, err := session.Fork(t.Context())
 	if err != nil {
 		t.Fatalf("Fork failed: %v", err)
 	}

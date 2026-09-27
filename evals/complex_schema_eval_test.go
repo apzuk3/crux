@@ -134,7 +134,7 @@ func Test_ComplexStructuredOutputValidation(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 
-			sess, err := crux.NewSession(agent)
+			sess, err := crux.NewSession(ctx, agent)
 			require.NoError(t, err)
 
 			var report ProjectReport

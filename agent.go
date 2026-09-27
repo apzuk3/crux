@@ -20,6 +20,7 @@ import (
 // capabilities, instructions, and provider connection.
 // It is completely stateless and safe for concurrent use.
 type Agent struct {
+	id           uuid.UUID
 	name         string
 	model        string
 	instructions string
@@ -43,17 +44,65 @@ type Session struct {
 	agent      *Agent
 	logs       []Entry
 	httpClient *http.Client
+	store      Store
 }
 
-func NewSession(agent *Agent, opts ...SessionOption) (*Session, error) {
+func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Session, error) {
 	if agent == nil {
 		return nil, errors.New("agent cannot be nil")
 	}
 
 	session := &Session{
-		id:    uuid.New(),
-		agent: agent,
-		logs:  make([]Entry, 0),
+		id:         uuid.New(),
+		agent:      agent,
+		logs:       make([]Entry, 0),
+		httpClient: agent.httpClient,
+	}
+
+	for _, opt := range opts {
+		if err := opt(session); err != nil {
+			return nil, err
+		}
+	}
+
+	if session.store == nil {
+		store, err := NewInMemoryStore()
+		if err != nil {
+			return nil, fmt.Errorf("create in-memory store: %w", err)
+		}
+		session.store = store
+	}
+
+	return session, nil
+}
+
+// ResumeSession recovers an existing session from the store by its ID.
+// If the session does not exist in the store, it returns ErrSessionNotFound.
+func ResumeSession(ctx context.Context, sessionID uuid.UUID, store Store, agent *Agent, opts ...SessionOption) (*Session, error) {
+	if ctx == nil {
+		return nil, errors.New("context cannot be nil")
+	}
+	if sessionID == uuid.Nil {
+		return nil, errors.New("session ID cannot be nil")
+	}
+	if store == nil {
+		return nil, errors.New("store cannot be nil")
+	}
+	if agent == nil {
+		return nil, errors.New("agent cannot be nil")
+	}
+
+	entries, err := store.Get(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	session := &Session{
+		id:         sessionID,
+		agent:      agent,
+		logs:       entries,
+		store:      store,
+		httpClient: agent.httpClient,
 	}
 
 	for _, opt := range opts {
@@ -85,7 +134,11 @@ func (s *Session) Logs() []Entry {
 	return cloneEntries(s.logs)
 }
 
-func (s *Session) appendLogs(entries ...Entry) {
+func (s *Session) Store() Store {
+	return s.store
+}
+
+func (s *Session) appendLogs(ctx context.Context, entries ...Entry) error {
 	now := time.Now().UTC()
 	for i := range entries {
 		if entries[i].Seq == 0 {
@@ -96,6 +149,12 @@ func (s *Session) appendLogs(entries ...Entry) {
 		}
 		s.logs = append(s.logs, entries[i])
 	}
+
+	if err := s.store.Append(ctx, s.id, s.agent, entries...); err != nil {
+		return fmt.Errorf("persist session logs: %w", err)
+	}
+
+	return nil
 }
 
 // SearchOptions configures provider-executed web search.
@@ -149,6 +208,10 @@ func New(name, model string, opts ...AgentOption) (*Agent, error) {
 		agent.apiKey = "ollama" // Local Ollama ignores authentication.
 	}
 
+	if agent.id == uuid.Nil {
+		agent.id = agent.computeAgentID()
+	}
+
 	return agent, nil
 }
 
@@ -160,8 +223,71 @@ func Must(agent *Agent, err error) *Agent {
 	return agent
 }
 
+// AgentNamespace is the base UUID namespace for computing deterministic agent IDs.
+var AgentNamespace = uuid.MustParse("e0f4f9a0-6f91-4c74-9844-3bfa3eb238b1")
+
+func (a *Agent) CanonicalData() []byte {
+	var toolNames []string
+	if len(a.tools) > 0 {
+		toolNames = make([]string, len(a.tools))
+		for i, t := range a.tools {
+			toolNames[i] = t.name
+		}
+	}
+
+	raw, _ := json.Marshal(map[string]any{
+		"name":           a.name,
+		"model":          a.model,
+		"provider":       a.Provider,
+		"instructions":   a.instructions,
+		"base_url":       a.baseURL,
+		"max_turns":      a.maxTurns,
+		"max_repairs":    a.maxRepairs,
+		"tools":          toolNames,
+		"search_options": a.searchOptions,
+		"output_schema":  a.outputSchema,
+	})
+	return raw
+}
+
+func (a *Agent) computeAgentID() uuid.UUID {
+	return uuid.NewSHA1(AgentNamespace, a.CanonicalData())
+}
+
+func (a *Agent) ID() uuid.UUID {
+	return a.id
+}
+
 func (a *Agent) Name() string {
 	return a.name
+}
+
+func (a *Agent) Model() string {
+	return a.model
+}
+
+func (a *Agent) Instructions() string {
+	return a.instructions
+}
+
+func (a *Agent) BaseURL() string {
+	return a.baseURL
+}
+
+func (a *Agent) MaxTurns() int32 {
+	return a.maxTurns
+}
+
+func (a *Agent) MaxRepairs() int {
+	return a.maxRepairs
+}
+
+func (a *Agent) ToolNames() []string {
+	names := make([]string, len(a.tools))
+	for i, t := range a.tools {
+		names[i] = t.name
+	}
+	return names
 }
 
 // Run continues the retained conversation and returns its final text response.
@@ -211,7 +337,9 @@ func (s *Session) Run(ctx context.Context, input any) (string, error) {
 			return "", errors.New("user input produced empty text")
 		}
 
-		s.appendLogs(entry)
+		if err := s.appendLogs(ctx, entry); err != nil {
+			return "", err
+		}
 	}
 
 	repairsLeft := s.agent.maxRepairs
@@ -222,7 +350,9 @@ func (s *Session) Run(ctx context.Context, input any) (string, error) {
 		}
 
 		if toolResults := s.executeUnexecutedToolCalls(ctx); len(toolResults) > 0 {
-			s.appendLogs(toolResults...)
+			if err := s.appendLogs(ctx, toolResults...); err != nil {
+				return "", err
+			}
 		}
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -239,7 +369,9 @@ func (s *Session) Run(ctx context.Context, input any) (string, error) {
 
 		// Retain all model entries in history before dispatching local tools.
 		if len(produced) > 0 {
-			s.appendLogs(produced...)
+			if err := s.appendLogs(ctx, produced...); err != nil {
+				return "", err
+			}
 		}
 
 		if len(s.PendingApprovals()) > 0 {
@@ -264,7 +396,9 @@ func (s *Session) Run(ctx context.Context, input any) (string, error) {
 						if err != nil {
 							return "", err
 						}
-						s.appendLogs(entry)
+						if err := s.appendLogs(ctx, entry); err != nil {
+							return "", err
+						}
 						continue
 					}
 					return "", valErr
@@ -510,14 +644,13 @@ func (s *Session) Approve(ctx context.Context, callID string) error {
 		return fmt.Errorf("tool call %q is not pending approval", callID)
 	}
 
-	s.appendLogs(Entry{
+	return s.appendLogs(ctx, Entry{
 		Kind: KindApproval,
 		Approval: &Approval{
 			CallID:   callID,
 			Approved: true,
 		},
 	})
-	return nil
 }
 
 func (s *Session) Reject(ctx context.Context, callID string, reason string) error {
@@ -541,7 +674,7 @@ func (s *Session) Reject(ctx context.Context, callID string, reason string) erro
 		reason = "tool execution declined by user"
 	}
 
-	s.appendLogs(Entry{
+	return s.appendLogs(ctx, Entry{
 		Kind: KindApproval,
 		Approval: &Approval{
 			CallID:   callID,
@@ -549,7 +682,6 @@ func (s *Session) Reject(ctx context.Context, callID string, reason string) erro
 			Reason:   reason,
 		},
 	})
-	return nil
 }
 
 // RunInto executes the agent and decodes its final response into target.

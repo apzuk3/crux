@@ -152,7 +152,7 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 			t.Run("nullable_and_pointers", func(t *testing.T) {
 				agent := newAgent(t, "nullable-test", tc.provider, tc.model,
 					crux.WithOutputSchemaFrom[NullableOutput]())
-				sess, err := crux.NewSession(agent)
+				sess, err := crux.NewSession(ctx, agent)
 				require.NoError(t, err)
 
 				var out NullableOutput
@@ -173,7 +173,7 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 			t.Run("numeric_precision", func(t *testing.T) {
 				agent := newAgent(t, "numeric-test", tc.provider, tc.model,
 					crux.WithOutputSchemaFrom[NumericOutput]())
-				sess, err := crux.NewSession(agent)
+				sess, err := crux.NewSession(ctx, agent)
 				require.NoError(t, err)
 
 				var out NumericOutput
@@ -192,7 +192,7 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 				t.Run("maps_and_nesting_gemini", func(t *testing.T) {
 					agent := newAgent(t, "nested-test", tc.provider, tc.model,
 						crux.WithOutputSchemaFrom[NestedOutput]())
-					sess, err := crux.NewSession(agent)
+					sess, err := crux.NewSession(ctx, agent)
 					require.NoError(t, err)
 
 					var out NestedOutput
@@ -221,7 +221,7 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 			t.Run("markdown_wrapped_json", func(t *testing.T) {
 				agent := newAgent(t, "markdown-test", tc.provider, tc.model,
 					crux.WithOutputSchemaFrom[MarkdownWrappedOutput]())
-				sess, err := crux.NewSession(agent)
+				sess, err := crux.NewSession(ctx, agent)
 				require.NoError(t, err)
 
 				var out MarkdownWrappedOutput

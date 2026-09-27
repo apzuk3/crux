@@ -1,17 +1,16 @@
 package crux
 
 import (
+	"context"
 	"fmt"
 	"slices"
-
-	"github.com/google/uuid"
 )
 
 // Fork creates a session with the full retained history and inherited
 // configuration, then applies opts in order to the session's agent. See ForkFrom for copying rules.
 // Fork must not run concurrently with writes to the session.
-func (s *Session) Fork(opts ...AgentOption) (*Session, error) {
-	return s.ForkFrom(len(s.logs), opts...)
+func (s *Session) Fork(ctx context.Context, opts ...AgentOption) (*Session, error) {
+	return s.ForkFrom(ctx, len(s.logs), opts...)
 }
 
 // ForkFrom creates a session with logs[:from] and inherited configuration, then
@@ -26,7 +25,7 @@ func (s *Session) Fork(opts ...AgentOption) (*Session, error) {
 // options are supplied, which resolve a fresh selection from the registry.
 // The tools registry and output schema remain shared unless overridden.
 // Fork must not run concurrently with writes to the session.
-func (s *Session) ForkFrom(from int, opts ...AgentOption) (*Session, error) {
+func (s *Session) ForkFrom(ctx context.Context, from int, opts ...AgentOption) (*Session, error) {
 	if from < 0 || from > len(s.logs) {
 		return nil, fmt.Errorf("cannot fork at offset %d: must be between 0 and %d", from, len(s.logs))
 	}
@@ -49,12 +48,11 @@ func (s *Session) ForkFrom(from int, opts ...AgentOption) (*Session, error) {
 		})
 	}
 
-	return &Session{
-		id:         uuid.New(),
-		agent:      clonedAgent,
-		logs:       forkedLogs,
-		httpClient: s.httpClient,
-	}, nil
+	return NewSession(ctx, clonedAgent,
+		WithSessionLogs(forkedLogs),
+		WithSessionHTTPClient(s.httpClient),
+		WithStore(s.store),
+	)
 }
 
 func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {

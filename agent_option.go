@@ -17,14 +17,29 @@ type AgentConfig struct {
 
 type AgentOption func(*Agent) error
 
+func WithAgentID(id uuid.UUID) AgentOption {
+	return func(a *Agent) error { a.id = id; return nil }
+}
+
 type SessionOption func(*Session) error
 
 func WithSessionID(id uuid.UUID) SessionOption {
-	return func(s *Session) error { s.id = id; return nil }
+	return func(s *Session) error {
+		s.id = id
+		return nil
+	}
 }
 
 func WithSessionLogs(logs []Entry) SessionOption {
 	return func(s *Session) error { s.logs = cloneEntries(logs); return nil }
+}
+
+func WithSessionStore(store Store) SessionOption {
+	return func(s *Session) error { s.store = store; return nil }
+}
+
+func WithStore(store Store) SessionOption {
+	return WithSessionStore(store)
 }
 
 func WithSessionHTTPClient(client *http.Client) SessionOption {
@@ -258,7 +273,7 @@ func WithSubAgent(subAgent *Agent, description string) AgentOption {
 			schema:      schema,
 			kind:        ToolKindSubagent,
 			invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
-				sess, err := NewSession(subAgent)
+				sess, err := NewSession(ctx, subAgent)
 				if err != nil {
 					return "", nil, err
 				}

@@ -13,7 +13,7 @@ func TestForkCrossProviderInference(t *testing.T) {
 		model:    ClaudeHaiku4_5,
 		apiKey:   "anthropic-fake-key",
 	}
-	session, err := NewSession(agent, WithSessionLogs([]Entry{
+	session, err := NewSession(t.Context(), agent, WithSessionLogs([]Entry{
 		{
 			Kind:    KindAssistant,
 			Content: []ContentPart{{Kind: ContentKindText, Text: "hello"}},
@@ -23,7 +23,7 @@ func TestForkCrossProviderInference(t *testing.T) {
 	require.NoError(t, err)
 
 	// Fork with WithModel pointing to an OpenAI model
-	forked, err := session.Fork(WithModel(ChatModelGPT4_1Mini))
+	forked, err := session.Fork(t.Context(), WithModel(ChatModelGPT4_1Mini))
 	require.NoError(t, err)
 
 	require.Equal(t, ProviderOpenAI, forked.agent.Provider)
@@ -55,7 +55,7 @@ func TestForkInheritsConfiguration(t *testing.T) {
 			},
 		},
 	}
-	session, err := NewSession(agent, WithSessionLogs([]Entry{
+	session, err := NewSession(t.Context(), agent, WithSessionLogs([]Entry{
 		{
 			Kind:    KindUser,
 			Content: []ContentPart{{Kind: ContentKindText, Text: "ping"}},
@@ -63,7 +63,7 @@ func TestForkInheritsConfiguration(t *testing.T) {
 	}))
 	require.NoError(t, err)
 
-	forked, err := session.Fork()
+	forked, err := session.Fork(t.Context())
 	require.NoError(t, err)
 
 	require.Equal(t, agent.name, forked.agent.name)
@@ -91,10 +91,11 @@ func TestForkCrossProviderDefaultBaseURL(t *testing.T) {
 		model:    ClaudeHaiku4_5,
 		apiKey:   "anthropic-fake-key",
 	}
-	session, err := NewSession(agent)
+	session, err := NewSession(t.Context(), agent)
 	require.NoError(t, err)
 
 	forked, err := session.Fork(
+		t.Context(),
 		WithProvider(ProviderXAI),
 		WithModel("grok-2"),
 	)
@@ -114,10 +115,11 @@ func TestForkUserOverrides(t *testing.T) {
 		baseURL:      "https://custom-proxy.internal",
 		apiKey:       "old-key",
 	}
-	session, err := NewSession(agent)
+	session, err := NewSession(t.Context(), agent)
 	require.NoError(t, err)
 
 	forked, err := session.Fork(
+		t.Context(),
 		WithInstructions("new instructions"),
 		WithMaxTurns(20),
 		WithBaseURL("https://override.internal"),
@@ -137,7 +139,7 @@ func TestForkFromOffsetAndSanitization(t *testing.T) {
 		model:    ClaudeHaiku4_5,
 		apiKey:   "anthropic-fake-key",
 	}
-	session, err := NewSession(agent, WithSessionLogs([]Entry{
+	session, err := NewSession(t.Context(), agent, WithSessionLogs([]Entry{
 		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "1"}}},
 		{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: "2"}}},
 		{Kind: KindProviderTool, Opaque: map[string][]byte{"tool": []byte("p")}},
@@ -146,13 +148,13 @@ func TestForkFromOffsetAndSanitization(t *testing.T) {
 	require.NoError(t, err)
 
 	// Offset out of bounds
-	_, err = session.ForkFrom(-1)
+	_, err = session.ForkFrom(t.Context(), -1)
 	require.Error(t, err)
-	_, err = session.ForkFrom(5)
+	_, err = session.ForkFrom(t.Context(), 5)
 	require.Error(t, err)
 
 	// Fork at offset 3 with cross-provider
-	forked, err := session.ForkFrom(3, WithModel(ChatModelGPT4_1Mini))
+	forked, err := session.ForkFrom(t.Context(), 3, WithModel(ChatModelGPT4_1Mini))
 	require.NoError(t, err)
 	// Entry at offset 2 was KindProviderTool, which should be deleted across providers
 	require.Len(t, forked.logs, 2)

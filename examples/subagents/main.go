@@ -66,7 +66,7 @@ Finally return the editor's product description to the user.`),
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	fmt.Println("Running coordinator → researcher → editor...")
-	session := crux.MustSession(crux.NewSession(mainAgent))
+	session := crux.MustSession(crux.NewSession(ctx, mainAgent))
 	output, err := session.Run(ctx, "Create a short product description for the fictional TrailLight lantern using both specialists.")
 	if err != nil {
 		return fmt.Errorf("run coordinator: %w", err)
