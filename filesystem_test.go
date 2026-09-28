@@ -319,7 +319,7 @@ func TestFilesystemEditFile(t *testing.T) {
 	}
 	wantFSError(t, registry, "edit_file", editFileInput{Path: "a.go", Edits: []fileEdit{{OldText: "\n", NewText: ""}}}, "appears 4 times")
 	wantFSError(t, registry, "edit_file", editFileInput{Path: "a.go", Edits: []fileEdit{{OldText: "", NewText: "x"}}}, "must not be empty")
-	wantFSError(t, registry, "edit_file", editFileInput{Path: "a.go"}, "edits must not be empty")
+	wantFSError(t, registry, "edit_file", editFileInput{Path: "a.go", Edits: []fileEdit{}}, "edits must not be empty")
 	wantFSError(t, registry, "edit_file", editFileInput{Path: "missing.go", Edits: []fileEdit{{OldText: "a", NewText: "b"}}}, "not found")
 
 	mustFSTool(t, registry, "edit_file", editFileInput{Path: "crlf.c", Edits: []fileEdit{{OldText: "one\ntwo", NewText: "1\n2"}}})

@@ -3,6 +3,7 @@ package crux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/google/uuid"
@@ -15,7 +16,9 @@ type Store interface {
 	// Append must be all-or-nothing. Entries join the session only after
 	// Append succeeds, so after an error the session is unchanged and the
 	// entries are produced again: tool calls whose results were not stored
-	// run again on the next Run or Resume.
+	// run again on the next Run or Resume. Append must fail with
+	// ErrSessionConflict when the first entry's Seq is not greater than every
+	// Seq already stored, which means another writer got there first.
 	Append(ctx context.Context, session *Session, entries ...Entry) error
 
 	// Get retrieves all log entries for the session in sequential order.
@@ -58,6 +61,9 @@ func (m *MemoryStore) Append(ctx context.Context, session *Session, entries ...E
 	if !ok {
 		stored = &memorySession{parentID: session.parentID}
 		m.sessions[session.id] = stored
+	}
+	if n := len(stored.entries); n > 0 && len(entries) > 0 && entries[0].Seq <= stored.entries[n-1].Seq {
+		return fmt.Errorf("%w: session %s already has entry %d", ErrSessionConflict, session.id, entries[0].Seq)
 	}
 	stored.entries = append(stored.entries, cloneEntries(entries)...)
 	return nil

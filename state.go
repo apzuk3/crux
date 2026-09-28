@@ -13,6 +13,9 @@ type stateContextKey struct{}
 // order. Set replaces whole values; Delete is applied after Set in each delta.
 // A session without state deltas returns an empty, non-nil map.
 //
+// A session loaded from a persistent store such as GORMStore has its values
+// decoded from JSON: numbers become float64, structs become map[string]any.
+//
 // Snapshots recursively copy JSON-like values (map[string]any and []any), byte
 // slices, and json.RawMessage. Other values are copied by assignment; callers
 // must treat other reference-bearing types as immutable. Values must be acyclic.
