@@ -26,6 +26,8 @@ const (
 	fsMaxPreview       = 200
 )
 
+const filesystemToolsetName = "filesystem"
+
 // Filesystem returns a toolset of file tools confined to root. Paths the model
 // passes are relative to root (absolute paths are accepted when they are
 // inside it), and nothing outside root can be reached, including through
@@ -36,7 +38,9 @@ const (
 // Tools that change files need approval: write_file, edit_file,
 // create_directory, remove_directory.
 //
-// Register fails when root is not an existing directory.
+// The tools belong to the "filesystem" toolset, so WithToolsets("filesystem")
+// gives an agent all of them. Register fails when root is not an existing
+// directory.
 func Filesystem(root string) Toolset {
 	return &filesystemToolset{root: root}
 }
@@ -76,6 +80,7 @@ func (f *filesystemToolset) Register(registry ToolsRegistry) error {
 }
 
 func registerFSTool[In any](registry ToolsRegistry, name, description string, fn func(context.Context, In) (string, error), opts ...ToolOption) {
+	opts = append([]ToolOption{WithToolset(filesystemToolsetName)}, opts...)
 	RegisterToolWithRegistry(registry, name, description, func(ctx context.Context, in In) (string, *StateDelta, error) {
 		out, err := fn(ctx, in)
 		return out, nil, err

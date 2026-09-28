@@ -88,6 +88,9 @@ func TestFilesystemRegister(t *testing.T) {
 		if tool.approvalNeeded != want {
 			t.Errorf("%s approvalNeeded = %v, want %v", name, tool.approvalNeeded, want)
 		}
+		if tool.toolset != "filesystem" {
+			t.Errorf("%s toolset = %q, want filesystem", name, tool.toolset)
+		}
 	}
 
 	missing := filepath.Join(t.TempDir(), "missing")

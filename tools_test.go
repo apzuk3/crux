@@ -52,3 +52,45 @@ func TestToolsRegistrySelected(t *testing.T) {
 		})
 	}
 }
+
+func TestToolsRegistryInToolsets(t *testing.T) {
+	registry := NewToolsRegistry()
+	for _, tool := range []Tool{
+		{name: "write", toolset: "fs"},
+		{name: "read", toolset: "fs"},
+		{name: "search", toolset: "web"},
+		{name: "loose"},
+	} {
+		registry.tools[tool.name] = tool
+	}
+
+	for _, tt := range []struct {
+		name     string
+		toolsets []string
+		want     []string
+	}{
+		{name: "one", toolsets: []string{"fs"}, want: []string{"read", "write"}},
+		{name: "order", toolsets: []string{"web", "fs"}, want: []string{"search", "read", "write"}},
+		{name: "duplicates", toolsets: []string{"fs", "web", "fs"}, want: []string{"read", "write", "search"}},
+		{name: "none"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tools, err := registry.inToolsets(tt.toolsets)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var got []string
+			for _, tool := range tools {
+				got = append(got, tool.name)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("names = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	_, err := registry.inToolsets([]string{"fs", "missing"})
+	if !errors.Is(err, ErrToolNotFound) || !strings.Contains(err.Error(), `toolset "missing"`) {
+		t.Fatalf("error = %v, want ErrToolNotFound for toolset missing", err)
+	}
+}

@@ -23,10 +23,10 @@ type mathArgs struct {
 func (mathToolset) Register(reg crux.ToolsRegistry) error {
 	crux.RegisterToolWithRegistry(reg, "add", "Add two numbers", func(ctx context.Context, in mathArgs) (int, *crux.StateDelta, error) {
 		return in.A + in.B, nil, nil
-	})
+	}, crux.WithToolset("math"))
 	crux.RegisterToolWithRegistry(reg, "multiply", "Multiply two numbers", func(ctx context.Context, in mathArgs) (int, *crux.StateDelta, error) {
 		return in.A * in.B, nil, nil
-	})
+	}, crux.WithToolset("math"))
 	return nil
 }
 
@@ -40,7 +40,7 @@ func TestAddToolsetWithRegistry(t *testing.T) {
 	mock.Expect().ReturnText("20")
 
 	agent, err := crux.New("calc", crux.ChatModelGPT5_6Sol,
-		append(mock.AgentOptions(), crux.WithToolsRegistry([]string{"add", "multiply"}, reg))...)
+		append(mock.AgentOptions(), crux.WithToolsetsRegistry(reg, "math"))...)
 	require.NoError(t, err)
 
 	sess, err := crux.NewSession(t.Context(), agent)
@@ -79,7 +79,7 @@ func TestFilesystemWriteNeedsApproval(t *testing.T) {
 	mock.Expect().ReturnText("done")
 
 	agent, err := crux.New("writer", crux.ChatModelGPT5_6Sol,
-		append(mock.AgentOptions(), crux.WithToolsRegistry([]string{"write_file", "read_file"}, reg))...)
+		append(mock.AgentOptions(), crux.WithToolsetsRegistry(reg, "filesystem"))...)
 	require.NoError(t, err)
 
 	sess, err := crux.NewSession(t.Context(), agent)
@@ -101,4 +101,37 @@ func TestFilesystemWriteNeedsApproval(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "ship it", string(data))
 	require.Contains(t, mock.Requests()[2].BodyString(), "ship it")
+}
+
+func TestWithToolsetsCombinesWithTools(t *testing.T) {
+	reg := crux.NewToolsRegistry()
+	require.NoError(t, crux.AddToolsetWithRegistry(reg, mathToolset{}))
+	crux.RegisterToolWithRegistry(reg, "echo", "Echo text", func(ctx context.Context, in struct {
+		Text string `json:"text"`
+	}) (string, *crux.StateDelta, error) {
+		return in.Text, nil, nil
+	})
+
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnText("ok")
+
+	agent, err := crux.New("calc", crux.ChatModelGPT5_6Sol, append(mock.AgentOptions(),
+		crux.WithToolsRegistry([]string{"echo", "add"}, reg),
+		crux.WithToolsetsRegistry(reg, "math"),
+	)...)
+	require.NoError(t, err)
+
+	sess, err := crux.NewSession(t.Context(), agent)
+	require.NoError(t, err)
+	_, err = sess.Run(t.Context(), "hi")
+	require.NoError(t, err)
+
+	body := mock.Requests()[0].BodyString()
+	for _, name := range []string{`"echo"`, `"add"`, `"multiply"`} {
+		require.Contains(t, body, name)
+	}
+	require.Equal(t, 1, strings.Count(body, `"name":"add"`), body)
+
+	_, err = crux.New("calc", crux.ChatModelGPT5_6Sol, append(mock.AgentOptions(), crux.WithToolsetsRegistry(reg, "nope"))...)
+	require.ErrorIs(t, err, crux.ErrToolNotFound)
 }

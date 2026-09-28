@@ -24,6 +24,7 @@ type Tool struct {
 	schema         map[string]any
 	invoke         func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error)
 	approvalNeeded bool
+	toolset        string
 }
 
 type ToolOption func(*Tool)
@@ -31,6 +32,14 @@ type ToolOption func(*Tool)
 func WithApprovalNeeded(approvalNeeded bool) ToolOption {
 	return func(tool *Tool) {
 		tool.approvalNeeded = approvalNeeded
+	}
+}
+
+// WithToolset labels the tool as part of the named toolset, so agents can
+// select every tool in it with WithToolsets.
+func WithToolset(name string) ToolOption {
+	return func(tool *Tool) {
+		tool.toolset = name
 	}
 }
 
@@ -132,6 +141,36 @@ func (r *ToolsRegistry) selected(names []string) ([]Tool, error) {
 			return nil, fmt.Errorf("%w: %q", ErrToolNotFound, name)
 		}
 		tools = append(tools, tool)
+	}
+
+	return tools, nil
+}
+
+// inToolsets returns the tools labelled with any of the given toolset names,
+// ordered by toolset and then tool name. If a toolset has no tools, it returns
+// an error wrapping ErrToolNotFound with the toolset name.
+func (r *ToolsRegistry) inToolsets(names []string) ([]Tool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var tools []Tool
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		var members []Tool
+		for _, tool := range r.tools {
+			if tool.toolset == name {
+				members = append(members, tool)
+			}
+		}
+		if len(members) == 0 {
+			return nil, fmt.Errorf("%w: toolset %q", ErrToolNotFound, name)
+		}
+		slices.SortFunc(members, func(a, b Tool) int { return strings.Compare(a.name, b.name) })
+		tools = append(tools, members...)
 	}
 
 	return tools, nil

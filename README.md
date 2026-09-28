@@ -105,22 +105,27 @@ for chunk, err := range session.Stream(ctx, "Write a haiku about Go.") {
 
 ### Toolsets
 
-A toolset registers a group of related tools in one call. Implement `Register` and add it with `AddToolset` (default registry) or `AddToolsetWithRegistry`:
+A toolset registers a group of related tools in one call. Implement `Register`, label each tool with `WithToolset`, and add it with `AddToolset` (default registry) or `AddToolsetWithRegistry`. An agent then gets every tool in the set with `WithToolsets`:
 
 ```go
 type mathTools struct{}
 
 func (mathTools) Register(reg crux.ToolsRegistry) error {
-	crux.RegisterToolWithRegistry(reg, "add", "Add two numbers", add)
-	crux.RegisterToolWithRegistry(reg, "multiply", "Multiply two numbers", multiply)
+	crux.RegisterToolWithRegistry(reg, "add", "Add two numbers", add, crux.WithToolset("math"))
+	crux.RegisterToolWithRegistry(reg, "multiply", "Multiply two numbers", multiply, crux.WithToolset("math"))
 	return nil
 }
 
 if err := crux.AddToolset(mathTools{}); err != nil {
 	log.Fatal(err)
 }
-agent := crux.Must(crux.New("calc", crux.ChatModelGPT5_4, crux.WithTools([]string{"add", "multiply"})))
+agent := crux.Must(crux.New("calc", crux.ChatModelGPT5_4,
+	crux.WithTools([]string{"get_weather"}), // single tools
+	crux.WithToolsets("math"),               // plus every tool in the "math" toolset
+))
 ```
+
+`WithTools` replaces the agent's tool list, so put `WithToolsets` after it. Use `WithToolsetsRegistry` with a custom registry.
 
 ### Filesystem tools
 
@@ -130,6 +135,7 @@ agent := crux.Must(crux.New("calc", crux.ChatModelGPT5_4, crux.WithTools([]strin
 if err := crux.AddToolset(crux.Filesystem("./workspace")); err != nil {
 	log.Fatal(err)
 }
+agent := crux.Must(crux.New("coder", crux.ChatModelGPT5_4, crux.WithToolsets("filesystem")))
 ```
 
 | Tool | What it does | Approval |
@@ -214,7 +220,7 @@ The provider is inferred from known model constants (`crux.ClaudeSonnet5`, `crux
 | OpenRouter | `ProviderOpenrouter` | `OPENROUTER_API_KEY` | – |
 | Ollama | `ProviderOllama` | none needed locally (`http://localhost:11434/v1`) | with `OLLAMA_API_KEY` |
 
-Common agent options: `WithInstructions`, `WithTools`, `WithMaxTurns`, `WithMaxTokens`, `WithTemperature`, `WithOutputSchemaFrom`, `WithWebSearch`, `WithAPIKey`, `WithBaseURL`, `WithHTTPClient`.
+Common agent options: `WithInstructions`, `WithTools`, `WithToolsets`, `WithMaxTurns`, `WithMaxTokens`, `WithTemperature`, `WithOutputSchemaFrom`, `WithWebSearch`, `WithAPIKey`, `WithBaseURL`, `WithHTTPClient`.
 
 ## Testing your agents
 

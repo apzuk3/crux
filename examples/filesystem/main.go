@@ -35,10 +35,7 @@ func run() error {
 
 	agent, err := crux.New("files", crux.ChatModelGPT5_4,
 		crux.WithInstructions("You help with files in the current project. Paths are relative to the project root."),
-		crux.WithTools([]string{
-			"read_file", "read_multiple_files", "list_directory", "directory_tree", "glob", "search_files_content",
-			"write_file", "edit_file", "create_directory", "remove_directory",
-		}),
+		crux.WithToolsets("filesystem"),
 		crux.WithMaxTurns(30),
 	)
 	if err != nil {
