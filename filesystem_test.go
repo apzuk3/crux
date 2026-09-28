@@ -575,7 +575,7 @@ func TestFilesystemReadMultipleFilesLimits(t *testing.T) {
 		paths[i] = fmt.Sprintf("f%d.txt", i)
 	}
 	wantFSError(t, registry, "read_multiple_files", readMultipleFilesInput{Paths: paths}, fmt.Sprintf("at most %d paths", fsMaxMultiReadFiles))
-	wantFSError(t, registry, "read_multiple_files", readMultipleFilesInput{}, "must not be empty")
+	wantFSError(t, registry, "read_multiple_files", readMultipleFilesInput{Paths: []string{}}, "must not be empty")
 }
 
 func TestFilesystemSearchOutputBounded(t *testing.T) {
