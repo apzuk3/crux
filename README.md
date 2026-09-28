@@ -151,6 +151,8 @@ agent := crux.Must(crux.New("coder", crux.ChatModelGPT5_4, crux.WithToolsets("fi
 | `create_directory` | create directories | yes |
 | `remove_directory` | remove empty directories | yes |
 
+Read-only tools run without approval, so the model can read any file under `root` (including `.env` files and keys) and its content is sent to the provider. Point `root` at the narrowest directory the agent needs. Each call is bounded (1 MB per file read, capped listings, walks and searches), and output that hits a limit ends with a note telling the model how to narrow the request. Writes and edits replace the file atomically.
+
 ### Tool approvals
 
 ```go

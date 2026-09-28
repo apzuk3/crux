@@ -4,29 +4,47 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
 
 const (
-	fsMaxReadBytes     = 1 << 20  // read_file output cap
-	fsMaxEntries       = 1000     // list_directory, directory_tree and glob result cap
-	fsMaxSearchOutput  = 64 << 10 // search_files_content output cap
-	fsMaxSearchFile    = 10 << 20 // files larger than this are skipped by search
-	fsBinarySniffBytes = 512
-	fsMaxPreview       = 200
+	fsMaxReadBytes       = 1 << 20  // read_file output cap
+	fsMaxMultiReadBytes  = 2 << 20  // read_multiple_files total output cap
+	fsMaxMultiReadFiles  = 50       // read_multiple_files path cap
+	fsMaxEntries         = 1000     // list_directory, directory_tree and glob result cap
+	fsMaxSearchOutput    = 64 << 10 // search_files_content output cap
+	fsMaxSearchFile      = 10 << 20 // files larger than this are skipped by search
+	fsMaxEditBytes       = 10 << 20 // edit_file size cap
+	fsBinarySniffBytes   = 8 << 10
+	fsMaxPreview         = 200
+	fsMaxGlobSegments    = 32
+	fsMaxGlobLength      = 1024
+	fsCtxCheckIterations = 256
+)
+
+// Work budgets per call; variables so tests can lower them.
+var (
+	fsMaxWalkEntries       = 20000     // entries one call may visit
+	fsMaxSearchBytes int64 = 100 << 20 // bytes search_files_content may read
 )
 
 const filesystemToolsetName = "filesystem"
+
+var (
+	errIsDir      = errors.New("is a directory")
+	errNotRegular = errors.New("not a regular file")
+)
 
 // Filesystem returns a toolset of file tools confined to root. Paths the model
 // passes are relative to root (absolute paths are accepted when they are
@@ -37,6 +55,14 @@ const filesystemToolsetName = "filesystem"
 // directory_tree, glob, search_files_content.
 // Tools that change files need approval: write_file, edit_file,
 // create_directory, remove_directory.
+//
+// Read-only tools run without approval, so the model can read any file under
+// root, including secrets such as .env files or private keys, and its content
+// is sent to the provider. Scope root narrowly to the files the agent needs.
+//
+// Output and work per call are bounded: large files, long listings and
+// searches are cut off with a note telling the model how to narrow the
+// request.
 //
 // The tools belong to the "filesystem" toolset, so WithToolsets("filesystem")
 // gives an agent all of them. Register fails when root is not an existing
@@ -66,7 +92,7 @@ func (f *filesystemToolset) Register(registry ToolsRegistry) error {
 	approval := WithApprovalNeeded(true)
 
 	registerFSTool(registry, "read_file", "Read a text file. The whole file is returned unless line (1-based start line) and limit (maximum number of lines) select a range.", t.readFile)
-	registerFSTool(registry, "read_multiple_files", "Read several text files at once. Prefer this over sequential read_file calls.", t.readMultipleFiles)
+	registerFSTool(registry, "read_multiple_files", fmt.Sprintf("Read several text files at once (at most %d). Prefer this over sequential read_file calls.", fsMaxMultiReadFiles), t.readMultipleFiles)
 	registerFSTool(registry, "list_directory", "List the files and directories directly inside a directory.", t.listDirectory)
 	registerFSTool(registry, "directory_tree", "Show a recursive tree of files and directories.", t.directoryTree)
 	registerFSTool(registry, "glob", "Find files whose path matches a glob pattern such as **/*.go or src/*.ts. ** matches any number of directories.", t.glob)
@@ -92,10 +118,15 @@ type fsTools struct {
 }
 
 // open opens the root for one tool call. os.Root keeps every operation inside
-// the root directory, including when symlinks point elsewhere.
+// the root directory, including when symlinks point elsewhere. The error does
+// not name the host path, because it is sent to the model.
 func (t *fsTools) open() (*os.Root, error) {
 	root, err := os.OpenRoot(t.root)
 	if err != nil {
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			err = pathErr.Err
+		}
 		return nil, fmt.Errorf("open filesystem root: %w", err)
 	}
 	return root, nil
@@ -131,10 +162,45 @@ func display(rel string) string {
 }
 
 func fsError(name string, err error) error {
-	if errors.Is(err, fs.ErrNotExist) {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("%s: not found", name)
+	case errors.Is(err, errIsDir):
+		return fmt.Errorf("%s is a directory", name)
+	case errors.Is(err, errNotRegular):
+		return fmt.Errorf("%s is not a regular file", name)
 	}
 	return fmt.Errorf("%s: %w", name, err)
+}
+
+// openRegular opens a regular file for reading. Directories, FIFOs, devices
+// and sockets are rejected before opening, and again after opening in case
+// the path was replaced in between.
+func openRegular(root *os.Root, rel string) (*os.File, fs.FileInfo, error) {
+	info, err := root.Stat(rel)
+	if err != nil {
+		return nil, nil, err
+	}
+	if info.IsDir() {
+		return nil, nil, errIsDir
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, errNotRegular
+	}
+	f, err := root.Open(rel)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err = f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, nil, errNotRegular
+	}
+	return f, info, nil
 }
 
 type readFileInput struct {
@@ -156,28 +222,26 @@ func (t *fsTools) readFile(ctx context.Context, in readFileInput) (string, error
 	}
 	defer root.Close()
 
-	return t.readText(root, in.Path, in.Line, in.Limit)
+	return t.readText(ctx, root, in.Path, in.Line, in.Limit, fsMaxReadBytes)
 }
 
-func (t *fsTools) readText(root *os.Root, name string, line, limit *int) (string, error) {
+// readText reads a text file, returning at most maxBytes of content. Memory
+// use is bounded by maxBytes plus a small buffer, however long the lines are.
+func (t *fsTools) readText(ctx context.Context, root *os.Root, name string, line, limit *int, maxBytes int) (string, error) {
 	rel, err := t.resolve(name)
 	if err != nil {
 		return "", err
 	}
-	info, err := root.Stat(rel)
-	if err != nil {
-		return "", fsError(name, err)
-	}
-	if info.IsDir() {
+	f, info, err := openRegular(root, rel)
+	if errors.Is(err, errIsDir) {
 		return "", fmt.Errorf("%s is a directory; use list_directory", name)
 	}
-	f, err := root.Open(rel)
 	if err != nil {
 		return "", fsError(name, err)
 	}
 	defer f.Close()
 
-	reader := bufio.NewReader(f)
+	reader := bufio.NewReaderSize(f, 64<<10)
 	head, _ := reader.Peek(fsBinarySniffBytes)
 	if isBinary(head) {
 		return "", fmt.Errorf("%s is a binary file", name)
@@ -191,23 +255,39 @@ func (t *fsTools) readText(root *os.Root, name string, line, limit *int) (string
 		maxLines = *limit
 	}
 
-	var out strings.Builder
-	truncated := false
+	var out bytes.Buffer
+	if start == 1 && maxLines < 0 {
+		out.Grow(int(min(info.Size(), int64(maxBytes))) + 256)
+	}
+	truncated, midLine := false, false
 	current := 1
-	for {
+	for i := 0; ; i++ {
 		if maxLines >= 0 && current-start >= maxLines {
 			break
 		}
-		chunk, readErr := reader.ReadString('\n')
-		if chunk != "" && current >= start {
-			if out.Len()+len(chunk) > fsMaxReadBytes {
+		if i%fsCtxCheckIterations == 0 {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+		}
+		chunk, readErr := reader.ReadSlice('\n')
+		if len(chunk) > 0 && current >= start {
+			if room := maxBytes - out.Len(); len(chunk) > room {
+				for room > 0 && !utf8.RuneStart(chunk[room]) {
+					room--
+				}
+				out.Write(chunk[:room])
 				truncated = true
+				midLine = room > 0 || out.Len() > 0 && out.Bytes()[out.Len()-1] != '\n'
 				break
 			}
-			out.WriteString(chunk)
+			out.Write(chunk)
 		}
-		if strings.HasSuffix(chunk, "\n") {
+		if len(chunk) > 0 && chunk[len(chunk)-1] == '\n' {
 			current++
+		}
+		if errors.Is(readErr, bufio.ErrBufferFull) {
+			continue
 		}
 		if errors.Is(readErr, io.EOF) {
 			break
@@ -218,8 +298,10 @@ func (t *fsTools) readText(root *os.Root, name string, line, limit *int) (string
 	}
 
 	switch {
+	case truncated && midLine:
+		fmt.Fprintf(&out, "\n[Output truncated at %d bytes, within line %d. The rest of that line is not shown; use line and limit to read later lines.]", maxBytes, current)
 	case truncated:
-		fmt.Fprintf(&out, "\n[Output truncated at %d bytes, before line %d. Use line and limit to read the rest.]", fsMaxReadBytes, current)
+		fmt.Fprintf(&out, "\n[Output truncated at %d bytes, before line %d. Use line and limit to read the rest.]", maxBytes, current)
 	case out.Len() == 0 && start > 1:
 		return fmt.Sprintf("No content: %s has fewer than %d lines.", name, start), nil
 	case out.Len() == 0:
@@ -233,6 +315,12 @@ type readMultipleFilesInput struct {
 }
 
 func (t *fsTools) readMultipleFiles(ctx context.Context, in readMultipleFilesInput) (string, error) {
+	if len(in.Paths) == 0 {
+		return "", errors.New("paths must not be empty")
+	}
+	if len(in.Paths) > fsMaxMultiReadFiles {
+		return "", fmt.Errorf("at most %d paths can be read at once, got %d; split them into several calls", fsMaxMultiReadFiles, len(in.Paths))
+	}
 	root, err := t.open()
 	if err != nil {
 		return "", err
@@ -240,15 +328,34 @@ func (t *fsTools) readMultipleFiles(ctx context.Context, in readMultipleFilesInp
 	defer root.Close()
 
 	var out strings.Builder
+	var skipped []string
+	seen := make(map[string]bool, len(in.Paths))
 	for _, name := range in.Paths {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		content, err := t.readText(root, name, nil, nil)
+		if rel, err := t.resolve(name); err == nil {
+			if seen[rel] {
+				continue
+			}
+			seen[rel] = true
+		}
+		remaining := fsMaxMultiReadBytes - out.Len()
+		if remaining < 1024 {
+			skipped = append(skipped, name)
+			continue
+		}
+		content, err := t.readText(ctx, root, name, nil, nil, min(fsMaxReadBytes, remaining))
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", ctxErr
+			}
 			content = "Error: " + err.Error()
 		}
 		fmt.Fprintf(&out, "=== %s ===\n%s\n\n", name, content)
+	}
+	if len(skipped) > 0 {
+		fmt.Fprintf(&out, "[Output limit of %d bytes reached. Not read: %s. Read them in another call.]", fsMaxMultiReadBytes, strings.Join(skipped, ", "))
 	}
 	return out.String(), nil
 }
@@ -268,7 +375,7 @@ func (t *fsTools) listDirectory(ctx context.Context, in listDirectoryInput) (str
 	}
 	defer root.Close()
 
-	entries, err := fs.ReadDir(root.FS(), display(rel))
+	entries, more, err := readDirLimited(root, rel, fsMaxWalkEntries)
 	if err != nil {
 		return "", fsError(in.Path, err)
 	}
@@ -279,7 +386,6 @@ func (t *fsTools) listDirectory(ctx context.Context, in listDirectoryInput) (str
 	var out strings.Builder
 	for i, entry := range entries {
 		if i == fsMaxEntries {
-			fmt.Fprintf(&out, "[Output truncated: showing %d of %d entries.]\n", fsMaxEntries, len(entries))
 			break
 		}
 		if entry.IsDir() {
@@ -288,7 +394,105 @@ func (t *fsTools) listDirectory(ctx context.Context, in listDirectoryInput) (str
 			fmt.Fprintf(&out, "FILE %s\n", entry.Name())
 		}
 	}
+	switch {
+	case more:
+		fmt.Fprintf(&out, "[Output truncated: showing %d of more than %d entries. Use glob to find specific files.]\n", min(len(entries), fsMaxEntries), fsMaxWalkEntries)
+	case len(entries) > fsMaxEntries:
+		fmt.Fprintf(&out, "[Output truncated: showing %d of %d entries.]\n", fsMaxEntries, len(entries))
+	}
 	return out.String(), nil
+}
+
+func checkDir(root *os.Root, rel, name string) error {
+	info, err := root.Stat(rel)
+	if err != nil {
+		return fsError(name, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", name)
+	}
+	return nil
+}
+
+// readDirLimited reads at most limit entries of a directory, sorted by name,
+// and reports whether it has more.
+func readDirLimited(root *os.Root, rel string, limit int) ([]fs.DirEntry, bool, error) {
+	f, err := root.Open(rel)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	var entries []fs.DirEntry
+	if limit > 0 {
+		entries, err = f.ReadDir(limit + 1)
+	} else {
+		entries, err = f.ReadDir(1)
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, false, err
+	}
+	more := len(entries) > limit
+	entries = entries[:min(len(entries), limit)]
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	return entries, more, nil
+}
+
+// walkRoot walks the tree under start (a slash-separated root-relative path)
+// in lexical order without following symlinks, calling fn for every entry but
+// start itself. fn may return fs.SkipDir for a directory or fs.SkipAll. At
+// most fsMaxWalkEntries entries are visited; walkRoot reports whether it
+// stopped because of that budget.
+func walkRoot(ctx context.Context, root *os.Root, start string, fn func(p string, d fs.DirEntry) error) (bool, error) {
+	visited := 0
+	exhausted := false
+	var walk func(dir string) error
+	walk = func(dir string) error {
+		entries, more, err := readDirLimited(root, filepath.FromSlash(dir), fsMaxWalkEntries-visited)
+		if err != nil {
+			if dir == start {
+				return err
+			}
+			return nil
+		}
+		if more {
+			exhausted = true
+		}
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			visited++
+			p := path.Join(dir, entry.Name())
+			err := fn(p, entry)
+			if errors.Is(err, fs.SkipDir) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				if err := walk(p); err != nil {
+					return err
+				}
+			}
+			if exhausted {
+				return fs.SkipAll
+			}
+		}
+		if exhausted {
+			return fs.SkipAll
+		}
+		return nil
+	}
+	err := walk(start)
+	if errors.Is(err, fs.SkipAll) {
+		err = nil
+	}
+	return exhausted, err
+}
+
+func walkBudgetNote() string {
+	return fmt.Sprintf("[Stopped after visiting %d entries; results may be incomplete. Use a narrower path.]", fsMaxWalkEntries)
 }
 
 type directoryTreeInput struct {
@@ -310,29 +514,15 @@ func (t *fsTools) directoryTree(ctx context.Context, in directoryTreeInput) (str
 	}
 	defer root.Close()
 
-	if info, err := root.Stat(rel); err != nil {
-		return "", fsError(in.Path, err)
-	} else if !info.IsDir() {
-		return "", fmt.Errorf("%s is not a directory", in.Path)
+	if err := checkDir(root, rel, in.Path); err != nil {
+		return "", err
 	}
 
 	start := display(rel)
 	var out strings.Builder
 	fmt.Fprintf(&out, "%s/\n", start)
 	count := 0
-	err = fs.WalkDir(root.FS(), start, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if p == start {
-				return err
-			}
-			return nil
-		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		if p == start {
-			return nil
-		}
+	exhausted, err := walkRoot(ctx, root, start, func(p string, d fs.DirEntry) error {
 		if d.IsDir() && d.Name() == ".git" {
 			return fs.SkipDir
 		}
@@ -356,6 +546,9 @@ func (t *fsTools) directoryTree(ctx context.Context, in directoryTreeInput) (str
 	if err != nil {
 		return "", fsError(in.Path, err)
 	}
+	if exhausted {
+		out.WriteString(walkBudgetNote() + "\n")
+	}
 	return out.String(), nil
 }
 
@@ -365,8 +558,8 @@ type globInput struct {
 }
 
 func (t *fsTools) glob(ctx context.Context, in globInput) (string, error) {
-	pattern := strings.TrimPrefix(filepath.ToSlash(in.Pattern), "./")
-	if err := validateGlob(pattern); err != nil {
+	pattern, err := cleanGlob(strings.TrimPrefix(filepath.ToSlash(in.Pattern), "./"))
+	if err != nil {
 		return "", err
 	}
 	rel, err := t.resolve(in.Path)
@@ -379,22 +572,14 @@ func (t *fsTools) glob(ctx context.Context, in globInput) (string, error) {
 	}
 	defer root.Close()
 
+	if err := checkDir(root, rel, in.Path); err != nil {
+		return "", err
+	}
+
 	start := display(rel)
 	var matches []string
 	truncated := false
-	err = fs.WalkDir(root.FS(), start, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if p == start {
-				return err
-			}
-			return nil
-		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		if p == start {
-			return nil
-		}
+	exhausted, err := walkRoot(ctx, root, start, func(p string, d fs.DirEntry) error {
 		if d.IsDir() {
 			if d.Name() == ".git" {
 				return fs.SkipDir
@@ -413,12 +598,15 @@ func (t *fsTools) glob(ctx context.Context, in globInput) (string, error) {
 	if err != nil {
 		return "", fsError(in.Path, err)
 	}
-	if len(matches) == 0 {
-		return "No files found", nil
-	}
 	out := strings.Join(matches, "\n")
-	if truncated {
+	if len(matches) == 0 {
+		out = "No files found"
+	}
+	switch {
+	case truncated:
 		out += fmt.Sprintf("\n[Output truncated at %d files. Use a narrower pattern.]", fsMaxEntries)
+	case exhausted:
+		out += "\n" + walkBudgetNote()
 	}
 	return out, nil
 }
@@ -437,14 +625,15 @@ func (t *fsTools) searchFilesContent(ctx context.Context, in searchFilesContentI
 	}
 	include := strings.TrimPrefix(filepath.ToSlash(in.Include), "./")
 	if include != "" {
-		if err := validateGlob(include); err != nil {
+		var err error
+		if include, err = cleanGlob(include); err != nil {
 			return "", err
 		}
 	}
 	excludes := make([]string, 0, len(in.ExcludePatterns))
 	for _, pattern := range in.ExcludePatterns {
-		pattern = strings.TrimSuffix(strings.TrimPrefix(filepath.ToSlash(pattern), "./"), "/")
-		if err := validateGlob(pattern); err != nil {
+		pattern, err := cleanGlob(strings.TrimSuffix(strings.TrimPrefix(filepath.ToSlash(pattern), "./"), "/"))
+		if err != nil {
 			return "", err
 		}
 		excludes = append(excludes, pattern)
@@ -477,24 +666,16 @@ func (t *fsTools) searchFilesContent(ctx context.Context, in searchFilesContentI
 	}
 	defer root.Close()
 
-	fsys := root.FS()
+	if err := checkDir(root, rel, in.Path); err != nil {
+		return "", err
+	}
+
 	start := display(rel)
 	var out strings.Builder
 	matches := 0
-	truncated := false
-	err = fs.WalkDir(fsys, start, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if p == start {
-				return err
-			}
-			return nil
-		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		if p == start {
-			return nil
-		}
+	scanned := int64(0)
+	var stopped string
+	exhausted, err := walkRoot(ctx, root, start, func(p string, d fs.DirEntry) error {
 		relPath := relTo(start, p)
 		if d.IsDir() && d.Name() == ".git" || excluded(excludes, relPath, d.Name()) {
 			if d.IsDir() {
@@ -506,43 +687,64 @@ func (t *fsTools) searchFilesContent(ctx context.Context, in searchFilesContentI
 			return nil
 		}
 
-		info, err := fs.Stat(fsys, p)
-		if err != nil || !info.Mode().IsRegular() || info.Size() > fsMaxSearchFile {
+		f, info, err := openRegular(root, filepath.FromSlash(p))
+		if err != nil {
 			return nil
 		}
-		content, err := fs.ReadFile(fsys, p)
-		if err != nil || isBinary(content[:min(len(content), fsBinarySniffBytes)]) {
+		defer f.Close()
+		if info.Size() > fsMaxSearchFile {
+			return nil
+		}
+		if scanned+info.Size() > fsMaxSearchBytes {
+			stopped = fmt.Sprintf("[Stopped after reading %d MB of files; results may be incomplete. Narrow the search with path, include or exclude_patterns.]", fsMaxSearchBytes>>20)
+			return fs.SkipAll
+		}
+		content, err := io.ReadAll(io.LimitReader(f, fsMaxSearchFile+1))
+		scanned += int64(len(content))
+		if err != nil || len(content) > fsMaxSearchFile || isBinary(content[:min(len(content), fsBinarySniffBytes)]) {
 			return nil
 		}
 
 		lineNum := 0
 		for line := range strings.SplitSeq(string(content), "\n") {
 			lineNum++
+			if lineNum%fsCtxCheckIterations == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			line = strings.TrimSuffix(line, "\r")
 			from, to, ok := match(line)
 			if !ok {
 				continue
 			}
+			entry := fmt.Sprintf("%s:%d:%d: %s", p, lineNum, from+1, preview(line, from, to))
+			if out.Len()+len(entry)+1 > fsMaxSearchOutput {
+				stopped = "[Output truncated. Narrow the search with a more specific query, path, include or exclude_patterns.]"
+				return fs.SkipAll
+			}
 			if matches > 0 {
 				out.WriteByte('\n')
 			}
-			fmt.Fprintf(&out, "%s:%d:%d: %s", p, lineNum, from+1, preview(line, from, to))
+			out.WriteString(entry)
 			matches++
-			if out.Len() >= fsMaxSearchOutput {
-				truncated = true
-				return fs.SkipAll
-			}
 		}
 		return nil
 	})
 	if err != nil {
 		return "", fsError(in.Path, err)
 	}
+	if stopped == "" && exhausted {
+		stopped = walkBudgetNote()
+	}
 	if matches == 0 {
+		if stopped != "" {
+			return "No results found\n" + stopped, nil
+		}
 		return "No results found", nil
 	}
-	if truncated {
-		out.WriteString("\n[Output truncated. Narrow the search with a more specific query, path, include or exclude_patterns.]")
+	if stopped != "" {
+		out.WriteString("\n" + stopped)
 	}
 	return out.String(), nil
 }
@@ -568,7 +770,7 @@ func (t *fsTools) writeFile(ctx context.Context, in writeFileInput) (string, err
 			return "", fsError(in.Path, err)
 		}
 	}
-	if err := root.WriteFile(rel, []byte(in.Content), 0o644); err != nil {
+	if err := replaceFile(root, rel, []byte(in.Content)); err != nil {
 		return "", fsError(in.Path, err)
 	}
 	return fmt.Sprintf("Wrote %d bytes to %s", len(in.Content), display(rel)), nil
@@ -598,7 +800,7 @@ func (t *fsTools) editFile(ctx context.Context, in editFileInput) (string, error
 	}
 	defer root.Close()
 
-	data, err := root.ReadFile(rel)
+	data, err := readForEdit(root, rel)
 	if err != nil {
 		return "", fsError(in.Path, err)
 	}
@@ -623,10 +825,77 @@ func (t *fsTools) editFile(ctx context.Context, in editFileInput) (string, error
 		}
 	}
 
-	if err := root.WriteFile(rel, []byte(content), 0o644); err != nil {
+	if err := replaceFile(root, rel, []byte(content)); err != nil {
 		return "", fsError(in.Path, err)
 	}
 	return fmt.Sprintf("Applied %d edit(s) to %s", len(in.Edits), display(rel)), nil
+}
+
+func readForEdit(root *os.Root, rel string) ([]byte, error) {
+	f, info, err := openRegular(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	tooLarge := fmt.Errorf("file is larger than %d MB; edit_file cannot change it", fsMaxEditBytes>>20)
+	if info.Size() > fsMaxEditBytes {
+		return nil, tooLarge
+	}
+	data, err := io.ReadAll(io.LimitReader(f, fsMaxEditBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > fsMaxEditBytes {
+		return nil, tooLarge
+	}
+	return data, nil
+}
+
+// replaceFile writes data to a temporary file next to rel and renames it over
+// rel, so rel never holds partly written content. An existing file keeps its
+// permissions. A symlink is written through in place, so it stays a link.
+func replaceFile(root *os.Root, rel string, data []byte) error {
+	perm, keepPerm := os.FileMode(0o644), false
+	if info, err := root.Lstat(rel); err == nil {
+		switch {
+		case info.Mode()&fs.ModeSymlink != 0:
+			if target, err := root.Stat(rel); err == nil && !target.Mode().IsRegular() {
+				return errNotRegular
+			}
+			return root.WriteFile(rel, data, perm)
+		case info.IsDir():
+			return errIsDir
+		case !info.Mode().IsRegular():
+			return errNotRegular
+		}
+		perm, keepPerm = info.Mode().Perm(), true
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+
+	tmp := filepath.Join(filepath.Dir(rel), "."+filepath.Base(rel)+"."+rand.Text()[:10]+".tmp")
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if err == nil && keepPerm {
+		err = f.Chmod(perm)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = root.Rename(tmp, rel)
+	}
+	if err != nil {
+		root.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 type directoriesInput struct {
@@ -705,16 +974,29 @@ func excluded(patterns []string, relPath, base string) bool {
 	return false
 }
 
-func validateGlob(pattern string) error {
+// cleanGlob validates a slash-separated glob pattern, bounds its size and
+// collapses repeated "**" segments, which match the same paths as one.
+func cleanGlob(pattern string) (string, error) {
 	if pattern == "" {
-		return errors.New("pattern must not be empty")
+		return "", errors.New("pattern must not be empty")
 	}
+	if len(pattern) > fsMaxGlobLength {
+		return "", fmt.Errorf("glob pattern is longer than %d characters", fsMaxGlobLength)
+	}
+	var segments []string
 	for _, segment := range strings.Split(pattern, "/") {
-		if _, err := path.Match(segment, ""); err != nil {
-			return fmt.Errorf("invalid glob pattern %q: %w", pattern, err)
+		if segment == "**" && len(segments) > 0 && segments[len(segments)-1] == "**" {
+			continue
 		}
+		if _, err := path.Match(segment, ""); err != nil {
+			return "", fmt.Errorf("invalid glob pattern %q: %w", pattern, err)
+		}
+		segments = append(segments, segment)
 	}
-	return nil
+	if len(segments) > fsMaxGlobSegments {
+		return "", fmt.Errorf("glob pattern %q has more than %d segments", pattern, fsMaxGlobSegments)
+	}
+	return strings.Join(segments, "/"), nil
 }
 
 // matchGlob matches a slash-separated path against a glob pattern in which
@@ -723,48 +1005,63 @@ func matchGlob(pattern, name string) bool {
 	return matchSegments(strings.Split(pattern, "/"), strings.Split(name, "/"))
 }
 
+// matchSegments runs in O(len(pattern) * len(name)) time. next[j] reports
+// whether the pattern suffix after the current segment matches name[j:].
 func matchSegments(pattern, name []string) bool {
-	for len(pattern) > 0 {
-		if pattern[0] == "**" {
-			for i := range len(name) + 1 {
-				if matchSegments(pattern[1:], name[i:]) {
-					return true
-				}
+	next := make([]bool, len(name)+1)
+	cur := make([]bool, len(name)+1)
+	next[len(name)] = true
+	for i := len(pattern) - 1; i >= 0; i-- {
+		if pattern[i] == "**" {
+			found := false
+			for j := len(name); j >= 0; j-- {
+				found = found || next[j]
+				cur[j] = found
 			}
-			return false
+		} else {
+			cur[len(name)] = false
+			for j := len(name) - 1; j >= 0; j-- {
+				ok := false
+				if next[j+1] {
+					ok, _ = path.Match(pattern[i], name[j])
+				}
+				cur[j] = ok
+			}
 		}
-		if len(name) == 0 {
-			return false
-		}
-		if ok, _ := path.Match(pattern[0], name[0]); !ok {
-			return false
-		}
-		pattern, name = pattern[1:], name[1:]
+		next, cur = cur, next
 	}
-	return len(name) == 0
+	return next[0]
 }
 
+// isBinary reports whether a file prefix looks binary: it contains a NUL byte
+// or is not valid UTF-8. A rune cut off at the end of the prefix is ignored.
 func isBinary(head []byte) bool {
-	if len(head) == 0 {
-		return false
-	}
 	if bytes.IndexByte(head, 0) >= 0 {
 		return true
 	}
-	return !strings.HasPrefix(http.DetectContentType(head), "text/")
+	for i := len(head) - 1; i >= 0 && i >= len(head)-utf8.UTFMax; i-- {
+		if utf8.RuneStart(head[i]) {
+			if !utf8.FullRune(head[i:]) {
+				head = head[:i]
+			}
+			break
+		}
+	}
+	return !utf8.Valid(head)
 }
 
+// preview returns at most fsMaxPreview bytes of line around a match.
 func preview(line string, from, to int) string {
 	if len(line) <= fsMaxPreview {
 		return line
 	}
 	start := max(from-40, 0)
-	end := min(max(to+40, start+fsMaxPreview), len(line))
-	for start > 0 && !utf8.RuneStart(line[start]) {
-		start--
+	end := min(start+fsMaxPreview, len(line))
+	for start < end && !utf8.RuneStart(line[start]) {
+		start++
 	}
-	for end < len(line) && !utf8.RuneStart(line[end]) {
-		end++
+	for end > start && end < len(line) && !utf8.RuneStart(line[end]) {
+		end--
 	}
 	return line[start:end]
 }
