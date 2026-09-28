@@ -43,11 +43,16 @@ type Agent struct {
 
 type Session struct {
 	id         uuid.UUID
+	parentID   uuid.UUID // session whose tool call created this one; uuid.Nil at the top level
 	agent      *Agent
 	logs       []Entry
 	httpClient *http.Client
 	store      Store
 }
+
+// sessionContextKey carries the session running a tool, so sessions created
+// inside that tool (such as subagents) are recorded as its children.
+type sessionContextKey struct{}
 
 // NewSession starts a conversation with agent. Sessions are kept in an
 // in-memory store unless WithStore supplies another one.
@@ -80,6 +85,12 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 	if session.id == uuid.Nil {
 		return nil, errors.New("session ID cannot be nil")
 	}
+	if parent, ok := ctx.Value(sessionContextKey{}).(*Session); ok && parent.id != session.id {
+		session.parentID = parent.id
+		if session.store == nil {
+			session.store = parent.store
+		}
+	}
 	if session.store == nil {
 		session.store = NewMemoryStore()
 	}
@@ -104,7 +115,7 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 				session.logs[i].At = now
 			}
 		}
-		if err := session.store.Append(ctx, session.id, agent, session.logs...); err != nil {
+		if err := session.store.Append(ctx, session, session.logs...); err != nil {
 			return nil, fmt.Errorf("persist session logs: %w", err)
 		}
 	}
@@ -163,7 +174,7 @@ func (s *Session) appendLogs(ctx context.Context, entries ...Entry) error {
 		s.logs = append(s.logs, entries[i])
 	}
 
-	if err := s.store.Append(ctx, s.id, s.agent, entries...); err != nil {
+	if err := s.store.Append(ctx, s, entries...); err != nil {
 		return fmt.Errorf("persist session logs: %w", err)
 	}
 
@@ -757,7 +768,8 @@ func (s *Session) dispatch(ctx context.Context, call *ToolCall, snapshot map[str
 	tool := s.agent.tools[index]
 
 	start := time.Now()
-	output, delta, err := invokeTool(ContextWithState(ctx, snapshot), tool, call.Args)
+	toolCtx := context.WithValue(ContextWithState(ctx, snapshot), sessionContextKey{}, s)
+	output, delta, err := invokeTool(toolCtx, tool, call.Args)
 	duration := time.Since(start)
 	if err != nil {
 		result.Error = err.Error()

@@ -51,7 +51,7 @@ func TestGORMStore_AppendAndGet(t *testing.T) {
 	}
 
 	// 1. Initial Append
-	err = store.Append(ctx, sessionID, agent, entry1, entry2)
+	err = store.Append(ctx, &Session{id: sessionID, agent: agent}, entry1, entry2)
 	require.NoError(t, err)
 
 	// Verify agent record created
@@ -91,7 +91,7 @@ func TestGORMStore_AppendAndGet(t *testing.T) {
 	}
 
 	time.Sleep(10 * time.Millisecond) // ensure timestamp progresses
-	err = store.Append(ctx, sessionID, agent, entry3)
+	err = store.Append(ctx, &Session{id: sessionID, agent: agent}, entry3)
 	require.NoError(t, err)
 
 	// Verify session was updated (not duplicated)
@@ -138,8 +138,8 @@ func TestGORMStore_SessionIsolation(t *testing.T) {
 	e2, _ := NewUserEntry("Session 2 message")
 	e2.Seq = 1
 
-	require.NoError(t, store.Append(ctx, session1, agent, e1))
-	require.NoError(t, store.Append(ctx, session2, agent, e2))
+	require.NoError(t, store.Append(ctx, &Session{id: session1, agent: agent}, e1))
+	require.NoError(t, store.Append(ctx, &Session{id: session2, agent: agent}, e2))
 
 	logs1, err := store.Get(ctx, session1)
 	require.NoError(t, err)
@@ -167,11 +167,59 @@ func TestGORMStore_ResumeSession(t *testing.T) {
 	e1, _ := NewUserEntry("Initial question")
 	e1.Seq = 1
 	sessionID := uuid.New()
-	require.NoError(t, store.Append(ctx, sessionID, agent, e1))
+	require.NoError(t, store.Append(ctx, &Session{id: sessionID, agent: agent}, e1))
 
 	resumed, err := NewSession(ctx, agent, WithStore(store), WithSessionID(sessionID))
 	require.NoError(t, err)
 	require.Equal(t, sessionID, resumed.ID())
 	require.Len(t, resumed.Logs(), 1)
 	require.Equal(t, "Initial question", resumed.Logs()[0].Text())
+}
+
+func TestSessionsCreatedInToolsRecordTheirParent(t *testing.T) {
+	store := setupGORMTestDB(t)
+	ctx := context.Background()
+	childAgent := Must(New("child", ChatModelGPT4))
+
+	var child *Session
+	parentAgent := &Agent{
+		name:     "parent",
+		provider: ProviderOpenAI,
+		tools: []Tool{{
+			name: "delegate",
+			invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
+				var err error
+				child, err = NewSession(ctx, childAgent)
+				if err != nil {
+					return "", nil, err
+				}
+				entry, _ := NewUserEntry("child task")
+				return "done", nil, child.appendLogs(ctx, entry)
+			},
+		}},
+	}
+	parent, err := NewSession(ctx, parentAgent, WithStore(store), WithSessionLogs([]Entry{
+		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "start"}}},
+		{Kind: KindToolCall, ToolCall: &ToolCall{ID: "call_1", Name: "delegate"}},
+	}))
+	require.NoError(t, err)
+
+	results := parent.executeUnexecutedToolCalls(ctx)
+	require.Len(t, results, 1)
+	require.Empty(t, results[0].ToolResult.Error)
+
+	// The child inherits the parent's store and records the parent.
+	require.NotNil(t, child)
+	require.Equal(t, parent.id, child.parentID)
+	require.Same(t, store, child.store)
+
+	var childRec SessionRecord
+	require.NoError(t, store.DB().First(&childRec, "id = ?", child.id).Error)
+	require.NotNil(t, childRec.ParentID)
+	require.Equal(t, parent.id, *childRec.ParentID)
+
+	// Top-level sessions have no parent.
+	var parentRec SessionRecord
+	require.NoError(t, store.DB().First(&parentRec, "id = ?", parent.id).Error)
+	require.Nil(t, parentRec.ParentID)
 }

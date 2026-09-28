@@ -10,9 +10,9 @@ import (
 
 // Store defines the persistence contract for agent session state and logs.
 type Store interface {
-	// Append writes newly produced entries for the given session.
-	// It receives the agent blueprint to record or update session and agent metadata.
-	Append(ctx context.Context, sessionID uuid.UUID, agent *Agent, entries ...Entry) error
+	// Append writes newly produced entries for the session. The session also
+	// gives access to its ID and agent for recording session metadata.
+	Append(ctx context.Context, session *Session, entries ...Entry) error
 
 	// Get retrieves all log entries for the session in sequential order.
 	// It returns ErrSessionNotFound when nothing was ever appended for the session.
@@ -26,26 +26,36 @@ var _ Store = (*MemoryStore)(nil)
 // the process exits; use a persistent store such as GORMStore to keep them.
 type MemoryStore struct {
 	mu       sync.RWMutex
-	sessions map[uuid.UUID][]Entry
+	sessions map[uuid.UUID]*memorySession
+}
+
+type memorySession struct {
+	parentID uuid.UUID
+	entries  []Entry
 }
 
 // NewMemoryStore returns an empty in-memory store.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{sessions: make(map[uuid.UUID][]Entry)}
+	return &MemoryStore{sessions: make(map[uuid.UUID]*memorySession)}
 }
 
 // Append records entries for the session, creating it on first use.
-func (m *MemoryStore) Append(ctx context.Context, sessionID uuid.UUID, agent *Agent, entries ...Entry) error {
+func (m *MemoryStore) Append(ctx context.Context, session *Session, entries ...Entry) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if agent == nil {
-		return errors.New("agent cannot be nil")
+	if session == nil {
+		return errors.New("session cannot be nil")
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sessions[sessionID] = append(m.sessions[sessionID], cloneEntries(entries)...)
+	stored, ok := m.sessions[session.id]
+	if !ok {
+		stored = &memorySession{parentID: session.parentID}
+		m.sessions[session.id] = stored
+	}
+	stored.entries = append(stored.entries, cloneEntries(entries)...)
 	return nil
 }
 
@@ -57,9 +67,9 @@ func (m *MemoryStore) Get(ctx context.Context, sessionID uuid.UUID) ([]Entry, er
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	entries, ok := m.sessions[sessionID]
+	stored, ok := m.sessions[sessionID]
 	if !ok {
 		return nil, ErrSessionNotFound
 	}
-	return cloneEntries(entries), nil
+	return cloneEntries(stored.entries), nil
 }

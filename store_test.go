@@ -37,8 +37,8 @@ func TestMemoryStore_AppendAndGet(t *testing.T) {
 
 	e1, _ := NewUserEntry("Session 1 message")
 	e2, _ := NewUserEntry("Session 2 message")
-	require.NoError(t, store.Append(ctx, session1, agent, e1))
-	require.NoError(t, store.Append(ctx, session2, agent, e2))
+	require.NoError(t, store.Append(ctx, &Session{id: session1, agent: agent}, e1))
+	require.NoError(t, store.Append(ctx, &Session{id: session2, agent: agent}, e2))
 
 	logs1, err := store.Get(ctx, session1)
 	require.NoError(t, err)
@@ -136,4 +136,10 @@ func TestSession_ForkPersistsCopiedHistory(t *testing.T) {
 	original, err := store.Get(ctx, session.ID())
 	require.NoError(t, err)
 	require.Len(t, original, 2)
+}
+
+func TestSessionOutsideToolHasNoParent(t *testing.T) {
+	session, err := NewSession(context.Background(), Must(New("bot", ChatModelGPT4)))
+	require.NoError(t, err)
+	require.Equal(t, uuid.Nil, session.parentID)
 }

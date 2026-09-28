@@ -7,7 +7,10 @@ import (
 
 	"github.com/apzuk3/crux"
 	"github.com/apzuk3/crux/cruxtest"
+	"github.com/glebarez/sqlite"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func newMockAgent(t *testing.T, mock *cruxtest.Mock, model string, opts ...crux.AgentOption) *crux.Agent {
@@ -201,4 +204,36 @@ func TestSubAgentTakesTaskAndReturnsOutput(t *testing.T) {
 	var brief Brief
 	require.NoError(t, json.Unmarshal([]byte(result.Output), &brief))
 	require.Equal(t, "brief", brief.Text)
+}
+
+func TestSubAgentSessionIsStoredAsChild(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	store, err := crux.NewGORMStore(db)
+	require.NoError(t, err)
+
+	child := cruxtest.NewMock()
+	child.Expect().ReturnText("brief")
+	subAgent, err := crux.New("researcher", crux.ChatModelGPT5_6Sol, child.AgentOptions()...)
+	require.NoError(t, err)
+
+	parent := cruxtest.NewMock()
+	parent.Expect().ReturnToolCall("agent_researcher", map[string]any{"task": "research"})
+	parent.Expect().ReturnText("final")
+	agent := newMockAgent(t, parent, crux.ChatModelGPT5_6Sol, crux.WithSubAgent(subAgent, "Researches things"))
+
+	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithStore(store)))
+	_, err = session.Run(t.Context(), "go")
+	require.NoError(t, err)
+
+	var children []crux.SessionRecord
+	require.NoError(t, db.Where("parent_id = ?", session.ID()).Find(&children).Error)
+	require.Len(t, children, 1)
+	require.Equal(t, subAgent.ID(), children[0].AgentID)
+
+	// The subagent's conversation is kept in the parent's store.
+	entries, err := store.Get(t.Context(), children[0].ID)
+	require.NoError(t, err)
+	require.Equal(t, "research", entries[0].Text())
+	require.Equal(t, "brief", entries[len(entries)-1].Text())
 }

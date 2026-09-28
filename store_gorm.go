@@ -26,10 +26,11 @@ func (AgentRecord) TableName() string { return "crux_agents" }
 
 // SessionRecord stores active conversation instances linked to an agent blueprint in GORM.
 type SessionRecord struct {
-	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
-	AgentID   uuid.UUID `gorm:"type:uuid;not null;index"`
-	CreatedAt time.Time `gorm:"not null"`
-	UpdatedAt time.Time `gorm:"not null;index"`
+	ID        uuid.UUID  `gorm:"type:uuid;primaryKey"`
+	AgentID   uuid.UUID  `gorm:"type:uuid;not null;index"`
+	ParentID  *uuid.UUID `gorm:"type:uuid;index"` // session whose tool call created this one, for tracing
+	CreatedAt time.Time  `gorm:"not null"`
+	UpdatedAt time.Time  `gorm:"not null;index"`
 }
 
 func (SessionRecord) TableName() string { return "crux_sessions" }
@@ -77,7 +78,11 @@ func (s *GORMStore) DB() *gorm.DB {
 
 // Append persists newly produced log entries for a session within a single transaction,
 // creating or updating the corresponding crux_agents and crux_sessions records.
-func (s *GORMStore) Append(ctx context.Context, sessionID uuid.UUID, agent *Agent, entries ...Entry) error {
+func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Entry) error {
+	if session == nil {
+		return errors.New("session cannot be nil")
+	}
+	sessionID, agent := session.id, session.agent
 	if agent == nil {
 		return errors.New("agent cannot be nil")
 	}
@@ -105,6 +110,10 @@ func (s *GORMStore) Append(ctx context.Context, sessionID uuid.UUID, agent *Agen
 			AgentID:   agent.ID(),
 			CreatedAt: now,
 			UpdatedAt: now,
+		}
+		if session.parentID != uuid.Nil {
+			parentID := session.parentID
+			sessRec.ParentID = &parentID
 		}
 		if err := tx.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "id"}},
