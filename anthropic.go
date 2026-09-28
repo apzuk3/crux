@@ -102,6 +102,14 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 		totalCacheWriteTokens int
 	)
 
+	// The SDK refuses non-streaming requests that may run past ten minutes,
+	// judged from max_tokens, so those stream without emitting chunks.
+	if emit == nil {
+		if _, err := anthropic.CalculateNonStreamingTimeout(int(params.MaxTokens), params.Model, nil); err != nil {
+			emit = func(Chunk) error { return nil }
+		}
+	}
+
 	// anthropic has internal tool calling limitations. Once it's reach the maximum
 	// it will pause and wait until the content is sent back to continue
 	// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons#pause-turn
@@ -318,10 +326,7 @@ func toAnthropicContentBlockParamUnion(e Entry) ([]anthropic.ContentBlockParamUn
 		if c == nil {
 			return nil, errors.New("invalid or unsupported Anthropic tool call entry")
 		}
-		args := c.Args
-		if len(args) == 0 {
-			args = json.RawMessage(`{}`)
-		}
+		args := c.objectArgs()
 		blocks = []anthropic.ContentBlockParamUnion{anthropic.NewToolUseBlock(c.ID, args, c.Name)}
 	case KindToolResult:
 		if e.ToolResult == nil {

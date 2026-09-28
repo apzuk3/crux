@@ -45,7 +45,7 @@ type Session struct {
 	id         uuid.UUID
 	parentID   uuid.UUID // session whose tool call created this one; uuid.Nil at the top level
 	agent      *Agent
-	logs       []Entry
+	logs       []Entry // cache of the entries the store has accepted
 	httpClient *http.Client
 	store      Store
 }
@@ -162,21 +162,24 @@ func (s *Session) Store() Store {
 	return s.store
 }
 
+// appendLogs persists entries and, once the store accepts them, adds them to
+// the session. The store is the source of truth: after a failed write the
+// session is unchanged, so the entries are produced again on the next run.
 func (s *Session) appendLogs(ctx context.Context, entries ...Entry) error {
 	now := time.Now().UTC()
 	for i := range entries {
 		if entries[i].Seq == 0 {
-			entries[i].Seq = uint64(len(s.logs) + 1)
+			entries[i].Seq = uint64(len(s.logs) + i + 1)
 		}
 		if entries[i].At.IsZero() {
 			entries[i].At = now
 		}
-		s.logs = append(s.logs, entries[i])
 	}
 
 	if err := s.store.Append(ctx, s, entries...); err != nil {
 		return fmt.Errorf("persist session logs: %w", err)
 	}
+	s.logs = append(s.logs, entries...)
 
 	return nil
 }

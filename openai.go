@@ -270,7 +270,7 @@ func fromOpenAIResponseOutputItemUnion(item responses.ResponseOutputItemUnion) (
 			ToolCall: &ToolCall{
 				ID:   v.CallID,
 				Name: v.Name,
-				Args: json.RawMessage(v.Arguments),
+				Args: normalizeToolArgs(v.Arguments),
 			},
 			Opaque: opaque,
 		}, nil
@@ -352,7 +352,7 @@ func toOpenAIResponseInputItemUnionParam(e Entry) (responses.ResponseInputItemUn
 		if e.ToolCall == nil {
 			return responses.ResponseInputItemUnionParam{}, errors.New("tool call entry carries no tool call")
 		}
-		arguments := string(e.ToolCall.Args)
+		arguments := e.ToolCall.rawArgs()
 		if arguments == "" {
 			arguments = "{}"
 		}

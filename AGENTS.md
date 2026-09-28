@@ -36,6 +36,7 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
   - `GORMStore` (`NewGORMStore(db)`) persists to the `crux_agents`, `crux_sessions` and `crux_session_logs` tables.
   - `NewSession` with `WithSessionID(id)` loads an existing session from the store, or starts fresh if there isn't one. There is no separate resume function.
   - History seeded with `WithSessionLogs` (as forks do) is written to the store.
+  - The store is the source of truth. `Session.logs` is only a cache: `appendLogs` adds entries to it after `Store.Append` succeeds. After a failed write the session is unchanged, so tool calls whose results weren't stored run again on the next `Run`/`Resume`.
 - **Parent/child sessions are hidden and only for tracing.**
   - `dispatch` puts the running session into the tool's context under an unexported `sessionContextKey`.
   - `NewSession` reads it, records the parent's ID, and reuses the parent's store.

@@ -195,6 +195,8 @@ session, _ := crux.NewSession(ctx, agent, crux.WithStore(store))
 session, _ = crux.NewSession(ctx, agent, crux.WithStore(store), crux.WithSessionID(id))
 ```
 
+The store is the source of truth: an entry joins the session only once the store has saved it. If a write fails, `Run` returns the error and the session is unchanged, so a tool whose result was not saved runs again on the next `Run` or `Resume`. Make tools with side effects idempotent.
+
 ### Forking
 
 ```go

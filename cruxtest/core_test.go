@@ -3,6 +3,7 @@ package cruxtest_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/apzuk3/crux"
@@ -236,4 +237,123 @@ func TestSubAgentSessionIsStoredAsChild(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "research", entries[0].Text())
 	require.Equal(t, "brief", entries[len(entries)-1].Text())
+}
+
+func TestMalformedToolArgumentsAreReportedAndStored(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	store, err := crux.NewGORMStore(db)
+	require.NoError(t, err)
+
+	reg := crux.NewToolsRegistry()
+	called := false
+	crux.RegisterToolWithRegistry(reg, "lookup", "Looks up a city", func(ctx context.Context, in struct {
+		City string `json:"city"`
+	}) (string, *crux.StateDelta, error) {
+		called = true
+		return in.City, nil, nil
+	})
+
+	const truncated = `{"city": "Par`
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnToolCall("lookup", truncated)
+	mock.Expect().ReturnText("Sorry, try again.")
+	agent := newMockAgent(t, mock, crux.ChatModelGPT5_6Sol, crux.WithToolsRegistry([]string{"lookup"}, reg))
+
+	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithStore(store)))
+	out, err := session.Run(t.Context(), "weather?")
+	require.NoError(t, err)
+	require.Equal(t, "Sorry, try again.", out)
+	require.False(t, called, "a tool must not run with arguments it could not decode")
+
+	var result *crux.ToolResult
+	for _, entry := range session.Logs() {
+		if entry.Kind == crux.KindToolResult {
+			result = entry.ToolResult
+		}
+	}
+	require.NotNil(t, result)
+	require.Contains(t, result.Error, "not valid JSON")
+
+	// The model sees its own arguments replayed unchanged.
+	var body struct {
+		Input []map[string]any `json:"input"`
+	}
+	require.NoError(t, mock.Requests()[1].UnmarshalBody(&body))
+	var replayed string
+	for _, item := range body.Input {
+		if item["type"] == "function_call" {
+			replayed, _ = item["arguments"].(string)
+		}
+	}
+	require.Equal(t, truncated, replayed)
+
+	// The whole conversation was persisted and reloads.
+	stored, err := store.Get(t.Context(), session.ID())
+	require.NoError(t, err)
+	require.Len(t, stored, len(session.Logs()))
+}
+
+func TestAnthropicLargeMaxTokensRuns(t *testing.T) {
+	// The SDK rejects non-streaming requests whose max_tokens may take over ten minutes.
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnText("long answer")
+
+	agent := newMockAgent(t, mock, crux.ClaudeHaiku4_5, crux.WithMaxTokens(64000))
+	session := crux.MustSession(crux.NewSession(t.Context(), agent))
+	out, err := session.Run(t.Context(), "write a lot")
+	require.NoError(t, err)
+	require.Equal(t, "long answer", out)
+
+	var body map[string]any
+	require.NoError(t, mock.Requests()[0].UnmarshalBody(&body))
+	require.EqualValues(t, 64000, body["max_tokens"])
+	require.Equal(t, true, body["stream"])
+}
+
+type failingStore struct {
+	*crux.MemoryStore
+	failToolResults bool
+}
+
+func (f *failingStore) Append(ctx context.Context, session *crux.Session, entries ...crux.Entry) error {
+	for _, entry := range entries {
+		if f.failToolResults && entry.Kind == crux.KindToolResult {
+			return errors.New("database unavailable")
+		}
+	}
+	return f.MemoryStore.Append(ctx, session, entries...)
+}
+
+func TestUnsavedToolResultRunsAgainOnResume(t *testing.T) {
+	reg := crux.NewToolsRegistry()
+	calls := 0
+	crux.RegisterToolWithRegistry(reg, "count", "Counts calls", func(ctx context.Context, in struct{}) (int, *crux.StateDelta, error) {
+		calls++
+		return calls, nil, nil
+	})
+
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnToolCall("count", map[string]any{})
+	mock.Expect().ReturnText("done")
+	agent := newMockAgent(t, mock, crux.ChatModelGPT5_6Sol, crux.WithToolsRegistry([]string{"count"}, reg))
+
+	store := &failingStore{MemoryStore: crux.NewMemoryStore(), failToolResults: true}
+	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithStore(store)))
+
+	_, err := session.Run(t.Context(), "go")
+	require.ErrorContains(t, err, "database unavailable")
+	for _, entry := range session.Logs() {
+		require.NotEqual(t, crux.KindToolResult, entry.Kind, "the unsaved result must not be in the session")
+	}
+
+	store.failToolResults = false
+	out, err := session.Resume(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "done", out)
+	require.Equal(t, 2, calls, "the tool runs again because its first result was never stored")
+
+	stored, err := store.Get(t.Context(), session.ID())
+	require.NoError(t, err)
+	require.Equal(t, session.Logs(), stored)
 }

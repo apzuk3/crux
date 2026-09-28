@@ -269,6 +269,8 @@ func allowsNull(prop map[string]any) bool {
 }
 
 // compileValidator compiles a JSON Schema validator using Draft 2020-12.
+// Optional properties also accept null, because that is how strict providers
+// are told to leave them out (see adaptOpenAI).
 func compileValidator(schema *jsonschema.Schema) (*sjs.Schema, error) {
 	if schema == nil {
 		return nil, nil
@@ -276,6 +278,33 @@ func compileValidator(schema *jsonschema.Schema) (*sjs.Schema, error) {
 
 	raw, err := json.Marshal(schema)
 	if err != nil {
+		return nil, fmt.Errorf("marshal schema for compilation: %w", err)
+	}
+	var m map[string]any
+	if err := decodeJSONNumber(strings.NewReader(string(raw)), &m); err != nil {
+		return nil, fmt.Errorf("decode schema for compilation: %w", err)
+	}
+	_ = walkSchemas(m, func(m map[string]any) error {
+		props, ok := m["properties"].(map[string]any)
+		if !ok {
+			return nil
+		}
+		required := make(map[string]bool)
+		if list, ok := m["required"].([]any); ok {
+			for _, item := range list {
+				if name, ok := item.(string); ok {
+					required[name] = true
+				}
+			}
+		}
+		for name, value := range props {
+			if prop, ok := value.(map[string]any); ok && !required[name] && !allowsNull(prop) {
+				props[name] = map[string]any{"anyOf": []any{prop, map[string]any{"type": "null"}}}
+			}
+		}
+		return nil
+	})
+	if raw, err = json.Marshal(m); err != nil {
 		return nil, fmt.Errorf("marshal schema for compilation: %w", err)
 	}
 

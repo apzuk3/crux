@@ -31,6 +31,7 @@ func init() {
 		{Name: ClaudeSonnet5}, {Name: ClaudeFable5},
 		{Name: ClaudeMythos5}, {Name: ClaudeOpus5},
 		{Name: ClaudeOpus4_8}, {Name: ClaudeOpus4_7},
+		{Name: ClaudeOpus4_6},
 		{Name: ClaudeSonnet4_6}, {Name: ClaudeHaiku4_5},
 		{Name: ClaudeHaiku4_5_20251001}, {Name: ClaudeOpus4_5},
 		{Name: ClaudeOpus4_5_20251101}, {Name: ClaudeSonnet4_5},
