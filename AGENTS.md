@@ -22,6 +22,7 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
   - duplicate-name registration should panic (today it silently overwrites);
   - `RegisterTool` could return a reference value that agents can pass instead of a string;
   - a simpler custom-registry option, `WithRegistry(reg)`.
+- **Toolsets** group tools. A `Toolset` registers its tools in `Register(registry)` and labels each one with the `WithToolset(name)` tool option; `AddToolset`/`AddToolsetWithRegistry` call `Register`. Agents select a whole set with `WithToolsets`/`WithToolsetsRegistry`, which add to the tool list (unlike `WithTools`, which replaces it).
 - **Agent** (`agent.go`): an immutable, stateless blueprint (model, instructions, tool names, limits), safe for concurrent use. Its ID is derived from `CanonicalData()` unless `WithAgentID` is given.
 - **Session** (`agent.go`): one conversation, stored as an append-only log of `Entry` values (`types.go`). Not safe for concurrent use. `Run`/`RunInto`/`Stream` drive the loop:
   1. run any pending tool calls;
@@ -75,7 +76,7 @@ go test -tags evals ./evals/...    # live provider evals; needs API keys, don't 
 - Test agent behaviour end to end with `cruxtest` (a mock HTTP transport that speaks each provider's wire format): `mock.Expect().ReturnText/ReturnToolCall/ReturnRefusal/WithUsage`, `mock.AgentOptions()`, `mock.Requests()`. Tests that need `cruxtest` go in `cruxtest/*_test.go` (package `cruxtest_test`), because the root package can't import it.
 - Tests that need unexported fields go in the root package (see `approval_test.go`, `store_test.go`). You can drive tools without a provider by seeding tool calls with `WithSessionLogs` and calling `executeUnexecutedToolCalls`.
 - Live evals in `evals/` carry `//go:build evals`. Keep `evals/doc.go` untagged so `go test ./...` still finds the package.
-- CI (`.github/workflows/ci.yml`) runs gofmt, vet, `go test -race`, and a `CGO_ENABLED=0` test on Go 1.25 and stable. It also fails if the `crux` package depends on a SQLite driver.
+- CI (`.github/workflows/ci.yml`) runs gofmt, vet, `go test -race`, and a `CGO_ENABLED=0` test on Go 1.25 and stable, on Linux, macOS and Windows (no `-race` on Windows). It also fails if the `crux` package depends on a SQLite driver.
 
 ## Layout
 
@@ -83,7 +84,8 @@ go test -tags evals ./evals/...    # live provider evals; needs API keys, don't 
 |---|---|
 | `agent.go` | `Agent`, `Session`, `New`, `NewSession`, the run loop, tool dispatch, approvals |
 | `agent_option.go` | agent and session options, `WithSubAgent` |
-| `tools.go` | tool registry and `RegisterTool*`; tool input schemas come from Go types (`json` + `description` tags) |
+| `tools.go` | tool registry, `RegisterTool*`, `Toolset`/`AddToolset*`; tool input schemas come from Go types (`json` + `description` tags) |
+| `filesystem.go` | `Filesystem(root)` toolset (`"filesystem"`): file tools confined to a root with `os.Root`; tools that change files need approval |
 | `schema.go` | output schema validation and per-provider schema adaptation |
 | `state.go` | state deltas and `StateSnapshot`/`StateFromContext` |
 | `stream.go` | `Session.Stream` (text and reasoning chunks) |

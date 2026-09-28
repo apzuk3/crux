@@ -109,6 +109,32 @@ func WithToolsRegistry(tools []string, registry ToolsRegistry) AgentOption {
 	}
 }
 
+// WithToolsets adds every tool labelled with one of the toolset names (see
+// WithToolset) from the default registry. WithTools replaces the agent's tool
+// list, so put WithToolsets after it when using both.
+func WithToolsets(names ...string) AgentOption {
+	return WithToolsetsRegistry(defaultToolsRegistry, names...)
+}
+
+// WithToolsetsRegistry adds every tool labelled with one of the toolset names
+// from a custom registry.
+func WithToolsetsRegistry(registry ToolsRegistry, names ...string) AgentOption {
+	return func(a *Agent) error {
+		selected, err := registry.inToolsets(names)
+		if err != nil {
+			return err
+		}
+
+		for _, tool := range selected {
+			if !slices.ContainsFunc(a.tools, func(t Tool) bool { return t.name == tool.name }) {
+				a.tools = append(a.tools, tool)
+			}
+		}
+
+		return nil
+	}
+}
+
 func WithInstructions(instructions string) AgentOption {
 	return func(a *Agent) error { a.instructions = instructions; return nil }
 }

@@ -24,6 +24,7 @@ type Tool struct {
 	schema         map[string]any
 	invoke         func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error)
 	approvalNeeded bool
+	toolset        string
 }
 
 type ToolOption func(*Tool)
@@ -31,6 +32,14 @@ type ToolOption func(*Tool)
 func WithApprovalNeeded(approvalNeeded bool) ToolOption {
 	return func(tool *Tool) {
 		tool.approvalNeeded = approvalNeeded
+	}
+}
+
+// WithToolset labels the tool as part of the named toolset, so agents can
+// select every tool in it with WithToolsets.
+func WithToolset(name string) ToolOption {
+	return func(tool *Tool) {
+		tool.toolset = name
 	}
 }
 
@@ -93,6 +102,26 @@ func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, 
 	registry.tools[name] = tool
 }
 
+// Toolset registers a group of related tools into a registry, so they can be
+// added together with AddToolset instead of one by one.
+type Toolset interface {
+	Register(registry ToolsRegistry) error
+}
+
+// AddToolset registers the toolset's tools into the default registry.
+func AddToolset(toolset Toolset) error {
+	return AddToolsetWithRegistry(defaultToolsRegistry, toolset)
+}
+
+// AddToolsetWithRegistry registers the toolset's tools into the given registry.
+func AddToolsetWithRegistry(registry ToolsRegistry, toolset Toolset) error {
+	if err := toolset.Register(registry); err != nil {
+		return fmt.Errorf("register toolset %T: %w", toolset, err)
+	}
+
+	return nil
+}
+
 // selected returns registered tools in the order of the given names.
 // Repeated names are included only once. If any name is not registered,
 // selected returns an error wrapping ErrToolNotFound with the missing tool name.
@@ -112,6 +141,36 @@ func (r *ToolsRegistry) selected(names []string) ([]Tool, error) {
 			return nil, fmt.Errorf("%w: %q", ErrToolNotFound, name)
 		}
 		tools = append(tools, tool)
+	}
+
+	return tools, nil
+}
+
+// inToolsets returns the tools labelled with any of the given toolset names,
+// ordered by toolset and then tool name. If a toolset has no tools, it returns
+// an error wrapping ErrToolNotFound with the toolset name.
+func (r *ToolsRegistry) inToolsets(names []string) ([]Tool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var tools []Tool
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		var members []Tool
+		for _, tool := range r.tools {
+			if tool.toolset == name {
+				members = append(members, tool)
+			}
+		}
+		if len(members) == 0 {
+			return nil, fmt.Errorf("%w: toolset %q", ErrToolNotFound, name)
+		}
+		slices.SortFunc(members, func(a, b Tool) int { return strings.Compare(a.name, b.name) })
+		tools = append(tools, members...)
 	}
 
 	return tools, nil
