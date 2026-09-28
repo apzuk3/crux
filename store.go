@@ -12,6 +12,8 @@ import (
 type Store interface {
 	// Append writes newly produced entries for the session. The session also
 	// gives access to its ID and agent for recording session metadata.
+	// Append should be all-or-nothing: after an error, the same entries are
+	// passed again, ahead of new ones, on the session's next write.
 	Append(ctx context.Context, session *Session, entries ...Entry) error
 
 	// Get retrieves all log entries for the session in sequential order.

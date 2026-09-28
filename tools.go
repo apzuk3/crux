@@ -2,12 +2,14 @@ package crux
 
 import (
 	"context"
+	"encoding"
 	"encoding/json"
 	"fmt"
 	"reflect"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 type ToolKind string
@@ -79,6 +81,10 @@ func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, 
 			var input In
 			if len(args) > 0 {
 				if err := json.Unmarshal(args, &input); err != nil {
+					var malformed string
+					if json.Unmarshal(args, &malformed) == nil {
+						return "", nil, fmt.Errorf("arguments for %q are not valid JSON: %s", name, malformed)
+					}
 					return "", nil, fmt.Errorf("decode arguments for %q: %w", name, err)
 				}
 			}
@@ -197,13 +203,40 @@ func jsonSchemaOf[In any]() map[string]any {
 }
 
 // jsonSchema describes a tool's input type, so the Go signature stays the only
-// place a tool's parameters are declared. Field names come from the json tag
-// and a field is optional when it is a pointer or tagged omitempty; a
-// `description` tag is passed on to the model.
+// place a tool's parameters are declared. It follows encoding/json: field
+// names come from the json tag, embedded structs are flattened, and a field is
+// optional when it is a pointer or tagged omitempty. A `description` tag is
+// passed on to the model.
 func jsonSchema(t reflect.Type) map[string]any {
+	return schemaOf(t, make(map[reflect.Type]bool))
+}
+
+var (
+	timeType            = reflect.TypeFor[time.Time]()
+	jsonUnmarshalerType = reflect.TypeFor[json.Unmarshaler]()
+	textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
+)
+
+// schemaOf builds the schema for t. visiting holds the struct types being
+// expanded, so a recursive type is cut off instead of recursing forever.
+func schemaOf(t reflect.Type, visiting map[reflect.Type]bool) map[string]any {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+
 	switch t.Kind() {
-	case reflect.Pointer:
-		return jsonSchema(t.Elem())
+	case reflect.Struct, reflect.Slice, reflect.Array, reflect.Map:
+		switch {
+		case t == timeType:
+			return map[string]any{"type": "string", "format": "date-time"}
+		case reflect.PointerTo(t).Implements(jsonUnmarshalerType):
+			return map[string]any{} // decoded by its own UnmarshalJSON
+		case reflect.PointerTo(t).Implements(textUnmarshalerType):
+			return map[string]any{"type": "string"}
+		}
+	}
+
+	switch t.Kind() {
 	case reflect.Bool:
 		return map[string]any{"type": "boolean"}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
@@ -213,39 +246,59 @@ func jsonSchema(t reflect.Type) map[string]any {
 		return map[string]any{"type": "number"}
 	case reflect.String:
 		return map[string]any{"type": "string"}
-	case reflect.Slice, reflect.Array:
-		return map[string]any{"type": "array", "items": jsonSchema(t.Elem())}
+	case reflect.Slice:
+		if t.Elem().Kind() == reflect.Uint8 {
+			return map[string]any{"type": "string", "description": "Base64-encoded bytes"}
+		}
+		return map[string]any{"type": "array", "items": schemaOf(t.Elem(), visiting)}
+	case reflect.Array:
+		return map[string]any{"type": "array", "items": schemaOf(t.Elem(), visiting)}
 	case reflect.Map:
-		return map[string]any{"type": "object", "additionalProperties": jsonSchema(t.Elem())}
+		return map[string]any{"type": "object", "additionalProperties": schemaOf(t.Elem(), visiting)}
 	case reflect.Struct:
-		return structSchema(t)
+		if visiting[t] {
+			return map[string]any{"type": "object"}
+		}
+		visiting[t] = true
+		defer delete(visiting, t)
+		return structSchema(t, visiting)
 	default:
 		return map[string]any{}
 	}
 }
 
-func structSchema(t reflect.Type) map[string]any {
-	properties := make(map[string]any)
-	required := make([]string, 0, t.NumField())
+type schemaField struct {
+	name     string
+	depth    int
+	tagged   bool
+	required bool
+	schema   map[string]any
+}
 
-	for i := range t.NumField() {
-		field := t.Field(i)
-		if !field.IsExported() {
-			continue
+func structSchema(t reflect.Type, visiting map[reflect.Type]bool) map[string]any {
+	var fields []schemaField
+	collectFields(t, 0, true, visiting, &fields)
+
+	// As in encoding/json, the shallowest field wins a name; among equally
+	// shallow fields a single tagged one wins, and otherwise the name is dropped.
+	byName := make(map[string][]schemaField)
+	var order []string
+	for _, f := range fields {
+		if _, ok := byName[f.name]; !ok {
+			order = append(order, f.name)
 		}
+		byName[f.name] = append(byName[f.name], f)
+	}
 
-		name, optional, ok := fieldName(field)
+	properties := make(map[string]any)
+	required := make([]string, 0, len(order))
+	for _, name := range order {
+		field, ok := dominantField(byName[name])
 		if !ok {
 			continue
 		}
-
-		property := jsonSchema(field.Type)
-		if description := field.Tag.Get("description"); description != "" {
-			property["description"] = description
-		}
-		properties[name] = property
-
-		if !optional && field.Type.Kind() != reflect.Pointer {
+		properties[name] = field.schema
+		if field.required {
 			required = append(required, name)
 		}
 	}
@@ -257,15 +310,95 @@ func structSchema(t reflect.Type) map[string]any {
 	return schema
 }
 
-func fieldName(field reflect.StructField) (name string, optional bool, ok bool) {
-	tag := field.Tag.Get("json")
-	if tag == "-" {
-		return "", false, false
-	}
+func collectFields(t reflect.Type, depth int, required bool, visiting map[reflect.Type]bool, out *[]schemaField) {
+	for i := range t.NumField() {
+		field := t.Field(i)
+		tag := field.Tag.Get("json")
+		if tag == "-" {
+			continue
+		}
+		name, options, _ := strings.Cut(tag, ",")
 
-	name, options, _ := strings.Cut(tag, ",")
-	if name == "" {
-		name = field.Name
+		if field.Anonymous {
+			ft := field.Type
+			if ft.Kind() == reflect.Pointer {
+				ft = ft.Elem()
+			}
+			if name == "" && ft.Kind() == reflect.Struct {
+				if !visiting[ft] {
+					visiting[ft] = true
+					collectFields(ft, depth+1, required && field.Type.Kind() != reflect.Pointer, visiting, out)
+					delete(visiting, ft)
+				}
+				continue
+			}
+			if !field.IsExported() && ft.Kind() != reflect.Struct {
+				continue
+			}
+		} else if !field.IsExported() {
+			continue
+		}
+
+		tagged := name != ""
+		if !tagged {
+			name = field.Name
+		}
+		opts := strings.Split(options, ",")
+
+		property := schemaOf(field.Type, visiting)
+		if slices.Contains(opts, "string") && isStringEncodable(field.Type) {
+			property = map[string]any{"type": "string"}
+		}
+		if description := field.Tag.Get("description"); description != "" {
+			property["description"] = description
+		}
+
+		*out = append(*out, schemaField{
+			name:     name,
+			depth:    depth,
+			tagged:   tagged,
+			required: required && !slices.Contains(opts, "omitempty") && field.Type.Kind() != reflect.Pointer,
+			schema:   property,
+		})
 	}
-	return name, slices.Contains(strings.Split(options, ","), "omitempty"), true
+}
+
+func dominantField(fields []schemaField) (schemaField, bool) {
+	minDepth := fields[0].depth
+	for _, f := range fields {
+		minDepth = min(minDepth, f.depth)
+	}
+	var shallow []schemaField
+	for _, f := range fields {
+		if f.depth == minDepth {
+			shallow = append(shallow, f)
+		}
+	}
+	if len(shallow) == 1 {
+		return shallow[0], true
+	}
+	var tagged []schemaField
+	for _, f := range shallow {
+		if f.tagged {
+			tagged = append(tagged, f)
+		}
+	}
+	if len(tagged) == 1 {
+		return tagged[0], true
+	}
+	return schemaField{}, false
+}
+
+// isStringEncodable reports whether the json ",string" option applies to t.
+func isStringEncodable(t reflect.Type) bool {
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return true
+	}
+	return false
 }

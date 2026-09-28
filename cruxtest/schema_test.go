@@ -234,3 +234,31 @@ func TestLargeNumberPrecisionPreserved(t *testing.T) {
 	_, err = sess.Run(context.Background(), "get id again")
 	require.ErrorIs(t, err, crux.ErrOutputValidation)
 }
+
+type rawSchemaAnswer struct {
+	Status string `json:"status"`
+	Note   string `json:"note,omitempty"`
+}
+
+func TestRawOutputSchemaAcceptsNullForOptional(t *testing.T) {
+	// Strict providers are told optional fields are nullable, so a null must validate
+	// even when the schema was not built with WithOutputSchemaFrom.
+	schema := (&jsonschema.Reflector{ExpandedStruct: true}).Reflect(&rawSchemaAnswer{})
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnText(`{"status":"ok","note":null}`)
+	a, err := crux.New("raw-schema", "test-model",
+		crux.WithProvider(crux.ProviderOpenAI), crux.WithAPIKey("mock"),
+		crux.WithHTTPClient(mock.Client()),
+		crux.WithOutputSchema(schema))
+	require.NoError(t, err)
+
+	sess, err := crux.NewSession(t.Context(), a)
+	require.NoError(t, err)
+	var res rawSchemaAnswer
+	require.NoError(t, sess.RunInto(context.Background(), "status", &res))
+	require.Equal(t, "ok", res.Status)
+
+	mock.Expect().ReturnText(`{"status":null}`)
+	_, err = sess.Run(context.Background(), "status again")
+	require.ErrorIs(t, err, crux.ErrOutputValidation, "required fields must stay non-null")
+}

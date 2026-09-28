@@ -1,6 +1,7 @@
 package crux
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -115,6 +116,34 @@ type ToolCall struct {
 	ID   string          `json:"id"` // provider-issued call ID
 	Name string          `json:"name"`
 	Args json.RawMessage `json:"args,omitempty"`
+}
+
+// normalizeToolArgs keeps arguments that are not valid JSON as a JSON string,
+// so the entry can still be stored and the tool reports the problem to the model.
+func normalizeToolArgs(raw string) json.RawMessage {
+	if raw == "" || json.Valid([]byte(raw)) {
+		return json.RawMessage(raw)
+	}
+	quoted, _ := json.Marshal(raw)
+	return quoted
+}
+
+// rawArgs returns the arguments as the model sent them, undoing normalizeToolArgs.
+func (c *ToolCall) rawArgs() string {
+	var raw string
+	if len(c.Args) > 0 && c.Args[0] == '"' && json.Unmarshal(c.Args, &raw) == nil {
+		return raw
+	}
+	return string(c.Args)
+}
+
+// objectArgs returns the arguments as a JSON object, for providers that
+// reject anything else when history is replayed.
+func (c *ToolCall) objectArgs() json.RawMessage {
+	if trimmed := bytes.TrimSpace(c.Args); len(trimmed) > 0 && trimmed[0] == '{' {
+		return c.Args
+	}
+	return json.RawMessage(`{}`)
 }
 
 type ToolResult struct {

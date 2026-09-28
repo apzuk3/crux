@@ -293,7 +293,7 @@ func toGeminiParts(e Entry, calls map[string]*genai.FunctionCall) ([]*genai.Part
 		call := e.ToolCall
 		args := make(map[string]any)
 		if len(call.Args) > 0 {
-			if err := json.Unmarshal(call.Args, &args); err != nil {
+			if err := json.Unmarshal(call.objectArgs(), &args); err != nil {
 				return nil, fmt.Errorf("decode Gemini function arguments: %w", err)
 			}
 		}

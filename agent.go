@@ -46,6 +46,7 @@ type Session struct {
 	parentID   uuid.UUID // session whose tool call created this one; uuid.Nil at the top level
 	agent      *Agent
 	logs       []Entry
+	persisted  int // logs[:persisted] are in the store
 	httpClient *http.Client
 	store      Store
 }
@@ -105,6 +106,7 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 		return nil, fmt.Errorf("session %s already has history; WithSessionLogs cannot replace it", session.id)
 	case len(stored) > 0:
 		session.logs = stored
+		session.persisted = len(stored)
 	case len(session.logs) > 0:
 		now := time.Now().UTC()
 		for i := range session.logs {
@@ -118,6 +120,7 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 		if err := session.store.Append(ctx, session, session.logs...); err != nil {
 			return nil, fmt.Errorf("persist session logs: %w", err)
 		}
+		session.persisted = len(session.logs)
 	}
 
 	return session, nil
@@ -162,6 +165,9 @@ func (s *Session) Store() Store {
 	return s.store
 }
 
+// appendLogs records entries in the session and persists them. Entries a
+// failed write left out are written first, so the store always holds an
+// unbroken prefix of the log.
 func (s *Session) appendLogs(ctx context.Context, entries ...Entry) error {
 	now := time.Now().UTC()
 	for i := range entries {
@@ -174,9 +180,10 @@ func (s *Session) appendLogs(ctx context.Context, entries ...Entry) error {
 		s.logs = append(s.logs, entries[i])
 	}
 
-	if err := s.store.Append(ctx, s, entries...); err != nil {
+	if err := s.store.Append(ctx, s, s.logs[s.persisted:]...); err != nil {
 		return fmt.Errorf("persist session logs: %w", err)
 	}
+	s.persisted = len(s.logs)
 
 	return nil
 }

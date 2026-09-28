@@ -2,6 +2,7 @@ package crux
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -142,4 +143,36 @@ func TestSessionOutsideToolHasNoParent(t *testing.T) {
 	session, err := NewSession(context.Background(), Must(New("bot", ChatModelGPT4)))
 	require.NoError(t, err)
 	require.Equal(t, uuid.Nil, session.parentID)
+}
+
+type flakyStore struct {
+	*MemoryStore
+	fail bool
+}
+
+func (f *flakyStore) Append(ctx context.Context, session *Session, entries ...Entry) error {
+	if f.fail {
+		return errors.New("database unavailable")
+	}
+	return f.MemoryStore.Append(ctx, session, entries...)
+}
+
+func TestFailedAppendIsRetriedInOrder(t *testing.T) {
+	ctx := context.Background()
+	store := &flakyStore{MemoryStore: NewMemoryStore()}
+	session := MustSession(NewSession(ctx, Must(New("bot", ChatModelGPT4)), WithStore(store)))
+
+	user, _ := NewUserEntry("hi")
+	require.NoError(t, session.appendLogs(ctx, user))
+
+	store.fail = true
+	err := session.appendLogs(ctx, Entry{Kind: KindToolCall, ToolCall: &ToolCall{ID: "c1", Name: "lookup"}})
+	require.ErrorContains(t, err, "database unavailable")
+
+	store.fail = false
+	require.NoError(t, session.appendLogs(ctx, Entry{Kind: KindToolResult, ToolResult: &ToolResult{CallID: "c1"}}))
+
+	stored, err := store.Get(ctx, session.ID())
+	require.NoError(t, err)
+	require.Equal(t, session.Logs(), stored, "the store must hold the whole log, not skip the failed write")
 }
