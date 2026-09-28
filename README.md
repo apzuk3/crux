@@ -122,6 +122,29 @@ if err := crux.AddToolset(mathTools{}); err != nil {
 agent := crux.Must(crux.New("calc", crux.ChatModelGPT5_4, crux.WithTools([]string{"add", "multiply"})))
 ```
 
+### Filesystem tools
+
+`Filesystem(root)` is a built-in toolset for reading and editing files under `root`. Nothing outside `root` can be reached (not through `..`, absolute paths or symlinks), paths use `/` on every OS, and it works the same on Linux, macOS and Windows.
+
+```go
+if err := crux.AddToolset(crux.Filesystem("./workspace")); err != nil {
+	log.Fatal(err)
+}
+```
+
+| Tool | What it does | Approval |
+|---|---|---|
+| `read_file` | read a text file, optionally a line range | no |
+| `read_multiple_files` | read several files at once | no |
+| `list_directory` | list a directory | no |
+| `directory_tree` | recursive tree, optional `max_depth` | no |
+| `glob` | find files by pattern, e.g. `**/*.go` | no |
+| `search_files_content` | text or regex search across files | no |
+| `write_file` | create or overwrite a file | yes |
+| `edit_file` | replace exact, unique text in a file | yes |
+| `create_directory` | create directories | yes |
+| `remove_directory` | remove empty directories | yes |
+
 ### Tool approvals
 
 ```go
@@ -208,7 +231,7 @@ agent := crux.Must(crux.New("assistant", crux.ClaudeHaiku4_5,
 
 ## Examples
 
-See [`examples/`](examples): `basic` (multi-tool planner with structured output), `stream`, `store`, `fork`, `subagents`, `websearch`.
+See [`examples/`](examples): `basic` (multi-tool planner with structured output), `stream`, `store`, `fork`, `subagents`, `websearch`, `filesystem`.
 
 ## Development
 

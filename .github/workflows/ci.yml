@@ -10,12 +10,16 @@ permissions:
 
 jobs:
   test:
-    name: Test (Go ${{ matrix.go }})
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }}, Go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
         go: ["1.25", "stable"]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -23,6 +27,7 @@ jobs:
           go-version: ${{ matrix.go }}
 
       - name: gofmt
+        if: runner.os == 'Linux'
         run: |
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
@@ -35,7 +40,13 @@ jobs:
           go vet -tags evals ./evals/...
 
       - name: go test
+        if: runner.os != 'Windows'
         run: go test -race ./...
+
+      # -race needs cgo, which the Windows runners don't set up.
+      - name: go test (Windows)
+        if: runner.os == 'Windows'
+        run: go test ./...
 
       - name: Core works without cgo
         env:
