@@ -191,7 +191,7 @@ func TestProvidersIgnoreKindApproval(t *testing.T) {
 func TestForkRetainsKindApproval(t *testing.T) {
 	call := &ToolCall{ID: "call_1", Name: "op", Args: json.RawMessage(`{"k":"v"}`)}
 	agent := &Agent{
-		Provider: ProviderOpenAI,
+		provider: ProviderOpenAI,
 	}
 	session, err := NewSession(t.Context(), agent, WithSessionLogs([]Entry{
 		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}},

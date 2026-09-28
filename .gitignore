@@ -38,3 +38,6 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Example databases
+crux-example.db

@@ -1,3 +1,5 @@
+//go:build evals
+
 // Scenario: Human-in-the-Loop Tool Rejection & Policy Adaptation
 //
 // This live evaluation test verifies Crux's human-in-the-loop (HITL) approval lifecycle
@@ -164,8 +166,8 @@ func executeRejectionPrompt(t *testing.T, modelname string) {
 	}
 	require.NoError(t, err)
 
-	if !hasRejectionAPIKey(agent.Provider) {
-		t.Skipf("Skipping %s: API key for provider %s not set in environment", modelname, agent.Provider)
+	if !hasRejectionAPIKey(agent.Provider()) {
+		t.Skipf("Skipping %s: API key for provider %s not set in environment", modelname, agent.Provider())
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

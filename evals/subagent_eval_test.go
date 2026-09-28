@@ -1,3 +1,5 @@
+//go:build evals
+
 // Scenario: Hierarchical Agent Delegation & State Delta Propagation
 //
 // This live evaluation test verifies Crux's hierarchical subagent delegation abstraction

@@ -3,26 +3,30 @@ package crux
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/invopop/jsonschema"
 )
 
-type AgentConfig struct {
-}
-
+// AgentOption configures an Agent in New.
 type AgentOption func(*Agent) error
 
+// WithAgentID overrides the agent's ID, which otherwise derives from its configuration.
 func WithAgentID(id uuid.UUID) AgentOption {
 	return func(a *Agent) error { a.id = id; return nil }
 }
 
+// SessionOption configures a Session in NewSession.
 type SessionOption func(*Session) error
 
+// WithSessionID sets the session ID. If the store already holds a session with
+// this ID, NewSession loads its history and the conversation continues.
 func WithSessionID(id uuid.UUID) SessionOption {
 	return func(s *Session) error {
 		s.id = id
@@ -30,18 +34,23 @@ func WithSessionID(id uuid.UUID) SessionOption {
 	}
 }
 
+// WithSessionLogs seeds a new session with existing history.
 func WithSessionLogs(logs []Entry) SessionOption {
 	return func(s *Session) error { s.logs = cloneEntries(logs); return nil }
 }
 
-func WithSessionStore(store Store) SessionOption {
-	return func(s *Session) error { s.store = store; return nil }
-}
-
+// WithStore persists the session in store. The default is a MemoryStore.
 func WithStore(store Store) SessionOption {
-	return WithSessionStore(store)
+	return func(s *Session) error {
+		if store == nil {
+			return errors.New("store cannot be nil")
+		}
+		s.store = store
+		return nil
+	}
 }
 
+// WithSessionHTTPClient overrides the agent's HTTP client for this session.
 func WithSessionHTTPClient(client *http.Client) SessionOption {
 	return func(s *Session) error { s.httpClient = client; return nil }
 }
@@ -137,8 +146,10 @@ func WithWebSearch(opts ...SearchOption) AgentOption {
 	}
 }
 
+// WithProvider sets the provider explicitly. It is required when the model
+// is not one of the known models for a provider.
 func WithProvider(provider Provider) AgentOption {
-	return func(a *Agent) error { a.Provider = provider; return nil }
+	return func(a *Agent) error { a.provider = provider; return nil }
 }
 
 // WithModel changes the model. When forking across providers, also set
@@ -147,6 +158,7 @@ func WithModel(model string) AgentOption {
 	return func(a *Agent) error { a.model = model; return nil }
 }
 
+// WithMaxTurns limits how many model requests one Run may make. The default is 10.
 func WithMaxTurns(turns int32) AgentOption {
 	return func(a *Agent) error { a.maxTurns = turns; return nil }
 }
@@ -171,6 +183,30 @@ func WithOutputSchema(schema *jsonschema.Schema) AgentOption {
 	return func(a *Agent) error { a.outputSchema = schema; return nil }
 }
 
+// WithMaxTokens caps the tokens the model may generate per request. Zero uses
+// the provider default; Anthropic requires a cap and defaults to 16384.
+func WithMaxTokens(tokens int) AgentOption {
+	return func(a *Agent) error {
+		if tokens < 0 {
+			return fmt.Errorf("max tokens cannot be negative, got %d", tokens)
+		}
+		a.maxTokens = tokens
+		return nil
+	}
+}
+
+// WithTemperature sets the sampling temperature. Unset uses the provider
+// default. Some reasoning models reject a temperature.
+func WithTemperature(temperature float64) AgentOption {
+	return func(a *Agent) error {
+		if temperature < 0 {
+			return fmt.Errorf("temperature cannot be negative, got %v", temperature)
+		}
+		a.temperature = &temperature
+		return nil
+	}
+}
+
 // WithMaxRepairs sets the number of attempts the agent will make
 // to ask the model to repair its response if output validation fails.
 func WithMaxRepairs(repairs int) AgentOption {
@@ -178,6 +214,21 @@ func WithMaxRepairs(repairs int) AgentOption {
 		a.maxRepairs = repairs
 		return nil
 	}
+}
+
+type subAgentInput struct {
+	Task string `json:"task"`
+}
+
+var subAgentInputSchema = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"task": map[string]any{
+			"type":        "string",
+			"description": "Everything the subagent needs to do the work: the task and any input it applies to.",
+		},
+	},
+	"required": []string{"task"},
 }
 
 var outputReflector = &jsonschema.Reflector{
@@ -250,34 +301,32 @@ func WithOutputSchemaFrom[T any]() AgentOption {
 	}
 }
 
-// WithSubAgent exposes subAgent as a tool, using its output schema for tool
-// arguments as well. It panics if the schema cannot be represented as an object.
-// description - one liner description of that agent does.
+// WithSubAgent exposes subAgent as a tool named "agent_<name>". The parent
+// passes a task as text; each call runs in a fresh session of subAgent, and its
+// final output, shaped by subAgent's output schema if it has one, becomes the
+// tool result. description tells the parent model what the subagent does.
 func WithSubAgent(subAgent *Agent, description string) AgentOption {
 	return func(parent *Agent) error {
-		schema := map[string]any{"type": "object", "properties": map[string]any{}}
-		if subAgent.outputSchema != nil {
-			schema = nil
-			raw, err := json.Marshal(subAgent.outputSchema)
-			if err != nil {
-				return fmt.Errorf("encode schema for subagent %q: %w", subAgent.name, err)
-			}
-			if err := json.Unmarshal(raw, &schema); err != nil {
-				return fmt.Errorf("decode schema for subagent %q: %w", subAgent.name, err)
-			}
+		if subAgent == nil {
+			return errors.New("subagent cannot be nil")
 		}
 
 		tool := Tool{
 			name:        "agent_" + subAgent.name,
 			description: description,
-			schema:      schema,
+			schema:      subAgentInputSchema,
 			kind:        ToolKindSubagent,
 			invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
+				var input subAgentInput
+				if err := json.Unmarshal(args, &input); err != nil || strings.TrimSpace(input.Task) == "" {
+					return "", nil, fmt.Errorf("subagent %q needs a non-empty task", subAgent.name)
+				}
+
 				sess, err := NewSession(ctx, subAgent)
 				if err != nil {
 					return "", nil, err
 				}
-				output, err := sess.Run(ctx, string(args))
+				output, err := sess.Run(ctx, input.Task)
 				if err != nil {
 					return "", nil, err
 				}

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -27,10 +26,11 @@ func (AgentRecord) TableName() string { return "crux_agents" }
 
 // SessionRecord stores active conversation instances linked to an agent blueprint in GORM.
 type SessionRecord struct {
-	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
-	AgentID   uuid.UUID `gorm:"type:uuid;not null;index"`
-	CreatedAt time.Time `gorm:"not null"`
-	UpdatedAt time.Time `gorm:"not null;index"`
+	ID        uuid.UUID  `gorm:"type:uuid;primaryKey"`
+	AgentID   uuid.UUID  `gorm:"type:uuid;not null;index"`
+	ParentID  *uuid.UUID `gorm:"type:uuid;index"` // session whose tool call created this one, for tracing
+	CreatedAt time.Time  `gorm:"not null"`
+	UpdatedAt time.Time  `gorm:"not null;index"`
 }
 
 func (SessionRecord) TableName() string { return "crux_sessions" }
@@ -46,12 +46,18 @@ type LogRecord struct {
 
 func (LogRecord) TableName() string { return "crux_session_logs" }
 
-// GORMStore implements Store backed by a GORM database.
+// GORMStore persists sessions in any database GORM supports. Bring your own
+// driver, for example github.com/glebarez/sqlite (pure Go),
+// gorm.io/driver/sqlite (cgo) or gorm.io/driver/postgres:
+//
+//	db, _ := gorm.Open(sqlite.Open("db"), &gorm.Config{})
+//	store, _ := NewGORMStore(db)
+//	session, _ := NewSession(ctx, agent, WithStore(store))
 type GORMStore struct {
 	db *gorm.DB
 }
 
-// NewGORMStore initializes the GORM store and automatically runs migrations for
+// NewGORMStore initializes the store and automatically runs migrations for the
 // crux_agents, crux_sessions, and crux_session_logs tables.
 func NewGORMStore(db *gorm.DB) (*GORMStore, error) {
 	if db == nil {
@@ -65,23 +71,6 @@ func NewGORMStore(db *gorm.DB) (*GORMStore, error) {
 	return &GORMStore{db: db}, nil
 }
 
-// NewInMemoryStore initializes a GORMStore backed by an isolated in-memory SQLite database.
-// It automatically executes migrations for crux_agents, crux_sessions, and crux_session_logs.
-func NewInMemoryStore() (*GORMStore, error) {
-	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", uuid.New().String())
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	if err != nil {
-		return nil, fmt.Errorf("open in-memory sqlite: %w", err)
-	}
-
-	return NewGORMStore(db)
-}
-
-// NewMemoryStore is an alias for NewInMemoryStore.
-func NewMemoryStore() (*GORMStore, error) {
-	return NewInMemoryStore()
-}
-
 // DB returns the underlying *gorm.DB instance.
 func (s *GORMStore) DB() *gorm.DB {
 	return s.db
@@ -89,7 +78,11 @@ func (s *GORMStore) DB() *gorm.DB {
 
 // Append persists newly produced log entries for a session within a single transaction,
 // creating or updating the corresponding crux_agents and crux_sessions records.
-func (s *GORMStore) Append(ctx context.Context, sessionID uuid.UUID, agent *Agent, entries ...Entry) error {
+func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Entry) error {
+	if session == nil {
+		return errors.New("session cannot be nil")
+	}
+	sessionID, agent := session.id, session.agent
 	if agent == nil {
 		return errors.New("agent cannot be nil")
 	}
@@ -117,6 +110,10 @@ func (s *GORMStore) Append(ctx context.Context, sessionID uuid.UUID, agent *Agen
 			AgentID:   agent.ID(),
 			CreatedAt: now,
 			UpdatedAt: now,
+		}
+		if session.parentID != uuid.Nil {
+			parentID := session.parentID
+			sessRec.ParentID = &parentID
 		}
 		if err := tx.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "id"}},

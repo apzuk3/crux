@@ -1,3 +1,5 @@
+//go:build evals
+
 // Scenario: Complex Structured Output Validation & Strict Schema Enforcement
 //
 // This live evaluation test verifies Crux's typed structured output extraction and strict JSON schema

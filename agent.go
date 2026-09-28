@@ -24,7 +24,7 @@ type Agent struct {
 	name         string
 	model        string
 	instructions string
-	Provider     Provider
+	provider     Provider
 	apiKey       string
 	baseURL      string
 	httpClient   *http.Client
@@ -35,19 +35,36 @@ type Agent struct {
 	outputSchema  *jsonschema.Schema
 
 	// Execution Policies & Limits
-	maxTurns   int32
-	maxRepairs int
+	maxTurns    int32
+	maxRepairs  int
+	maxTokens   int      // 0 uses the provider default
+	temperature *float64 // nil uses the provider default
 }
 
 type Session struct {
 	id         uuid.UUID
+	parentID   uuid.UUID // session whose tool call created this one; uuid.Nil at the top level
 	agent      *Agent
 	logs       []Entry
 	httpClient *http.Client
 	store      Store
 }
 
+// sessionContextKey carries the session running a tool, so sessions created
+// inside that tool (such as subagents) are recorded as its children.
+type sessionContextKey struct{}
+
+// NewSession starts a conversation with agent. Sessions are kept in an
+// in-memory store unless WithStore supplies another one.
+//
+// When the store already holds a session with the ID given by WithSessionID,
+// its history is loaded so the conversation continues where it left off.
+// History seeded with WithSessionLogs is written to the store, and cannot be
+// combined with an ID that already has history.
 func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Session, error) {
+	if ctx == nil {
+		return nil, errors.New("context cannot be nil")
+	}
 	if agent == nil {
 		return nil, errors.New("agent cannot be nil")
 	}
@@ -65,49 +82,41 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 		}
 	}
 
-	if session.store == nil {
-		store, err := NewInMemoryStore()
-		if err != nil {
-			return nil, fmt.Errorf("create in-memory store: %w", err)
-		}
-		session.store = store
-	}
-
-	return session, nil
-}
-
-// ResumeSession recovers an existing session from the store by its ID.
-// If the session does not exist in the store, it returns ErrSessionNotFound.
-func ResumeSession(ctx context.Context, sessionID uuid.UUID, store Store, agent *Agent, opts ...SessionOption) (*Session, error) {
-	if ctx == nil {
-		return nil, errors.New("context cannot be nil")
-	}
-	if sessionID == uuid.Nil {
+	if session.id == uuid.Nil {
 		return nil, errors.New("session ID cannot be nil")
 	}
-	if store == nil {
-		return nil, errors.New("store cannot be nil")
+	if parent, ok := ctx.Value(sessionContextKey{}).(*Session); ok && parent.id != session.id {
+		session.parentID = parent.id
+		if session.store == nil {
+			session.store = parent.store
+		}
 	}
-	if agent == nil {
-		return nil, errors.New("agent cannot be nil")
-	}
-
-	entries, err := store.Get(ctx, sessionID)
-	if err != nil {
-		return nil, err
+	if session.store == nil {
+		session.store = NewMemoryStore()
 	}
 
-	session := &Session{
-		id:         sessionID,
-		agent:      agent,
-		logs:       entries,
-		store:      store,
-		httpClient: agent.httpClient,
+	stored, err := session.store.Get(ctx, session.id)
+	if err != nil && !errors.Is(err, ErrSessionNotFound) {
+		return nil, fmt.Errorf("load session %s: %w", session.id, err)
 	}
 
-	for _, opt := range opts {
-		if err := opt(session); err != nil {
-			return nil, err
+	switch {
+	case len(stored) > 0 && len(session.logs) > 0:
+		return nil, fmt.Errorf("session %s already has history; WithSessionLogs cannot replace it", session.id)
+	case len(stored) > 0:
+		session.logs = stored
+	case len(session.logs) > 0:
+		now := time.Now().UTC()
+		for i := range session.logs {
+			if session.logs[i].Seq == 0 {
+				session.logs[i].Seq = uint64(i + 1)
+			}
+			if session.logs[i].At.IsZero() {
+				session.logs[i].At = now
+			}
+		}
+		if err := session.store.Append(ctx, session, session.logs...); err != nil {
+			return nil, fmt.Errorf("persist session logs: %w", err)
 		}
 	}
 
@@ -134,6 +143,21 @@ func (s *Session) Logs() []Entry {
 	return cloneEntries(s.logs)
 }
 
+// Usage returns the tokens used by every model request in the session.
+func (s *Session) Usage() Usage {
+	var total Usage
+	for _, entry := range s.logs {
+		if entry.Usage == nil {
+			continue
+		}
+		total.InputTokens += entry.Usage.InputTokens
+		total.OutputTokens += entry.Usage.OutputTokens
+		total.CacheReadTokens += entry.Usage.CacheReadTokens
+		total.CacheWriteTokens += entry.Usage.CacheWriteTokens
+	}
+	return total
+}
+
 func (s *Session) Store() Store {
 	return s.store
 }
@@ -150,7 +174,7 @@ func (s *Session) appendLogs(ctx context.Context, entries ...Entry) error {
 		s.logs = append(s.logs, entries[i])
 	}
 
-	if err := s.store.Append(ctx, s.id, s.agent, entries...); err != nil {
+	if err := s.store.Append(ctx, s, entries...); err != nil {
 		return fmt.Errorf("persist session logs: %w", err)
 	}
 
@@ -163,8 +187,6 @@ type SearchOptions struct {
 }
 
 type SearchOption func(*SearchOptions)
-
-var NewAgent = New
 
 func New(name, model string, opts ...AgentOption) (*Agent, error) {
 	agent := &Agent{
@@ -179,20 +201,20 @@ func New(name, model string, opts ...AgentOption) (*Agent, error) {
 		}
 	}
 
-	if agent.Provider == "" {
-		agent.Provider = inferProvider(agent.model)
+	if agent.provider == "" {
+		agent.provider = inferProvider(agent.model)
 	}
 
-	if agent.Provider == "" {
+	if agent.provider == "" {
 		return nil, fmt.Errorf("cannot infer provider from model %q, please pass through crux.WithProvider", agent.model)
 	}
 
 	if agent.apiKey == "" {
-		agent.apiKey = discoverAPIKey(agent.Provider)
+		agent.apiKey = discoverAPIKey(agent.provider)
 	}
 
 	if agent.baseURL == "" {
-		switch agent.Provider {
+		switch agent.provider {
 		case ProviderOpenrouter:
 			agent.baseURL = "https://openrouter.ai/api/v1"
 		case ProviderXAI:
@@ -204,7 +226,7 @@ func New(name, model string, opts ...AgentOption) (*Agent, error) {
 		}
 	}
 
-	if agent.Provider == ProviderOllama && agent.apiKey == "" {
+	if agent.provider == ProviderOllama && agent.apiKey == "" {
 		agent.apiKey = "ollama" // Local Ollama ignores authentication.
 	}
 
@@ -238,11 +260,13 @@ func (a *Agent) CanonicalData() []byte {
 	raw, _ := json.Marshal(map[string]any{
 		"name":           a.name,
 		"model":          a.model,
-		"provider":       a.Provider,
+		"provider":       a.provider,
 		"instructions":   a.instructions,
 		"base_url":       a.baseURL,
 		"max_turns":      a.maxTurns,
 		"max_repairs":    a.maxRepairs,
+		"max_tokens":     a.maxTokens,
+		"temperature":    a.temperature,
 		"tools":          toolNames,
 		"search_options": a.searchOptions,
 		"output_schema":  a.outputSchema,
@@ -256,6 +280,11 @@ func (a *Agent) computeAgentID() uuid.UUID {
 
 func (a *Agent) ID() uuid.UUID {
 	return a.id
+}
+
+// Provider returns the provider the agent sends requests to.
+func (a *Agent) Provider() Provider {
+	return a.provider
 }
 
 func (a *Agent) Name() string {
@@ -391,9 +420,9 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 
 		if refusal, refused := latestRefusal(produced); refused {
 			if refusal != "" {
-				return "", fmt.Errorf("model refused the request: %s", refusal)
+				return "", fmt.Errorf("%w: %s", ErrRefused, refusal)
 			}
-			return "", errors.New("model refused the request")
+			return "", ErrRefused
 		}
 
 		// If the latest turn produced the final answer without requesting further tools:
@@ -420,7 +449,7 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 		}
 	}
 
-	return "", errors.New("max turns reached")
+	return "", fmt.Errorf("%w (%d)", ErrMaxTurns, s.agent.maxTurns)
 }
 
 func (s *Session) step(ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error) {
@@ -436,7 +465,7 @@ func (a *Agent) effectiveHTTPClient(sessionClient *http.Client) *http.Client {
 
 func (a *Agent) step(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
 	client := a.effectiveHTTPClient(httpClient)
-	switch a.Provider {
+	switch a.provider {
 	case ProviderAnthropic:
 		return a.anthropicStep(ctx, log, client, emit)
 	case ProviderOpenAI:
@@ -452,7 +481,7 @@ func (a *Agent) step(ctx context.Context, log []Entry, httpClient *http.Client, 
 	case ProviderOllama:
 		return a.ollamaStep(ctx, log, client, emit)
 	default:
-		return nil, fmt.Errorf("unsupported provider %q", a.Provider)
+		return nil, fmt.Errorf("unsupported provider %q", a.provider)
 	}
 }
 
@@ -739,7 +768,8 @@ func (s *Session) dispatch(ctx context.Context, call *ToolCall, snapshot map[str
 	tool := s.agent.tools[index]
 
 	start := time.Now()
-	output, delta, err := tool.invoke(ContextWithState(ctx, snapshot), call.Args)
+	toolCtx := context.WithValue(ContextWithState(ctx, snapshot), sessionContextKey{}, s)
+	output, delta, err := invokeTool(toolCtx, tool, call.Args)
 	duration := time.Since(start)
 	if err != nil {
 		result.Error = err.Error()
@@ -760,6 +790,18 @@ func (s *Session) dispatch(ctx context.Context, call *ToolCall, snapshot map[str
 	}
 
 	return resp, delta
+}
+
+// invokeTool runs a tool and turns a panic into an error, so one faulty tool
+// is reported to the model instead of crashing the program.
+func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (output string, delta *StateDelta, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			output, delta = "", nil
+			err = fmt.Errorf("tool %q panicked: %v", tool.name, r)
+		}
+	}()
+	return tool.invoke(ctx, args)
 }
 
 func finalText(entries []Entry) string {

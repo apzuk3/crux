@@ -28,12 +28,12 @@ func (a *Agent) newOpenAIClient(httpClient *http.Client) *openai.Client {
 	client := a.effectiveHTTPClient(httpClient)
 	if client != nil {
 		opts = append(opts, option.WithHTTPClient(client))
-	} else if a.Provider != ProviderOpenAI {
+	} else if a.provider != ProviderOpenAI {
 		// Construct the Responses service directly to avoid inheriting OpenAI
 		// credentials, organization, project, or custom headers from the environment.
 		opts = append(opts, option.WithHTTPClient(http.DefaultClient))
 	}
-	if a.Provider != ProviderOpenAI {
+	if a.provider != ProviderOpenAI {
 		return &openai.Client{Options: opts, Responses: responses.NewResponseService(opts...)}
 	}
 
@@ -55,7 +55,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 		Store: openai.Bool(false),
 	}
 
-	switch a.Provider {
+	switch a.provider {
 	case ProviderOpenAI, ProviderOpenrouter, ProviderXAI:
 		// Nothing is kept server side, so reasoning travels with the log.
 		params.Include = []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent}
@@ -63,9 +63,15 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 	if a.instructions != "" {
 		params.Instructions = openai.String(a.instructions)
 	}
+	if a.maxTokens > 0 {
+		params.MaxOutputTokens = openai.Int(int64(a.maxTokens))
+	}
+	if a.temperature != nil {
+		params.Temperature = openai.Float(*a.temperature)
+	}
 	if a.searchOptions != nil {
 		tool := responses.ToolParamOfWebSearch(responses.WebSearchToolTypeWebSearch)
-		if location := a.searchOptions.UserLocation; location != nil && a.Provider == ProviderOpenAI {
+		if location := a.searchOptions.UserLocation; location != nil && a.provider == ProviderOpenAI {
 			if location.Country != "" {
 				tool.OfWebSearch.UserLocation.Country = openai.String(location.Country)
 			}
@@ -85,7 +91,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 		params.Tools = append(params.Tools, tool)
 	}
 	if a.outputSchema != nil {
-		schema, err := wireSchemaFor(a.outputSchema, a.Provider)
+		schema, err := wireSchemaFor(a.outputSchema, a.provider)
 		if err != nil {
 			return nil, err
 		}
@@ -109,7 +115,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 		response, err = streamOpenAI(ctx, client, params, emit)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s responses: %w", a.Provider, err)
+		return nil, fmt.Errorf("%s responses: %w", a.provider, err)
 	}
 	// Scan all messages before converting items or executing any local tools.
 	for _, item := range response.Output {
@@ -117,18 +123,21 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 			for _, part := range message.Content {
 				if refusal, ok := part.AsAny().(responses.ResponseOutputRefusal); ok {
 					if refusal.Refusal != "" {
-						return nil, fmt.Errorf("%s refused the request: %s", a.Provider, refusal.Refusal)
+						return nil, fmt.Errorf("%s: %w: %s", a.provider, ErrRefused, refusal.Refusal)
 					}
-					return nil, fmt.Errorf("%s refused the request", a.Provider)
+					return nil, fmt.Errorf("%s: %w", a.provider, ErrRefused)
 				}
 			}
 		}
 	}
 	if response.Error.Code != "" || response.Status == responses.ResponseStatusFailed {
-		return nil, fmt.Errorf("%s response failed: %s: %s", a.Provider, response.Error.Code, response.Error.Message)
+		return nil, fmt.Errorf("%s response failed: %s: %s", a.provider, response.Error.Code, response.Error.Message)
 	}
 	if response.Status != responses.ResponseStatusCompleted {
-		return nil, fmt.Errorf("%s response did not complete: status %q, reason %q", a.Provider, response.Status, response.IncompleteDetails.Reason)
+		if response.IncompleteDetails.Reason == "max_output_tokens" {
+			return nil, fmt.Errorf("%s response hit the output token limit; raise it with crux.WithMaxTokens", a.provider)
+		}
+		return nil, fmt.Errorf("%s response did not complete: status %q, reason %q", a.provider, response.Status, response.IncompleteDetails.Reason)
 	}
 
 	now := time.Now().UTC()

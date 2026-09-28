@@ -12,10 +12,10 @@ import (
 	"github.com/apzuk3/crux"
 )
 
-// WithSubAgent uses the child's output schema for its tool arguments too.
-// Text contains the task on input and the completed work on output.
+// Message shapes each specialist's answer. The coordinator passes work to a
+// specialist as a plain-text task.
 type Message struct {
-	Text string `json:"text" jsonschema:"description=The task or text to process on input; the completed work on output"`
+	Text string `json:"text" jsonschema:"description=The completed work"`
 }
 
 func main() {
@@ -41,14 +41,13 @@ func run() error {
 	researcher := crux.Must(crux.New("researcher", crux.ChatModelGPT4_1Mini,
 		crux.WithAPIKey(key),
 		crux.WithToolsRegistry([]string{"get_product_facts"}, registry),
-		crux.WithInstructions(`Read the task in the input's text field.
-You must call get_product_facts to retrieve the fictional product facts.
+		crux.WithInstructions(`You must call get_product_facts to retrieve the fictional product facts.
 Return a concise factual brief in the output's text field, preserving all numbers and limitations.`),
 		crux.WithOutputSchemaFrom[Message](),
 	))
 	editor := crux.Must(crux.New("editor", crux.ChatModelGPT4_1Mini,
 		crux.WithAPIKey(key),
-		crux.WithInstructions(`Read the brief in the input's text field.
+		crux.WithInstructions(`The task contains a factual brief.
 Rewrite it as a friendly two-sentence product description in the output's text field.
 Preserve the price and splash-resistant-but-not-waterproof limitation. Do not invent facts.`),
 		crux.WithOutputSchemaFrom[Message](),
@@ -56,11 +55,11 @@ Preserve the price and splash-resistant-but-not-waterproof limitation. Do not in
 	mainAgent := crux.Must(crux.New("coordinator", crux.ChatModelGPT4_1Mini,
 		crux.WithAPIKey(key),
 		crux.WithInstructions(`You coordinate specialists. You must delegate rather than write the description yourself.
-First call researcher with a task in its text argument asking for a factual TrailLight brief.
-After receiving the researcher's result, call editor with that brief in its text argument.
+First call agent_researcher with a task asking for a factual TrailLight brief.
+After receiving the researcher's result, call agent_editor with a task containing that brief.
 Finally return the editor's product description to the user.`),
-		crux.WithSubAgent(researcher, "Research TrailLight product facts. Pass the research task in text."),
-		crux.WithSubAgent(editor, "Edit a factual brief into a product description. Pass the brief in text."),
+		crux.WithSubAgent(researcher, "Research TrailLight product facts and return a factual brief."),
+		crux.WithSubAgent(editor, "Edit a factual brief into a product description. Include the full brief in the task."),
 	))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

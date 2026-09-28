@@ -1,3 +1,5 @@
+//go:build evals
+
 // Scenario: Tool Error Communication & Self-Correction (Error Recovery)
 //
 // This live evaluation test verifies the Crux library's ability to reliably communicate

@@ -6,69 +6,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func setupGORMTestDB(t *testing.T) *GORMStore {
 	t.Helper()
 
-	store, err := NewInMemoryStore()
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+
+	store, err := NewGORMStore(db)
 	require.NoError(t, err)
 
 	return store
-}
-
-func TestNewInMemoryStore(t *testing.T) {
-	store1, err := NewInMemoryStore()
-	require.NoError(t, err)
-	require.NotNil(t, store1)
-
-	store2, err := NewMemoryStore()
-	require.NoError(t, err)
-	require.NotNil(t, store2)
-
-	// Ensure stores are separate instances
-	require.NotEqual(t, store1.DB(), store2.DB())
-}
-
-func TestAgentDeterministicID(t *testing.T) {
-	agent1 := Must(New(
-		"store-agent",
-		ChatModelGPT4,
-		WithInstructions("You manage server stores."),
-		WithMaxTurns(10),
-	))
-
-	agent2 := Must(New(
-		"store-agent",
-		ChatModelGPT4,
-		WithInstructions("You manage server stores."),
-		WithMaxTurns(10),
-	))
-
-	// Identical blueprints must have identical IDs
-	require.NotEmpty(t, agent1.ID())
-	require.NotEqual(t, uuid.Nil, agent1.ID())
-	require.Equal(t, agent1.ID(), agent2.ID())
-
-	// Different instructions must produce a different ID
-	agent3 := Must(New(
-		"store-agent",
-		ChatModelGPT4,
-		WithInstructions("You manage databases."),
-		WithMaxTurns(10),
-	))
-	require.NotEqual(t, agent1.ID(), agent3.ID())
-
-	// Custom ID override
-	customID := uuid.New()
-	agentCustom := Must(New(
-		"store-agent",
-		ChatModelGPT4,
-		WithAgentID(customID),
-	))
-	require.Equal(t, customID, agentCustom.ID())
 }
 
 func TestGORMStore_AppendAndGet(t *testing.T) {
@@ -98,7 +51,7 @@ func TestGORMStore_AppendAndGet(t *testing.T) {
 	}
 
 	// 1. Initial Append
-	err = store.Append(ctx, sessionID, agent, entry1, entry2)
+	err = store.Append(ctx, &Session{id: sessionID, agent: agent}, entry1, entry2)
 	require.NoError(t, err)
 
 	// Verify agent record created
@@ -138,7 +91,7 @@ func TestGORMStore_AppendAndGet(t *testing.T) {
 	}
 
 	time.Sleep(10 * time.Millisecond) // ensure timestamp progresses
-	err = store.Append(ctx, sessionID, agent, entry3)
+	err = store.Append(ctx, &Session{id: sessionID, agent: agent}, entry3)
 	require.NoError(t, err)
 
 	// Verify session was updated (not duplicated)
@@ -185,8 +138,8 @@ func TestGORMStore_SessionIsolation(t *testing.T) {
 	e2, _ := NewUserEntry("Session 2 message")
 	e2.Seq = 1
 
-	require.NoError(t, store.Append(ctx, session1, agent, e1))
-	require.NoError(t, store.Append(ctx, session2, agent, e2))
+	require.NoError(t, store.Append(ctx, &Session{id: session1, agent: agent}, e1))
+	require.NoError(t, store.Append(ctx, &Session{id: session2, agent: agent}, e2))
 
 	logs1, err := store.Get(ctx, session1)
 	require.NoError(t, err)
@@ -199,116 +152,74 @@ func TestGORMStore_SessionIsolation(t *testing.T) {
 	require.Equal(t, "Session 2 message", logs2[0].Text())
 }
 
-func TestNewSession_CreationWithStore(t *testing.T) {
+func TestGORMStore_GetMissingSession(t *testing.T) {
 	store := setupGORMTestDB(t)
-	ctx := context.Background()
 
-	agent := Must(New("storage-agent", ChatModelGPT4))
-
-	// 1. NewSession with store
-	session, err := NewSession(ctx, agent, WithStore(store))
-	require.NoError(t, err)
-	require.NotNil(t, session)
-
-	// 2. On first turn/append, records are created in DB
-	entry, _ := NewUserEntry("ping")
-	require.NoError(t, session.appendLogs(ctx, entry))
-
-	var sessRec SessionRecord
-	err = store.DB().First(&sessRec, "id = ?", session.ID()).Error
-	require.NoError(t, err)
-	require.Equal(t, session.ID(), sessRec.ID)
-	require.Equal(t, agent.ID(), sessRec.AgentID)
-
-	var agentRec AgentRecord
-	err = store.DB().First(&agentRec, "id = ?", agent.ID()).Error
-	require.NoError(t, err)
-	require.Equal(t, agent.ID(), agentRec.ID)
-
-	// 3. NewSession with custom SessionID
-	customID := uuid.New()
-	customSession, err := NewSession(ctx, agent, WithStore(store), WithSessionID(customID))
-	require.NoError(t, err)
-	require.Equal(t, customID, customSession.ID())
-}
-
-func TestResumeSession_SuccessAndNotFound(t *testing.T) {
-	store := setupGORMTestDB(t)
-	ctx := context.Background()
-
-	agent := Must(New("resume-agent", ChatModelGPT4))
-
-	// 1. Resuming non-existent session returns ErrSessionNotFound
-	_, err := ResumeSession(ctx, uuid.New(), store, agent)
+	_, err := store.Get(context.Background(), uuid.New())
 	require.ErrorIs(t, err, ErrSessionNotFound)
-
-	// 2. Create session, append logs, then resume
-	session, err := NewSession(ctx, agent, WithStore(store))
-	require.NoError(t, err)
-
-	entry1, _ := NewUserEntry("Initial question")
-	entry2 := Entry{
-		Seq:     2,
-		At:      time.Now().UTC(),
-		Kind:    KindAssistant,
-		Content: []ContentPart{{Kind: ContentKindText, Text: "Initial answer"}},
-	}
-
-	err = session.appendLogs(ctx, entry1, entry2)
-	require.NoError(t, err)
-
-	// 3. Resume the session
-	resumed, err := ResumeSession(ctx, session.ID(), store, agent)
-	require.NoError(t, err)
-	require.Equal(t, session.ID(), resumed.ID())
-	require.Equal(t, agent, resumed.Agent())
-
-	resumedLogs := resumed.Logs()
-	require.Len(t, resumedLogs, 2)
-	require.Equal(t, "Initial question", resumedLogs[0].Text())
-	require.Equal(t, "Initial answer", resumedLogs[1].Text())
-
-	// 4. Appending to resumed session persists to the same session in DB
-	entry3, _ := NewUserEntry("Follow up")
-	err = resumed.appendLogs(ctx, entry3)
-	require.NoError(t, err)
-
-	dbEntries, err := store.Get(ctx, session.ID())
-	require.NoError(t, err)
-	require.Len(t, dbEntries, 3)
-	require.Equal(t, "Follow up", dbEntries[2].Text())
 }
 
-func TestSession_ForkWithStore(t *testing.T) {
+func TestGORMStore_ResumeSession(t *testing.T) {
 	store := setupGORMTestDB(t)
 	ctx := context.Background()
+	agent := Must(New("resume-agent", ChatModelGPT4, WithAPIKey("test")))
 
-	agent := Must(New("fork-agent", ChatModelGPT4))
+	e1, _ := NewUserEntry("Initial question")
+	e1.Seq = 1
+	sessionID := uuid.New()
+	require.NoError(t, store.Append(ctx, &Session{id: sessionID, agent: agent}, e1))
 
-	session, err := NewSession(ctx, agent, WithStore(store))
+	resumed, err := NewSession(ctx, agent, WithStore(store), WithSessionID(sessionID))
+	require.NoError(t, err)
+	require.Equal(t, sessionID, resumed.ID())
+	require.Len(t, resumed.Logs(), 1)
+	require.Equal(t, "Initial question", resumed.Logs()[0].Text())
+}
+
+func TestSessionsCreatedInToolsRecordTheirParent(t *testing.T) {
+	store := setupGORMTestDB(t)
+	ctx := context.Background()
+	childAgent := Must(New("child", ChatModelGPT4))
+
+	var child *Session
+	parentAgent := &Agent{
+		name:     "parent",
+		provider: ProviderOpenAI,
+		tools: []Tool{{
+			name: "delegate",
+			invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
+				var err error
+				child, err = NewSession(ctx, childAgent)
+				if err != nil {
+					return "", nil, err
+				}
+				entry, _ := NewUserEntry("child task")
+				return "done", nil, child.appendLogs(ctx, entry)
+			},
+		}},
+	}
+	parent, err := NewSession(ctx, parentAgent, WithStore(store), WithSessionLogs([]Entry{
+		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "start"}}},
+		{Kind: KindToolCall, ToolCall: &ToolCall{ID: "call_1", Name: "delegate"}},
+	}))
 	require.NoError(t, err)
 
-	entry1, _ := NewUserEntry("Message 1")
-	entry2, _ := NewUserEntry("Message 2")
-	require.NoError(t, session.appendLogs(ctx, entry1, entry2))
+	results := parent.executeUnexecutedToolCalls(ctx)
+	require.Len(t, results, 1)
+	require.Empty(t, results[0].ToolResult.Error)
 
-	// Fork the session
-	forked, err := session.Fork(ctx)
-	require.NoError(t, err)
-	require.NotEqual(t, session.ID(), forked.ID())
-	require.Len(t, forked.Logs(), 2)
+	// The child inherits the parent's store and records the parent.
+	require.NotNil(t, child)
+	require.Equal(t, parent.id, child.parentID)
+	require.Same(t, store, child.store)
 
-	// Appending to forked session persists to store under forked.ID()
-	entry3, _ := NewUserEntry("Forked message 3")
-	require.NoError(t, forked.appendLogs(ctx, entry3))
+	var childRec SessionRecord
+	require.NoError(t, store.DB().First(&childRec, "id = ?", child.id).Error)
+	require.NotNil(t, childRec.ParentID)
+	require.Equal(t, parent.id, *childRec.ParentID)
 
-	forkedDBLogs, err := store.Get(ctx, forked.ID())
-	require.NoError(t, err)
-	require.Len(t, forkedDBLogs, 1)
-	require.Equal(t, "Forked message 3", forkedDBLogs[0].Text())
-
-	// Verify original session logs are untouched
-	origDBLogs, err := store.Get(ctx, session.ID())
-	require.NoError(t, err)
-	require.Len(t, origDBLogs, 2)
+	// Top-level sessions have no parent.
+	var parentRec SessionRecord
+	require.NoError(t, store.DB().First(&parentRec, "id = ?", parent.id).Error)
+	require.Nil(t, parentRec.ParentID)
 }

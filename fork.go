@@ -39,7 +39,7 @@ func (s *Session) ForkFrom(ctx context.Context, from int, opts ...AgentOption) (
 	}
 
 	forkedLogs := cloneEntries(s.logs[:from])
-	if clonedAgent.Provider != s.agent.Provider {
+	if clonedAgent.provider != s.agent.provider {
 		for i := range forkedLogs {
 			forkedLogs[i].Opaque = nil
 		}
@@ -61,11 +61,13 @@ func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {
 	allOpts = append(allOpts, func(fork *Agent) error {
 		fork.maxTurns = a.maxTurns
 		fork.instructions = a.instructions
-		fork.Provider = a.Provider
+		fork.provider = a.provider
 		fork.baseURL = a.baseURL
 		fork.httpClient = a.httpClient
 		fork.outputSchema = a.outputSchema
 		fork.maxRepairs = a.maxRepairs
+		fork.maxTokens = a.maxTokens
+		fork.temperature = a.temperature
 		fork.apiKey = a.apiKey
 		fork.tools = slices.Clone(a.tools)
 		fork.searchOptions = cloneSearchOptions(a.searchOptions)
@@ -75,13 +77,13 @@ func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {
 	allOpts = append(allOpts, opts...)
 
 	allOpts = append(allOpts, func(fork *Agent) error {
-		if fork.Provider == a.Provider && fork.model != a.model {
+		if fork.provider == a.provider && fork.model != a.model {
 			if inferred := inferProvider(fork.model); inferred != "" {
-				fork.Provider = inferred
+				fork.provider = inferred
 			}
 		}
 
-		if fork.Provider != a.Provider {
+		if fork.provider != a.provider {
 			if fork.apiKey == a.apiKey {
 				fork.apiKey = ""
 			}
@@ -167,10 +169,6 @@ func cloneEntries(entries []Entry) []Entry {
 			value.Set = cloneState(value.Set)
 			value.Delete = slices.Clone(value.Delete)
 			e.Delta = &value
-		}
-		if e.Compaction != nil {
-			value := *e.Compaction
-			e.Compaction = &value
 		}
 		if e.Approval != nil {
 			value := *e.Approval

@@ -2,42 +2,63 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 
 	"github.com/apzuk3/crux"
+	"github.com/glebarez/sqlite"
+	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
+// Run it twice to see the conversation survive a restart:
+//
+//	go run ./examples/store
+//	go run ./examples/store -session <id printed by the first run>
 func main() {
+	sessionFlag := flag.String("session", "", "ID of a session to continue")
+	flag.Parse()
 	ctx := context.Background()
 
-	// 1. Initialize an in-memory SQLite GORM store
-	store, err := crux.NewInMemoryStore()
+	// Any GORM driver works; this pure-Go one keeps sessions in a local SQLite file.
+	db, err := gorm.Open(sqlite.Open("crux-example.db"), &gorm.Config{})
 	if err != nil {
-		log.Fatalf("failed to create store: %v", err)
+		log.Fatalf("open database: %v", err)
+	}
+	store, err := crux.NewGORMStore(db)
+	if err != nil {
+		log.Fatalf("create store: %v", err)
 	}
 
-	// 2. Define the stateless Agent blueprint
 	agent := crux.Must(crux.New(
 		"store-agent",
-		crux.ChatModelGPT4,
-		crux.WithInstructions("You are a store assistant. You can inspect logs or wipe server disks."),
-		crux.WithMaxTurns(15),
+		crux.ChatModelGPT5_4,
+		crux.WithInstructions("You are a concise assistant. Remember what the user tells you."),
 	))
 
-	// 3. Start a new session wired to the store
-	session, err := crux.NewSession(ctx, agent, crux.WithStore(store))
-	if err != nil {
-		log.Fatalf("failed to create session: %v", err)
+	opts := []crux.SessionOption{crux.WithStore(store)}
+	prompt := "My favourite colour is teal. Please remember it."
+	if *sessionFlag != "" {
+		id, err := uuid.Parse(*sessionFlag)
+		if err != nil {
+			log.Fatalf("invalid session ID: %v", err)
+		}
+		// An ID the store already knows continues that conversation.
+		opts = append(opts, crux.WithSessionID(id))
+		prompt = "What is my favourite colour?"
 	}
 
-	fmt.Printf("Created new session with ID: %s (Agent ID: %s)\n", session.ID(), agent.ID())
-
-	// 4. Resume the session by its ID using the same store
-	resumed, err := crux.ResumeSession(ctx, session.ID(), store, agent)
+	session, err := crux.NewSession(ctx, agent, opts...)
 	if err != nil {
-		log.Fatalf("failed to resume session: %v", err)
+		log.Fatalf("create session: %v", err)
 	}
 
-	fmt.Printf("Successfully resumed session with ID: %s (Logs count: %d)\n", resumed.ID(), len(resumed.Logs()))
+	answer, err := session.Run(ctx, prompt)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println(answer)
+	fmt.Printf("\nsession %s (%d entries)\n", session.ID(), len(session.Logs()))
 }
