@@ -53,6 +53,8 @@ func WithToolset(name string) ToolOption {
 	}
 }
 
+// ToolsRegistry holds registered tools. Create one with NewToolsRegistry; the
+// zero value is not usable.
 type ToolsRegistry struct {
 	mu    *sync.Mutex
 	tools map[string]Tool
@@ -125,6 +127,7 @@ func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, 
 		opt(&tool)
 	}
 
+	registry.mustBeInitialized()
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 
@@ -132,6 +135,12 @@ func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, 
 		panic(toolRegistrationError{fmt.Errorf("tool %q is already registered", name)})
 	}
 	registry.tools[name] = tool
+}
+
+func (r *ToolsRegistry) mustBeInitialized() {
+	if r.mu == nil {
+		panic("crux: ToolsRegistry must be created with NewToolsRegistry")
+	}
 }
 
 // toolRegistrationError is the panic value for an invalid registration, so
@@ -184,6 +193,7 @@ func AddToolsetWithRegistry(registry ToolsRegistry, toolset Toolset) (err error)
 // Repeated names are included only once. If any name is not registered,
 // selected returns an error wrapping ErrToolNotFound with the missing tool name.
 func (r *ToolsRegistry) selected(names []string) ([]Tool, error) {
+	r.mustBeInitialized()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -208,6 +218,7 @@ func (r *ToolsRegistry) selected(names []string) ([]Tool, error) {
 // ordered by toolset and then tool name. If a toolset has no tools, it returns
 // an error wrapping ErrToolNotFound with the toolset name.
 func (r *ToolsRegistry) inToolsets(names []string) ([]Tool, error) {
+	r.mustBeInitialized()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

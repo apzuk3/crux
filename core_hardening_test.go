@@ -172,3 +172,10 @@ func TestToolCallsFromOneTurnRunConcurrently(t *testing.T) {
 	}
 	require.Equal(t, int32(3), peak.Load())
 }
+
+func TestZeroToolsRegistryPanicsWithAClearMessage(t *testing.T) {
+	var reg ToolsRegistry
+	require.PanicsWithValue(t, "crux: ToolsRegistry must be created with NewToolsRegistry", func() {
+		RegisterToolWithRegistry(reg, "x", "x", func(ctx context.Context, in struct{}) (string, *StateDelta, error) { return "", nil, nil })
+	})
+}
