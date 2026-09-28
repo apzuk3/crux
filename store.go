@@ -12,8 +12,10 @@ import (
 type Store interface {
 	// Append writes newly produced entries for the session. The session also
 	// gives access to its ID and agent for recording session metadata.
-	// Append should be all-or-nothing: after an error, the same entries are
-	// passed again, ahead of new ones, on the session's next write.
+	// Append must be all-or-nothing. Entries join the session only after
+	// Append succeeds, so after an error the session is unchanged and the
+	// entries are produced again: tool calls whose results were not stored
+	// run again on the next Run or Resume.
 	Append(ctx context.Context, session *Session, entries ...Entry) error
 
 	// Get retrieves all log entries for the session in sequential order.

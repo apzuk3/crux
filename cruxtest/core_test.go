@@ -3,6 +3,7 @@ package cruxtest_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/apzuk3/crux"
@@ -308,4 +309,51 @@ func TestAnthropicLargeMaxTokensRuns(t *testing.T) {
 	require.NoError(t, mock.Requests()[0].UnmarshalBody(&body))
 	require.EqualValues(t, 64000, body["max_tokens"])
 	require.Equal(t, true, body["stream"])
+}
+
+type failingStore struct {
+	*crux.MemoryStore
+	failToolResults bool
+}
+
+func (f *failingStore) Append(ctx context.Context, session *crux.Session, entries ...crux.Entry) error {
+	for _, entry := range entries {
+		if f.failToolResults && entry.Kind == crux.KindToolResult {
+			return errors.New("database unavailable")
+		}
+	}
+	return f.MemoryStore.Append(ctx, session, entries...)
+}
+
+func TestUnsavedToolResultRunsAgainOnResume(t *testing.T) {
+	reg := crux.NewToolsRegistry()
+	calls := 0
+	crux.RegisterToolWithRegistry(reg, "count", "Counts calls", func(ctx context.Context, in struct{}) (int, *crux.StateDelta, error) {
+		calls++
+		return calls, nil, nil
+	})
+
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnToolCall("count", map[string]any{})
+	mock.Expect().ReturnText("done")
+	agent := newMockAgent(t, mock, crux.ChatModelGPT5_6Sol, crux.WithToolsRegistry([]string{"count"}, reg))
+
+	store := &failingStore{MemoryStore: crux.NewMemoryStore(), failToolResults: true}
+	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithStore(store)))
+
+	_, err := session.Run(t.Context(), "go")
+	require.ErrorContains(t, err, "database unavailable")
+	for _, entry := range session.Logs() {
+		require.NotEqual(t, crux.KindToolResult, entry.Kind, "the unsaved result must not be in the session")
+	}
+
+	store.failToolResults = false
+	out, err := session.Resume(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "done", out)
+	require.Equal(t, 2, calls, "the tool runs again because its first result was never stored")
+
+	stored, err := store.Get(t.Context(), session.ID())
+	require.NoError(t, err)
+	require.Equal(t, session.Logs(), stored)
 }

@@ -157,7 +157,7 @@ func (f *flakyStore) Append(ctx context.Context, session *Session, entries ...En
 	return f.MemoryStore.Append(ctx, session, entries...)
 }
 
-func TestFailedAppendIsRetriedInOrder(t *testing.T) {
+func TestFailedAppendLeavesSessionUnchanged(t *testing.T) {
 	ctx := context.Background()
 	store := &flakyStore{MemoryStore: NewMemoryStore()}
 	session := MustSession(NewSession(ctx, Must(New("bot", ChatModelGPT4)), WithStore(store)))
@@ -168,11 +168,16 @@ func TestFailedAppendIsRetriedInOrder(t *testing.T) {
 	store.fail = true
 	err := session.appendLogs(ctx, Entry{Kind: KindToolCall, ToolCall: &ToolCall{ID: "c1", Name: "lookup"}})
 	require.ErrorContains(t, err, "database unavailable")
+	require.Len(t, session.Logs(), 1, "an entry the store rejected must not join the session")
 
 	store.fail = false
-	require.NoError(t, session.appendLogs(ctx, Entry{Kind: KindToolResult, ToolResult: &ToolResult{CallID: "c1"}}))
+	require.NoError(t, session.appendLogs(ctx,
+		Entry{Kind: KindToolCall, ToolCall: &ToolCall{ID: "c1", Name: "lookup"}},
+		Entry{Kind: KindToolResult, ToolResult: &ToolResult{CallID: "c1"}},
+	))
 
 	stored, err := store.Get(ctx, session.ID())
 	require.NoError(t, err)
-	require.Equal(t, session.Logs(), stored, "the store must hold the whole log, not skip the failed write")
+	require.Equal(t, session.Logs(), stored)
+	require.Equal(t, []uint64{1, 2, 3}, []uint64{stored[0].Seq, stored[1].Seq, stored[2].Seq})
 }

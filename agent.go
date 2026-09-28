@@ -45,8 +45,7 @@ type Session struct {
 	id         uuid.UUID
 	parentID   uuid.UUID // session whose tool call created this one; uuid.Nil at the top level
 	agent      *Agent
-	logs       []Entry
-	persisted  int // logs[:persisted] are in the store
+	logs       []Entry // cache of the entries the store has accepted
 	httpClient *http.Client
 	store      Store
 }
@@ -106,7 +105,6 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 		return nil, fmt.Errorf("session %s already has history; WithSessionLogs cannot replace it", session.id)
 	case len(stored) > 0:
 		session.logs = stored
-		session.persisted = len(stored)
 	case len(session.logs) > 0:
 		now := time.Now().UTC()
 		for i := range session.logs {
@@ -120,7 +118,6 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 		if err := session.store.Append(ctx, session, session.logs...); err != nil {
 			return nil, fmt.Errorf("persist session logs: %w", err)
 		}
-		session.persisted = len(session.logs)
 	}
 
 	return session, nil
@@ -165,25 +162,24 @@ func (s *Session) Store() Store {
 	return s.store
 }
 
-// appendLogs records entries in the session and persists them. Entries a
-// failed write left out are written first, so the store always holds an
-// unbroken prefix of the log.
+// appendLogs persists entries and, once the store accepts them, adds them to
+// the session. The store is the source of truth: after a failed write the
+// session is unchanged, so the entries are produced again on the next run.
 func (s *Session) appendLogs(ctx context.Context, entries ...Entry) error {
 	now := time.Now().UTC()
 	for i := range entries {
 		if entries[i].Seq == 0 {
-			entries[i].Seq = uint64(len(s.logs) + 1)
+			entries[i].Seq = uint64(len(s.logs) + i + 1)
 		}
 		if entries[i].At.IsZero() {
 			entries[i].At = now
 		}
-		s.logs = append(s.logs, entries[i])
 	}
 
-	if err := s.store.Append(ctx, s, s.logs[s.persisted:]...); err != nil {
+	if err := s.store.Append(ctx, s, entries...); err != nil {
 		return fmt.Errorf("persist session logs: %w", err)
 	}
-	s.persisted = len(s.logs)
+	s.logs = append(s.logs, entries...)
 
 	return nil
 }
