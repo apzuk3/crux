@@ -10,7 +10,9 @@ import (
 // JSON Schema via text.format is verified in local Ollama v0.34.0;
 // Ollama Cloud does not currently support structured outputs.
 func (a *Agent) ollamaStep(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
-	if a.searchOptions != nil && a.apiKey == "" {
+	// New sets the placeholder key "ollama" for local servers, which Ollama's
+	// hosted web search does not accept.
+	if a.searchOptions != nil && (a.apiKey == "" || a.apiKey == "ollama") {
 		return nil, errors.New("Ollama API key is required for Ollama web search")
 	}
 

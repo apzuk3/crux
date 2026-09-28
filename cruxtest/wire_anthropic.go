@@ -24,10 +24,12 @@ func buildAnthropicResponse(turn *Turn, callIndex int) ([]byte, error) {
 		return turn.RawBody, nil
 	}
 
-	var content []any
+	content := []any{}
 	stopReason := "end_turn"
 
-	if turn.Refusal != "" {
+	if turn.empty {
+		// No content blocks.
+	} else if turn.Refusal != "" {
 		stopReason = "refusal"
 		content = append(content, map[string]any{
 			"type": "text",
@@ -75,6 +77,8 @@ func buildAnthropicResponse(turn *Turn, callIndex int) ([]byte, error) {
 		outputTokens = turn.Usage.OutputTokens
 		cacheRead = turn.Usage.CacheReadTokens
 		cacheWrite = turn.Usage.CacheWriteTokens
+		// Anthropic reports uncached input apart from cache reads and writes.
+		inputTokens = max(0, inputTokens-cacheRead-cacheWrite)
 	}
 
 	resp := map[string]any{

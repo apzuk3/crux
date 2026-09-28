@@ -24,7 +24,7 @@ func buildOpenAIResponse(turn *Turn, callIndex int) ([]byte, error) {
 		return turn.RawBody, nil
 	}
 
-	var output []any
+	output := []any{}
 
 	// 1. Tool calls
 	for i, tc := range turn.ToolCalls {
@@ -60,7 +60,7 @@ func buildOpenAIResponse(turn *Turn, callIndex int) ([]byte, error) {
 				},
 			},
 		})
-	} else if turn.Text != "" || len(turn.ToolCalls) == 0 {
+	} else if !turn.empty && (turn.Text != "" || len(turn.ToolCalls) == 0) {
 		// 3. Text output
 		output = append(output, map[string]any{
 			"id":     fmt.Sprintf("msg_%d", callIndex),

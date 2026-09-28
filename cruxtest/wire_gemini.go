@@ -24,10 +24,12 @@ func buildGeminiResponse(turn *Turn, callIndex int) ([]byte, error) {
 		return turn.RawBody, nil
 	}
 
-	var parts []any
+	parts := []any{}
 	finishReason := "STOP"
 
-	if turn.Refusal != "" {
+	if turn.empty {
+		// No parts.
+	} else if turn.Refusal != "" {
 		finishReason = "SAFETY"
 		parts = append(parts, map[string]any{
 			"text": turn.Refusal,
@@ -63,9 +65,11 @@ func buildGeminiResponse(turn *Turn, callIndex int) ([]byte, error) {
 
 	promptTokens := 10
 	candidatesTokens := 5
+	cachedTokens := 0
 	if turn.Usage != nil {
 		promptTokens = turn.Usage.InputTokens
 		candidatesTokens = turn.Usage.OutputTokens
+		cachedTokens = turn.Usage.CacheReadTokens
 	}
 
 	resp := map[string]any{
@@ -79,8 +83,9 @@ func buildGeminiResponse(turn *Turn, callIndex int) ([]byte, error) {
 			},
 		},
 		"usageMetadata": map[string]any{
-			"promptTokenCount":     promptTokens,
-			"candidatesTokenCount": candidatesTokens,
+			"promptTokenCount":        promptTokens,
+			"candidatesTokenCount":    candidatesTokens,
+			"cachedContentTokenCount": cachedTokens,
 		},
 	}
 

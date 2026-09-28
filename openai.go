@@ -17,6 +17,9 @@ import (
 
 const openAIOutputItemOpaqueKey = "openai.response.output_item"
 
+// openAIUnknownOutputItemOpaqueKey holds output items that cannot be replayed.
+const openAIUnknownOutputItemOpaqueKey = "openai.response.unknown_output_item"
+
 func (a *Agent) newOpenAIClient(httpClient *http.Client) *openai.Client {
 	var opts []option.RequestOption
 	if a.apiKey != "" {
@@ -134,6 +137,9 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 		return nil, fmt.Errorf("%s response failed: %s: %s", a.provider, response.Error.Code, response.Error.Message)
 	}
 	if response.Status != responses.ResponseStatusCompleted {
+		if response.IncompleteDetails.Reason == "content_filter" {
+			return nil, fmt.Errorf("%s: %w: content_filter", a.provider, ErrRefused)
+		}
 		if response.IncompleteDetails.Reason == "max_output_tokens" {
 			return nil, fmt.Errorf("%s response hit the output token limit; raise it with crux.WithMaxTokens", a.provider)
 		}
@@ -153,22 +159,21 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 		produced = append(produced, entry)
 	}
 
+	if len(produced) == 0 {
+		// A completed response with no output is an empty final answer; its
+		// usage must not be lost.
+		produced = append(produced, Entry{At: now, Kind: KindAssistant})
+	}
+
 	// Usage is reported per response, so it hangs on the last thing the model
-	// produced rather than being spread over the entries.
-	if len(produced) > 0 {
-		var cacheRead, cacheWrite int
-		if response.Usage.InputTokensDetails.CachedTokens > 0 {
-			cacheRead = int(response.Usage.InputTokensDetails.CachedTokens)
-		}
-		if response.Usage.InputTokensDetails.CacheWriteTokens > 0 {
-			cacheWrite = int(response.Usage.InputTokensDetails.CacheWriteTokens)
-		}
-		produced[len(produced)-1].Usage = &Usage{
-			InputTokens:      int(response.Usage.InputTokens),
-			OutputTokens:     int(response.Usage.OutputTokens),
-			CacheReadTokens:  cacheRead,
-			CacheWriteTokens: cacheWrite,
-		}
+	// produced rather than being spread over the entries. InputTokens already
+	// includes cached tokens.
+	usage := response.Usage
+	produced[len(produced)-1].Usage = &Usage{
+		InputTokens:      int(usage.InputTokens),
+		OutputTokens:     int(usage.OutputTokens),
+		CacheReadTokens:  int(usage.InputTokensDetails.CachedTokens),
+		CacheWriteTokens: int(usage.InputTokensDetails.CacheWriteTokens),
 	}
 
 	return produced, nil
@@ -251,14 +256,14 @@ func fromOpenAIResponseOutputItemUnion(item responses.ResponseOutputItemUnion) (
 			Opaque:  opaque,
 		}, nil
 	case responses.ResponseReasoningItem:
-		var summary strings.Builder
+		summary := make([]string, 0, len(v.Summary))
 		for _, part := range v.Summary {
-			summary.WriteString(part.Text)
+			summary = append(summary, part.Text)
 		}
 		return Entry{
 			Kind: KindReasoning,
 			Reasoning: &Reasoning{
-				Summary: summary.String(),
+				Summary: strings.Join(summary, "\n\n"),
 			},
 			Opaque: opaque,
 		}, nil
@@ -275,9 +280,9 @@ func fromOpenAIResponseOutputItemUnion(item responses.ResponseOutputItemUnion) (
 			Opaque: opaque,
 		}, nil
 	default:
-		return Entry{}, fmt.Errorf("unsupported OpenAI output item type %T", v)
+		// Keep items this SDK does not know for inspection; they are not replayed.
+		return Entry{Kind: KindProviderTool, Opaque: map[string][]byte{openAIUnknownOutputItemOpaqueKey: []byte(item.RawJSON())}}, nil
 	}
-
 }
 
 // toOpenAIResponseInput renders a log as the input of the next request.
@@ -293,6 +298,9 @@ func toOpenAIResponseInput(log []Entry) (responses.ResponseInputParam, error) {
 		}
 		if e.Kind == KindReasoning && len(e.Opaque[openAIOutputItemOpaqueKey]) == 0 {
 			continue // Foreign reasoning cannot be replayed without provider data.
+		}
+		if e.Kind == KindAssistant && len(e.Content) == 0 && len(e.Opaque[openAIOutputItemOpaqueKey]) == 0 {
+			continue // An empty answer has nothing to replay.
 		}
 
 		item, err := toOpenAIResponseInputItemUnionParam(e)
@@ -410,6 +418,6 @@ func openAIInputItemFromOutputItem(raw []byte) (responses.ResponseInputItemUnion
 		p := v.ToParam()
 		return responses.ResponseInputItemUnionParam{OfWebSearchCall: &p}, nil
 	default:
-		return responses.ResponseInputItemUnionParam{}, fmt.Errorf("unsupported OpenAI output item type %T", v)
+		return responses.ResponseInputItemUnionParam{}, fmt.Errorf("unsupported OpenAI output item type %q", item.Type)
 	}
 }

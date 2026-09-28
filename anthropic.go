@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -13,6 +14,9 @@ import (
 )
 
 const anthropicContentBlockOpaqueKey = "anthropic.message.content_block"
+
+// anthropicUnknownContentBlockOpaqueKey holds blocks the SDK cannot replay.
+const anthropicUnknownContentBlockOpaqueKey = "anthropic.message.unknown_content_block"
 
 func (a *Agent) newAnthropicClient(httpClient *http.Client) *anthropic.Client {
 	var opts []option.RequestOption
@@ -132,8 +136,8 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 		default:
 			return nil, fmt.Errorf("anthropic response did not complete: stop reason %q", response.StopReason)
 		}
-		if len(response.Content) == 0 {
-			return nil, errors.New("anthropic returned no content")
+		if len(response.Content) == 0 && (response.StopReason == anthropic.StopReasonToolUse || response.StopReason == anthropic.StopReasonPauseTurn) {
+			return nil, fmt.Errorf("anthropic returned no content with stop reason %q", response.StopReason)
 		}
 		for _, block := range response.Content {
 			entry, err := fromAnthropicContentBlock(block)
@@ -145,19 +149,23 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 			}
 			produced = append(produced, entry)
 		}
-		totalInputTokens += int(response.Usage.InputTokens)
+		// Anthropic reports uncached input separately from cache reads and writes.
+		totalInputTokens += int(response.Usage.InputTokens + response.Usage.CacheReadInputTokens + response.Usage.CacheCreationInputTokens)
 		totalOutputTokens += int(response.Usage.OutputTokens)
 		totalCacheReadTokens += int(response.Usage.CacheReadInputTokens)
 		totalCacheWriteTokens += int(response.Usage.CacheCreationInputTokens)
 
 		if response.StopReason != anthropic.StopReasonPauseTurn {
-			if len(produced) > 0 {
-				produced[len(produced)-1].Usage = &Usage{
-					InputTokens:      totalInputTokens,
-					OutputTokens:     totalOutputTokens,
-					CacheReadTokens:  totalCacheReadTokens,
-					CacheWriteTokens: totalCacheWriteTokens,
-				}
+			if len(produced) == 0 {
+				// The model may end its turn without saying anything; that is
+				// still a final answer, and its usage must not be lost.
+				produced = append(produced, Entry{At: now, Kind: KindAssistant})
+			}
+			produced[len(produced)-1].Usage = &Usage{
+				InputTokens:      totalInputTokens,
+				OutputTokens:     totalOutputTokens,
+				CacheReadTokens:  totalCacheReadTokens,
+				CacheWriteTokens: totalCacheWriteTokens,
 			}
 			return produced, nil
 		}
@@ -253,14 +261,17 @@ func fromAnthropicContentBlock(block anthropic.ContentBlockUnion) (Entry, error)
 		return Entry{Kind: KindReasoning, Reasoning: &Reasoning{Summary: v.Thinking}, Opaque: opaque}, nil
 	case anthropic.RedactedThinkingBlock:
 		return Entry{Kind: KindReasoning, Reasoning: &Reasoning{}, Opaque: opaque}, nil
-	case anthropic.ServerToolUseBlock, anthropic.WebSearchToolResultBlock:
+	case anthropic.ServerToolUseBlock, anthropic.WebSearchToolResultBlock, anthropic.WebFetchToolResultBlock,
+		anthropic.CodeExecutionToolResultBlock, anthropic.BashCodeExecutionToolResultBlock,
+		anthropic.TextEditorCodeExecutionToolResultBlock, anthropic.ToolSearchToolResultBlock, anthropic.ContainerUploadBlock:
 		return Entry{Kind: KindProviderTool, Opaque: opaque}, nil
 	case anthropic.ToolUseBlock:
 		return Entry{Kind: KindToolCall, ToolCall: &ToolCall{
 			ID: v.ID, Name: v.Name, Args: v.Input,
 		}, Opaque: opaque}, nil
 	default:
-		return Entry{}, fmt.Errorf("unsupported Anthropic content block %q", block.Type)
+		// Keep blocks this SDK does not know for inspection; they are not replayed.
+		return Entry{Kind: KindProviderTool, Opaque: map[string][]byte{anthropicUnknownContentBlockOpaqueKey: []byte(block.RawJSON())}}, nil
 	}
 }
 
@@ -333,11 +344,18 @@ func toAnthropicContentBlockParamUnion(e Entry) ([]anthropic.ContentBlockParamUn
 			return nil, errors.New("tool result entry carries no tool result")
 		}
 		r := e.ToolResult
+		isError := r.Error != ""
 		output := r.Output
-		if r.Error != "" {
+		if isError {
 			output = r.Error
 		}
-		blocks = []anthropic.ContentBlockParamUnion{anthropic.NewToolResultBlock(r.CallID, output, r.Error != "")}
+		// Anthropic rejects empty text blocks, so an empty result carries no content.
+		if strings.TrimSpace(output) == "" {
+			block := anthropic.ToolResultBlockParam{ToolUseID: r.CallID, IsError: anthropic.Bool(isError)}
+			blocks = []anthropic.ContentBlockParamUnion{{OfToolResult: &block}}
+			break
+		}
+		blocks = []anthropic.ContentBlockParamUnion{anthropic.NewToolResultBlock(r.CallID, output, isError)}
 	default:
 		return nil, fmt.Errorf("unsupported entry kind %d for Anthropic content block", e.Kind)
 	}
