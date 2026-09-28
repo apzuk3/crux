@@ -42,6 +42,13 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		return nil, err
 	}
 	config := &genai.GenerateContentConfig{Tools: tools}
+	if a.maxTokens > 0 {
+		config.MaxOutputTokens = int32(a.maxTokens)
+	}
+	if a.temperature != nil {
+		temperature := float32(*a.temperature)
+		config.Temperature = &temperature
+	}
 	if a.searchOptions != nil {
 		config.Tools = append(config.Tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
 		if location := a.searchOptions.UserLocation; location != nil && location.Latitude != nil && location.Longitude != nil {
@@ -56,7 +63,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		config.SystemInstruction = &genai.Content{Parts: []*genai.Part{genai.NewPartFromText(a.instructions)}}
 	}
 	if a.outputSchema != nil {
-		schema, err := wireSchemaFor(a.outputSchema, a.Provider)
+		schema, err := wireSchemaFor(a.outputSchema, a.provider)
 		if err != nil {
 			return nil, err
 		}
@@ -81,6 +88,9 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		return nil, errors.New("gemini returned no candidates")
 	}
 	candidate := response.Candidates[0]
+	if candidate.FinishReason == genai.FinishReasonMaxTokens {
+		return nil, errors.New("gemini response hit the output token limit; raise it with crux.WithMaxTokens")
+	}
 	if candidate.FinishReason != genai.FinishReasonStop {
 		return nil, fmt.Errorf("gemini response did not complete: finish reason %q", candidate.FinishReason)
 	}

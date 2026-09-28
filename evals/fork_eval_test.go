@@ -1,3 +1,5 @@
+//go:build evals
+
 // Scenario: Cross-Provider Session Forking & State Portability
 //
 // This live evaluation test verifies Crux's core abstraction of provider-neutral session

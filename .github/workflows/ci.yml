@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.25", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: |
+          go vet ./...
+          go vet -tags evals ./evals/...
+
+      - name: go test
+        run: go test -race ./...
+
+      - name: Core works without cgo
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go test . ./cruxtest/...
+          if go list -deps . | grep -qE 'gorm|sqlite'; then
+            echo "the core package must not depend on gorm or sqlite"; exit 1
+          fi

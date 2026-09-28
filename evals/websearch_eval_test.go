@@ -1,3 +1,5 @@
+//go:build evals
+
 // Scenario: Native Web Search, Source Grounding & Multi-Turn History Replay
 //
 // This live evaluation test verifies Crux's provider-native web search capabilities across all

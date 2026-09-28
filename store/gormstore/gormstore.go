@@ -1,4 +1,12 @@
-package crux
+// Package gormstore persists crux sessions in any database supported by GORM.
+//
+// Bring your own driver, for example gorm.io/driver/sqlite (cgo),
+// github.com/glebarez/sqlite (pure Go) or gorm.io/driver/postgres:
+//
+//	db, _ := gorm.Open(sqlite.Open("crux.db"), &gorm.Config{})
+//	store, _ := gormstore.New(db)
+//	session, _ := crux.NewSession(ctx, agent, crux.WithStore(store))
+package gormstore
 
 import (
 	"context"
@@ -7,13 +15,13 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/apzuk3/crux"
 	"github.com/google/uuid"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-var _ Store = (*GORMStore)(nil)
+var _ crux.Store = (*Store)(nil)
 
 // AgentRecord stores the immutable blueprint definition for an agent in GORM.
 type AgentRecord struct {
@@ -46,14 +54,14 @@ type LogRecord struct {
 
 func (LogRecord) TableName() string { return "crux_session_logs" }
 
-// GORMStore implements Store backed by a GORM database.
-type GORMStore struct {
+// Store implements crux.Store backed by a GORM database.
+type Store struct {
 	db *gorm.DB
 }
 
-// NewGORMStore initializes the GORM store and automatically runs migrations for
+// New initializes the store and automatically runs migrations for the
 // crux_agents, crux_sessions, and crux_session_logs tables.
-func NewGORMStore(db *gorm.DB) (*GORMStore, error) {
+func New(db *gorm.DB) (*Store, error) {
 	if db == nil {
 		return nil, errors.New("db cannot be nil")
 	}
@@ -62,34 +70,17 @@ func NewGORMStore(db *gorm.DB) (*GORMStore, error) {
 		return nil, fmt.Errorf("crux gorm automigrate: %w", err)
 	}
 
-	return &GORMStore{db: db}, nil
-}
-
-// NewInMemoryStore initializes a GORMStore backed by an isolated in-memory SQLite database.
-// It automatically executes migrations for crux_agents, crux_sessions, and crux_session_logs.
-func NewInMemoryStore() (*GORMStore, error) {
-	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", uuid.New().String())
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	if err != nil {
-		return nil, fmt.Errorf("open in-memory sqlite: %w", err)
-	}
-
-	return NewGORMStore(db)
-}
-
-// NewMemoryStore is an alias for NewInMemoryStore.
-func NewMemoryStore() (*GORMStore, error) {
-	return NewInMemoryStore()
+	return &Store{db: db}, nil
 }
 
 // DB returns the underlying *gorm.DB instance.
-func (s *GORMStore) DB() *gorm.DB {
+func (s *Store) DB() *gorm.DB {
 	return s.db
 }
 
 // Append persists newly produced log entries for a session within a single transaction,
 // creating or updating the corresponding crux_agents and crux_sessions records.
-func (s *GORMStore) Append(ctx context.Context, sessionID uuid.UUID, agent *Agent, entries ...Entry) error {
+func (s *Store) Append(ctx context.Context, sessionID uuid.UUID, agent *crux.Agent, entries ...crux.Entry) error {
 	if agent == nil {
 		return errors.New("agent cannot be nil")
 	}
@@ -155,8 +146,8 @@ func (s *GORMStore) Append(ctx context.Context, sessionID uuid.UUID, agent *Agen
 }
 
 // Get retrieves all log entries for the specified session in sequential order.
-// If the session does not exist in the store, it returns ErrSessionNotFound.
-func (s *GORMStore) Get(ctx context.Context, sessionID uuid.UUID) ([]Entry, error) {
+// If the session does not exist in the store, it returns crux.ErrSessionNotFound.
+func (s *Store) Get(ctx context.Context, sessionID uuid.UUID) ([]crux.Entry, error) {
 	var count int64
 	if err := s.db.WithContext(ctx).
 		Model(&SessionRecord{}).
@@ -165,7 +156,7 @@ func (s *GORMStore) Get(ctx context.Context, sessionID uuid.UUID) ([]Entry, erro
 		return nil, fmt.Errorf("check session existence: %w", err)
 	}
 	if count == 0 {
-		return nil, ErrSessionNotFound
+		return nil, crux.ErrSessionNotFound
 	}
 
 	var records []LogRecord
@@ -176,7 +167,7 @@ func (s *GORMStore) Get(ctx context.Context, sessionID uuid.UUID) ([]Entry, erro
 		return nil, fmt.Errorf("get session logs: %w", err)
 	}
 
-	entries := make([]Entry, len(records))
+	entries := make([]crux.Entry, len(records))
 	for i, r := range records {
 		if err := json.Unmarshal(r.Data, &entries[i]); err != nil {
 			return nil, fmt.Errorf("unmarshal log entry id %d: %w", r.ID, err)

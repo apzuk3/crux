@@ -1,3 +1,5 @@
+//go:build evals
+
 // Scenario: OutputSchema Edge Cases & Robustness Across Providers
 //
 // This live evaluation test exercises many edge cases of Crux's OutputSchema
@@ -35,10 +37,10 @@ If you cannot fulfill the request perfectly, still return valid JSON.`
 // -----------------------------------------------------------------------------
 
 type NullableOutput struct {
-	Name     string   `json:"name"`
-	Email    *string  `json:"email,omitempty"`
-	Score    *int     `json:"score,omitempty"`
-	Active   *bool    `json:"active,omitempty"`
+	Name     string         `json:"name"`
+	Email    *string        `json:"email,omitempty"`
+	Score    *int           `json:"score,omitempty"`
+	Active   *bool          `json:"active,omitempty"`
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
@@ -50,9 +52,9 @@ type NumericOutput struct {
 }
 
 type NestedOutput struct {
-	Title    string          `json:"title"`
-	Items    []string        `json:"items"`
-	Details  map[string]int  `json:"details"` // map test
+	Title    string           `json:"title"`
+	Items    []string         `json:"items"`
+	Details  map[string]int   `json:"details"` // map test
 	Children []NullableOutput `json:"children"`
 }
 

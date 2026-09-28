@@ -29,9 +29,7 @@ const (
 	KindToolCall
 	KindToolResult
 	KindStateDelta
-	// KindCompaction represents a compacted conversation range.
-	// NOTE: Runtime compaction is deferred and is unsupported in alpha.
-	KindCompaction
+	_                // reserved for conversation compaction
 	KindProviderTool // server-executed tool event retained in Opaque
 	KindApproval
 )
@@ -41,13 +39,6 @@ type ContentKind string
 const (
 	ContentKindText    ContentKind = "text"
 	ContentKindRefusal ContentKind = "refusal"
-)
-
-const (
-	EventAgentStarted = "agent_started"
-	EventAgentEnded   = "agent_ended"
-	EventTurnStarted  = "turn_started"
-	EventTurnEnded    = "turn_ended"
 )
 
 type ContentPart struct {
@@ -67,7 +58,6 @@ type Entry struct {
 	ToolCall   *ToolCall   `json:"tool_call,omitempty"`
 	ToolResult *ToolResult `json:"tool_result,omitempty"`
 	Delta      *StateDelta `json:"delta,omitempty"`
-	Compaction *Compaction `json:"compaction,omitempty"`
 	Approval   *Approval   `json:"approval,omitempty"`
 
 	Opaque map[string][]byte `json:"opaque,omitempty"` // provider adornments; dropped on provider switch
@@ -143,15 +133,6 @@ type Approval struct {
 	CallID   string `json:"call_id"`
 	Approved bool   `json:"approved"`
 	Reason   string `json:"reason,omitempty"`
-}
-
-// Compaction defines a superseded history range and its summary.
-// NOTE: Runtime compaction execution is deferred and is currently
-// unsupported in alpha. Compaction entries cannot yet be constructed by or replayed to providers.
-type Compaction struct {
-	From    uint64 `json:"from"` // superseded range start
-	To      uint64 `json:"to"`   // superseded range end
-	Summary string `json:"summary,omitempty"`
 }
 
 type Usage struct {

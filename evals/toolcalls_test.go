@@ -1,3 +1,5 @@
+//go:build evals
+
 // Scenario: Multi-Step Tool Chaining & Structured Output Orchestration
 //
 // This live evaluation test verifies Crux's end-to-end tool orchestration capabilities across

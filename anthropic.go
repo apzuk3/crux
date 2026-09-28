@@ -33,6 +33,10 @@ func (a *Agent) newAnthropicClient(httpClient *http.Client) *anthropic.Client {
 	return &c
 }
 
+// defaultAnthropicMaxTokens is used when WithMaxTokens is unset, because the
+// Messages API requires a cap. It stays below the SDK's non-streaming limit.
+const defaultAnthropicMaxTokens = 16384
+
 // anthropicStep returns ordered blocks with usage, resuming paused server turns
 // internally until the model finishes or requests a local tool.
 func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
@@ -46,7 +50,13 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 	}
 	params := anthropic.MessageNewParams{
 		Model: a.model, Messages: messages, Tools: tools,
-		MaxTokens: 12000,
+		MaxTokens: defaultAnthropicMaxTokens,
+	}
+	if a.maxTokens > 0 {
+		params.MaxTokens = int64(a.maxTokens)
+	}
+	if a.temperature != nil {
+		params.Temperature = anthropic.Float(*a.temperature)
 	}
 	if a.instructions != "" {
 		params.System = []anthropic.TextBlockParam{{Text: a.instructions}}
@@ -72,7 +82,7 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 		})
 	}
 	if a.outputSchema != nil {
-		schema, err := wireSchemaFor(a.outputSchema, a.Provider)
+		schema, err := wireSchemaFor(a.outputSchema, a.provider)
 		if err != nil {
 			return nil, err
 		}
@@ -108,7 +118,9 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 		switch response.StopReason {
 		case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence, anthropic.StopReasonToolUse, anthropic.StopReasonPauseTurn:
 		case anthropic.StopReasonRefusal:
-			return nil, errors.New("anthropic refused the request")
+			return nil, fmt.Errorf("anthropic: %w", ErrRefused)
+		case anthropic.StopReasonMaxTokens:
+			return nil, fmt.Errorf("anthropic response hit the %d output token limit; raise it with crux.WithMaxTokens", params.MaxTokens)
 		default:
 			return nil, fmt.Errorf("anthropic response did not complete: stop reason %q", response.StopReason)
 		}

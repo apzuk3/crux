@@ -93,7 +93,7 @@ func TestToolDispatchRecordsDuration(t *testing.T) {
 
 func TestUsageAndDurationClonedOnFork(t *testing.T) {
 	agent := &Agent{
-		Provider: ProviderOpenAI,
+		provider: ProviderOpenAI,
 		model:    "gpt-4o",
 	}
 	session, err := NewSession(t.Context(), agent, WithSessionLogs([]Entry{

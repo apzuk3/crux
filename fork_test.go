@@ -9,7 +9,7 @@ import (
 
 func TestForkCrossProviderInference(t *testing.T) {
 	agent := &Agent{
-		Provider: ProviderAnthropic,
+		provider: ProviderAnthropic,
 		model:    ClaudeHaiku4_5,
 		apiKey:   "anthropic-fake-key",
 	}
@@ -26,7 +26,7 @@ func TestForkCrossProviderInference(t *testing.T) {
 	forked, err := session.Fork(t.Context(), WithModel(ChatModelGPT4_1Mini))
 	require.NoError(t, err)
 
-	require.Equal(t, ProviderOpenAI, forked.agent.Provider)
+	require.Equal(t, ProviderOpenAI, forked.agent.provider)
 	require.Equal(t, ChatModelGPT4_1Mini, forked.agent.model)
 	require.Len(t, forked.logs, 1)
 	require.Nil(t, forked.logs[0].Opaque)
@@ -40,7 +40,7 @@ func TestForkInheritsConfiguration(t *testing.T) {
 	agent := &Agent{
 		name:         "parent-agent",
 		model:        ChatModelGPT4_1Mini,
-		Provider:     ProviderOpenAI,
+		provider:     ProviderOpenAI,
 		maxTurns:     42,
 		instructions: "be helpful",
 		outputSchema: schema,
@@ -68,7 +68,7 @@ func TestForkInheritsConfiguration(t *testing.T) {
 
 	require.Equal(t, agent.name, forked.agent.name)
 	require.Equal(t, agent.model, forked.agent.model)
-	require.Equal(t, agent.Provider, forked.agent.Provider)
+	require.Equal(t, agent.provider, forked.agent.provider)
 	require.Equal(t, agent.maxTurns, forked.agent.maxTurns)
 	require.Equal(t, agent.instructions, forked.agent.instructions)
 	require.Equal(t, agent.outputSchema, forked.agent.outputSchema)
@@ -87,7 +87,7 @@ func TestForkInheritsConfiguration(t *testing.T) {
 
 func TestForkCrossProviderDefaultBaseURL(t *testing.T) {
 	agent := &Agent{
-		Provider: ProviderAnthropic,
+		provider: ProviderAnthropic,
 		model:    ClaudeHaiku4_5,
 		apiKey:   "anthropic-fake-key",
 	}
@@ -101,7 +101,7 @@ func TestForkCrossProviderDefaultBaseURL(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	require.Equal(t, ProviderXAI, forked.agent.Provider)
+	require.Equal(t, ProviderXAI, forked.agent.provider)
 	require.Equal(t, "https://api.x.ai/v1", forked.agent.baseURL)
 }
 
@@ -109,7 +109,7 @@ func TestForkUserOverrides(t *testing.T) {
 	agent := &Agent{
 		name:         "parent",
 		model:        ChatModelGPT4_1Mini,
-		Provider:     ProviderOpenAI,
+		provider:     ProviderOpenAI,
 		instructions: "old instructions",
 		maxTurns:     5,
 		baseURL:      "https://custom-proxy.internal",
@@ -135,7 +135,7 @@ func TestForkUserOverrides(t *testing.T) {
 
 func TestForkFromOffsetAndSanitization(t *testing.T) {
 	agent := &Agent{
-		Provider: ProviderAnthropic,
+		provider: ProviderAnthropic,
 		model:    ClaudeHaiku4_5,
 		apiKey:   "anthropic-fake-key",
 	}

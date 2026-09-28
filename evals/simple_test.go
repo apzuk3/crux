@@ -1,3 +1,5 @@
+//go:build evals
+
 // Scenario: Baseline Single-Turn Prompts & Schema Enforcement
 //
 // This live evaluation test verifies Crux's fundamental baseline integration across all supported
