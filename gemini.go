@@ -87,12 +87,15 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		return nil, fmt.Errorf("gemini generate content: %w", err)
 	}
 	if len(response.Candidates) == 0 {
+		// A blocked prompt has no candidates, only prompt feedback:
+		// https://ai.google.dev/api/generate-content#BlockReason
 		if feedback := response.PromptFeedback; feedback != nil && feedback.BlockReason != "" {
 			return nil, fmt.Errorf("gemini: %w: prompt blocked: %s", ErrRefused, feedback.BlockReason)
 		}
 		return nil, errors.New("gemini returned no candidates")
 	}
 	candidate := response.Candidates[0]
+	// Finish reasons: https://ai.google.dev/api/generate-content#FinishReason
 	switch candidate.FinishReason {
 	case genai.FinishReasonStop:
 	case genai.FinishReasonMaxTokens:
@@ -129,8 +132,9 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		produced = append(produced, entry)
 	}
 	if len(produced) == 0 {
-		// The model may stop without saying anything; that is still a final
-		// answer, and its usage must not be lost.
+		// The model may stop (finish reason STOP) without saying anything;
+		// that is still a final answer, and its usage must not be lost.
+		// https://ai.google.dev/api/generate-content#FinishReason
 		produced = append(produced, Entry{At: now, Kind: KindAssistant})
 	}
 	if candidate.GroundingMetadata != nil {
@@ -151,6 +155,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		}
 		// PromptTokenCount already includes cached content; tool-use prompt
 		// tokens (such as search results) are counted separately.
+		// https://ai.google.dev/api/generate-content#UsageMetadata
 		produced[len(produced)-1].Usage = &Usage{
 			InputTokens:     int(usage.PromptTokenCount + usage.ToolUsePromptTokenCount),
 			OutputTokens:    int(usage.CandidatesTokenCount + usage.ThoughtsTokenCount),
@@ -215,6 +220,7 @@ func streamGemini(ctx context.Context, client *genai.Client, model string, conte
 	}
 	if !sawCandidate {
 		// A blocked prompt yields only prompt feedback.
+		// https://ai.google.dev/api/generate-content#BlockReason
 		response.Candidates = nil
 	}
 	return response, nil
@@ -264,13 +270,15 @@ func fromGeminiPart(part *genai.Part) (Entry, error) {
 		return Entry{Kind: KindReasoning, Reasoning: &Reasoning{}, Opaque: opaque}, nil
 	default:
 		// Other data, such as executable code or inline media, is kept and
-		// replayed verbatim.
+		// replayed verbatim. Part types: https://ai.google.dev/api/caching#Part
 		return Entry{Kind: KindProviderTool, Opaque: opaque}, nil
 	}
 }
 
 // geminiPartEmpty reports whether a part carries nothing at all, like the
-// empty text parts Gemini sometimes sends alongside real content.
+// empty text parts Gemini sometimes sends alongside real content (often the
+// last streamed chunk, which only carries the finish reason and usage).
+// https://ai.google.dev/api/caching#Part
 func geminiPartEmpty(part *genai.Part) bool {
 	if part == nil {
 		return false

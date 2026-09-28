@@ -137,6 +137,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 		return nil, fmt.Errorf("%s response failed: %s: %s", a.provider, response.Error.Code, response.Error.Message)
 	}
 	if response.Status != responses.ResponseStatusCompleted {
+		// incomplete_details.reason: https://platform.openai.com/docs/api-reference/responses/object
 		if response.IncompleteDetails.Reason == "content_filter" {
 			return nil, fmt.Errorf("%s: %w: content_filter", a.provider, ErrRefused)
 		}
@@ -161,13 +162,13 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 
 	if len(produced) == 0 {
 		// A completed response with no output is an empty final answer; its
-		// usage must not be lost.
+		// usage must not be lost. https://platform.openai.com/docs/api-reference/responses/object
 		produced = append(produced, Entry{At: now, Kind: KindAssistant})
 	}
 
 	// Usage is reported per response, so it hangs on the last thing the model
 	// produced rather than being spread over the entries. InputTokens already
-	// includes cached tokens.
+	// includes cached tokens: https://platform.openai.com/docs/guides/prompt-caching
 	usage := response.Usage
 	produced[len(produced)-1].Usage = &Usage{
 		InputTokens:      int(usage.InputTokens),
@@ -256,6 +257,8 @@ func fromOpenAIResponseOutputItemUnion(item responses.ResponseOutputItemUnion) (
 			Opaque:  opaque,
 		}, nil
 	case responses.ResponseReasoningItem:
+		// A summary comes in parts, one per paragraph.
+		// https://platform.openai.com/docs/guides/reasoning#reasoning-summaries
 		summary := make([]string, 0, len(v.Summary))
 		for _, part := range v.Summary {
 			summary = append(summary, part.Text)

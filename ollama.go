@@ -11,7 +11,7 @@ import (
 // Ollama Cloud does not currently support structured outputs.
 func (a *Agent) ollamaStep(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
 	// New sets the placeholder key "ollama" for local servers, which Ollama's
-	// hosted web search does not accept.
+	// hosted web search does not accept: https://docs.ollama.com/web-search
 	if a.searchOptions != nil && (a.apiKey == "" || a.apiKey == "ollama") {
 		return nil, errors.New("Ollama API key is required for Ollama web search")
 	}

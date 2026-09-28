@@ -149,7 +149,9 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 			}
 			produced = append(produced, entry)
 		}
-		// Anthropic reports uncached input separately from cache reads and writes.
+		// Anthropic reports uncached input separately from cache reads and writes;
+		// total input is their sum. See "Tracking cache performance":
+		// https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 		totalInputTokens += int(response.Usage.InputTokens + response.Usage.CacheReadInputTokens + response.Usage.CacheCreationInputTokens)
 		totalOutputTokens += int(response.Usage.OutputTokens)
 		totalCacheReadTokens += int(response.Usage.CacheReadInputTokens)
@@ -158,7 +160,9 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 		if response.StopReason != anthropic.StopReasonPauseTurn {
 			if len(produced) == 0 {
 				// The model may end its turn without saying anything; that is
-				// still a final answer, and its usage must not be lost.
+				// still a final answer, and its usage must not be lost. See
+				// "Empty responses with end_turn":
+				// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons
 				produced = append(produced, Entry{At: now, Kind: KindAssistant})
 			}
 			produced[len(produced)-1].Usage = &Usage{
@@ -261,6 +265,8 @@ func fromAnthropicContentBlock(block anthropic.ContentBlockUnion) (Entry, error)
 		return Entry{Kind: KindReasoning, Reasoning: &Reasoning{Summary: v.Thinking}, Opaque: opaque}, nil
 	case anthropic.RedactedThinkingBlock:
 		return Entry{Kind: KindReasoning, Reasoning: &Reasoning{}, Opaque: opaque}, nil
+	// Server tools run on Anthropic's side; their blocks are replayed as-is.
+	// https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools
 	case anthropic.ServerToolUseBlock, anthropic.WebSearchToolResultBlock, anthropic.WebFetchToolResultBlock,
 		anthropic.CodeExecutionToolResultBlock, anthropic.BashCodeExecutionToolResultBlock,
 		anthropic.TextEditorCodeExecutionToolResultBlock, anthropic.ToolSearchToolResultBlock, anthropic.ContainerUploadBlock:
@@ -349,7 +355,9 @@ func toAnthropicContentBlockParamUnion(e Entry) ([]anthropic.ContentBlockParamUn
 		if isError {
 			output = r.Error
 		}
-		// Anthropic rejects empty text blocks, so an empty result carries no content.
+		// Anthropic rejects empty text blocks, so an empty result carries no
+		// content, which the API allows ("content (optional)"):
+		// https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls
 		if strings.TrimSpace(output) == "" {
 			block := anthropic.ToolResultBlockParam{ToolUseID: r.CallID, IsError: anthropic.Bool(isError)}
 			blocks = []anthropic.ContentBlockParamUnion{{OfToolResult: &block}}

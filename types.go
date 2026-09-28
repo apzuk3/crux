@@ -169,6 +169,11 @@ type Approval struct {
 // or written to the provider's cache; CacheReadTokens and CacheWriteTokens are
 // the parts of it that were cache hits and cache writes. OutputTokens includes
 // reasoning tokens.
+//
+// Provider documentation for the raw counts:
+//   - Anthropic: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+//   - OpenAI: https://platform.openai.com/docs/guides/prompt-caching
+//   - Gemini: https://ai.google.dev/api/generate-content#UsageMetadata
 type Usage struct {
 	InputTokens      int `json:"input_tokens"`
 	OutputTokens     int `json:"output_tokens"`

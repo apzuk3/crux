@@ -43,7 +43,7 @@ func TestAnthropicSchemaMovesConstraintsEverywhere(t *testing.T) {
 		description string
 	}{
 		{wire, []string{"minProperties"}, "minProperties=1"},
-		{name, []string{"minLength", "maxLength"}, "minLength=2, maxLength=5"},
+		{name, []string{"minLength", "maxLength", "pattern"}, "minLength=2, maxLength=5, pattern=^[a-z]+$"},
 		{tags, []string{"minItems", "maxItems"}, "maxItems=4, minItems=2"},
 		{tags["items"].(map[string]any), []string{"maxLength"}, "maxLength=9"},
 		{choice, []string{"minimum", "multipleOf"}, "minimum=3, multipleOf=3"},
@@ -58,9 +58,6 @@ func TestAnthropicSchemaMovesConstraintsEverywhere(t *testing.T) {
 		if got := check.node["description"]; got != check.description {
 			t.Errorf("description = %q, want %q", got, check.description)
 		}
-	}
-	if name["pattern"] != "^[a-z]+$" {
-		t.Errorf("pattern should be kept, got %v", name)
 	}
 	if one["minItems"] != json.Number("1") {
 		t.Errorf("minItems 1 should be kept, got %v", one)

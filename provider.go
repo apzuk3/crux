@@ -53,6 +53,7 @@ func discoverAPIKey(provider Provider) string {
 	case ProviderAnthropic:
 		// ANTHROPIC_AUTH_TOKEN is a bearer token, not an API key; the SDK's
 		// default options send it as Authorization when no key is set.
+		// https://github.com/anthropics/anthropic-sdk-go/blob/v1.72.0/client.go
 		envVars = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_APIKEY", "ANTHROPIC_KEY"}
 	case ProviderGoogle:
 		envVars = []string{"GOOGLE_API_KEY", "GOOGLE_APIKEY", "GOOGLE_KEY", "GEMINI_API_KEY", "GEMINI_APIKEY", "GEMINI_KEY"}

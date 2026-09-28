@@ -65,7 +65,8 @@ func cleanBaseSchema(m map[string]any) {
 //   - Optional properties are placed in "required" and marked nullable ("anyOf": [prop, {"type": "null"}]).
 //   - "additionalProperties": false on every object.
 //   - Dynamic map/dictionary schemas (arbitrary keys) are rejected in strict mode.
-//   - The root must be an object (Ollama excepted).
+//   - The root must be an object (Ollama excepted):
+//     https://platform.openai.com/docs/guides/structured-outputs#supported-schemas
 func adaptOpenAI(root map[string]any, provider Provider) (map[string]any, error) {
 	// Ollama does not enforce strict mode and accepts any root.
 	if provider != ProviderOllama {
@@ -124,14 +125,15 @@ func adaptOpenAI(root map[string]any, provider Provider) (map[string]any, error)
 
 // adaptAnthropic adapts schemas for Anthropic Claude structured outputs.
 // Official documentation:
-//   - Anthropic Structured Outputs: https://docs.anthropic.com/en/docs/build-with-claude/structured-outputs
+//   - Anthropic Structured Outputs: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
 //
 // Requirements:
 //   - "additionalProperties": false on all objects.
 //   - Dynamic map/dictionary schemas are not supported.
-//   - Numeric, string length and most array constraints are not supported as
-//     schema keywords, so they move into the description of the schema that
-//     had them. Output validation still enforces them.
+//   - Numeric, string length, pattern and most array constraints are not
+//     supported as schema keywords ("JSON Schema limitations" in the page
+//     above), so they move into the description of the schema that had them.
+//     Output validation still enforces them.
 func adaptAnthropic(root map[string]any) (map[string]any, error) {
 	err := walkSchemas(root, func(m map[string]any) error {
 		moveToDescription(m, anthropicUnsupportedKeywords)
@@ -156,7 +158,7 @@ func adaptAnthropic(root map[string]any) (map[string]any, error) {
 // reject. minItems is supported only as 0 or 1 and is handled separately.
 var anthropicUnsupportedKeywords = []string{
 	"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
-	"minLength", "maxLength",
+	"minLength", "maxLength", "pattern",
 	"maxItems", "uniqueItems", "minContains", "maxContains",
 	"minProperties", "maxProperties",
 }
