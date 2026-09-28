@@ -33,8 +33,8 @@
 // example ANTHROPIC_API_KEY) unless WithAPIKey is given.
 //
 // Sessions are kept in memory by default. Pass WithStore to persist them, for
-// example with the store/gormstore package, and WithSessionID to continue a
-// stored conversation.
+// example with NewGORMStore, and WithSessionID to continue a stored
+// conversation.
 //
 // The cruxtest package provides a mock HTTP transport for testing agents
 // without calling a real provider.

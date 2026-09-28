@@ -1,12 +1,4 @@
-// Package gormstore persists crux sessions in any database supported by GORM.
-//
-// Bring your own driver, for example gorm.io/driver/sqlite (cgo),
-// github.com/glebarez/sqlite (pure Go) or gorm.io/driver/postgres:
-//
-//	db, _ := gorm.Open(sqlite.Open("crux.db"), &gorm.Config{})
-//	store, _ := gormstore.New(db)
-//	session, _ := crux.NewSession(ctx, agent, crux.WithStore(store))
-package gormstore
+package crux
 
 import (
 	"context"
@@ -15,13 +7,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/apzuk3/crux"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-var _ crux.Store = (*Store)(nil)
+var _ Store = (*GORMStore)(nil)
 
 // AgentRecord stores the immutable blueprint definition for an agent in GORM.
 type AgentRecord struct {
@@ -54,14 +45,20 @@ type LogRecord struct {
 
 func (LogRecord) TableName() string { return "crux_session_logs" }
 
-// Store implements crux.Store backed by a GORM database.
-type Store struct {
+// GORMStore persists sessions in any database GORM supports. Bring your own
+// driver, for example github.com/glebarez/sqlite (pure Go),
+// gorm.io/driver/sqlite (cgo) or gorm.io/driver/postgres:
+//
+//	db, _ := gorm.Open(sqlite.Open("db"), &gorm.Config{})
+//	store, _ := NewGORMStore(db)
+//	session, _ := NewSession(ctx, agent, WithStore(store))
+type GORMStore struct {
 	db *gorm.DB
 }
 
-// New initializes the store and automatically runs migrations for the
+// NewGORMStore initializes the store and automatically runs migrations for the
 // crux_agents, crux_sessions, and crux_session_logs tables.
-func New(db *gorm.DB) (*Store, error) {
+func NewGORMStore(db *gorm.DB) (*GORMStore, error) {
 	if db == nil {
 		return nil, errors.New("db cannot be nil")
 	}
@@ -70,17 +67,17 @@ func New(db *gorm.DB) (*Store, error) {
 		return nil, fmt.Errorf("crux gorm automigrate: %w", err)
 	}
 
-	return &Store{db: db}, nil
+	return &GORMStore{db: db}, nil
 }
 
 // DB returns the underlying *gorm.DB instance.
-func (s *Store) DB() *gorm.DB {
+func (s *GORMStore) DB() *gorm.DB {
 	return s.db
 }
 
 // Append persists newly produced log entries for a session within a single transaction,
 // creating or updating the corresponding crux_agents and crux_sessions records.
-func (s *Store) Append(ctx context.Context, sessionID uuid.UUID, agent *crux.Agent, entries ...crux.Entry) error {
+func (s *GORMStore) Append(ctx context.Context, sessionID uuid.UUID, agent *Agent, entries ...Entry) error {
 	if agent == nil {
 		return errors.New("agent cannot be nil")
 	}
@@ -146,8 +143,8 @@ func (s *Store) Append(ctx context.Context, sessionID uuid.UUID, agent *crux.Age
 }
 
 // Get retrieves all log entries for the specified session in sequential order.
-// If the session does not exist in the store, it returns crux.ErrSessionNotFound.
-func (s *Store) Get(ctx context.Context, sessionID uuid.UUID) ([]crux.Entry, error) {
+// If the session does not exist in the store, it returns ErrSessionNotFound.
+func (s *GORMStore) Get(ctx context.Context, sessionID uuid.UUID) ([]Entry, error) {
 	var count int64
 	if err := s.db.WithContext(ctx).
 		Model(&SessionRecord{}).
@@ -156,7 +153,7 @@ func (s *Store) Get(ctx context.Context, sessionID uuid.UUID) ([]crux.Entry, err
 		return nil, fmt.Errorf("check session existence: %w", err)
 	}
 	if count == 0 {
-		return nil, crux.ErrSessionNotFound
+		return nil, ErrSessionNotFound
 	}
 
 	var records []LogRecord
@@ -167,7 +164,7 @@ func (s *Store) Get(ctx context.Context, sessionID uuid.UUID) ([]crux.Entry, err
 		return nil, fmt.Errorf("get session logs: %w", err)
 	}
 
-	entries := make([]crux.Entry, len(records))
+	entries := make([]Entry, len(records))
 	for i, r := range records {
 		if err := json.Unmarshal(r.Data, &entries[i]); err != nil {
 			return nil, fmt.Errorf("unmarshal log entry id %d: %w", r.ID, err)

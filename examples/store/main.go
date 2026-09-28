@@ -7,9 +7,8 @@ import (
 	"log"
 
 	"github.com/apzuk3/crux"
-	"github.com/apzuk3/crux/store/gormstore"
+	"github.com/glebarez/sqlite"
 	"github.com/google/uuid"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -22,12 +21,12 @@ func main() {
 	flag.Parse()
 	ctx := context.Background()
 
-	// Any GORM driver works; this one keeps sessions in a local SQLite file.
+	// Any GORM driver works; this pure-Go one keeps sessions in a local SQLite file.
 	db, err := gorm.Open(sqlite.Open("crux-example.db"), &gorm.Config{})
 	if err != nil {
 		log.Fatalf("open database: %v", err)
 	}
-	store, err := gormstore.New(db)
+	store, err := crux.NewGORMStore(db)
 	if err != nil {
 		log.Fatalf("create store: %v", err)
 	}

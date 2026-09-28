@@ -23,7 +23,7 @@ var _ Store = (*MemoryStore)(nil)
 
 // MemoryStore keeps session logs in process memory. It is the default store
 // for new sessions and is safe for concurrent use. Its contents are lost when
-// the process exits; use a persistent store such as store/gormstore to keep them.
+// the process exits; use a persistent store such as GORMStore to keep them.
 type MemoryStore struct {
 	mu       sync.RWMutex
 	sessions map[uuid.UUID][]Entry

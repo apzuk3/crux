@@ -7,7 +7,7 @@ A small Go toolkit for building LLM agents that run the same way on every major 
 - **Tools are plain Go functions.** The JSON schema comes from the input type.
 - **One agent API for every provider:** OpenAI, Anthropic, Google Gemini, xAI, DeepSeek, OpenRouter and Ollama.
 - **Sessions are replayable logs.** You can resume them, fork them (even onto another provider) and persist them.
-- **Pure Go by default.** No cgo, no database required.
+- **One import.** Everything lives in the `crux` package. Pure Go, no cgo, and no database required.
 
 > Status: `v0.0.x`. The API may still change between releases.
 
@@ -130,17 +130,16 @@ The coordinator sees a tool named `agent_researcher` that takes a `task` string.
 
 ### Persisting and resuming sessions
 
-Sessions are kept in memory by default. To keep them, use any `crux.Store`. The `store/gormstore` package works with any GORM driver:
+Sessions are kept in memory by default. To keep them, use any `crux.Store`. `crux.NewGORMStore` works with any GORM driver:
 
 ```go
 import (
-	"github.com/apzuk3/crux/store/gormstore"
 	"github.com/glebarez/sqlite" // pure Go; or gorm.io/driver/sqlite, postgres, ...
 	"gorm.io/gorm"
 )
 
 db, _ := gorm.Open(sqlite.Open("crux.db"), &gorm.Config{})
-store, _ := gormstore.New(db)
+store, _ := crux.NewGORMStore(db)
 
 session, _ := crux.NewSession(ctx, agent, crux.WithStore(store))
 

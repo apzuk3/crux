@@ -1,4 +1,4 @@
-package gormstore_test
+package crux
 
 import (
 	"context"
@@ -6,21 +6,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apzuk3/crux"
-	"github.com/apzuk3/crux/store/gormstore"
+	"github.com/glebarez/sqlite"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
-func setupGORMTestDB(t *testing.T) *gormstore.Store {
+func setupGORMTestDB(t *testing.T) *GORMStore {
 	t.Helper()
 
 	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
 
-	store, err := gormstore.New(db)
+	store, err := NewGORMStore(db)
 	require.NoError(t, err)
 
 	return store
@@ -30,25 +28,25 @@ func TestGORMStore_AppendAndGet(t *testing.T) {
 	store := setupGORMTestDB(t)
 	ctx := context.Background()
 
-	agent := crux.Must(crux.New(
+	agent := Must(New(
 		"test-assistant",
-		crux.ChatModelGPT4,
-		crux.WithInstructions("Assist users with testing."),
-		crux.WithMaxTurns(5),
+		ChatModelGPT4,
+		WithInstructions("Assist users with testing."),
+		WithMaxTurns(5),
 	))
 
 	sessionID := uuid.New()
 
-	entry1, err := crux.NewUserEntry("Hello server")
+	entry1, err := NewUserEntry("Hello server")
 	require.NoError(t, err)
 	entry1.Seq = 1
 
-	entry2 := crux.Entry{
+	entry2 := Entry{
 		Seq:  2,
 		At:   time.Now().UTC(),
-		Kind: crux.KindAssistant,
-		Content: []crux.ContentPart{
-			{Kind: crux.ContentKindText, Text: "Hello! How can I help?"},
+		Kind: KindAssistant,
+		Content: []ContentPart{
+			{Kind: ContentKindText, Text: "Hello! How can I help?"},
 		},
 	}
 
@@ -57,7 +55,7 @@ func TestGORMStore_AppendAndGet(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify agent record created
-	var agentRec gormstore.AgentRecord
+	var agentRec AgentRecord
 	err = store.DB().First(&agentRec, "id = ?", agent.ID()).Error
 	require.NoError(t, err)
 	require.Equal(t, agent.ID(), agentRec.ID)
@@ -68,7 +66,7 @@ func TestGORMStore_AppendAndGet(t *testing.T) {
 	require.Equal(t, "Assist users with testing.", meta["instructions"])
 
 	// Verify session record created
-	var sessRec gormstore.SessionRecord
+	var sessRec SessionRecord
 	err = store.DB().First(&sessRec, "id = ?", sessionID).Error
 	require.NoError(t, err)
 	require.Equal(t, sessionID, sessRec.ID)
@@ -76,16 +74,16 @@ func TestGORMStore_AppendAndGet(t *testing.T) {
 
 	// Verify log records created
 	var logCount int64
-	err = store.DB().Model(&gormstore.LogRecord{}).Where("session_id = ?", sessionID).Count(&logCount).Error
+	err = store.DB().Model(&LogRecord{}).Where("session_id = ?", sessionID).Count(&logCount).Error
 	require.NoError(t, err)
 	require.Equal(t, int64(2), logCount)
 
 	// 2. Subsequent Append to same session
-	entry3 := crux.Entry{
+	entry3 := Entry{
 		Seq:  3,
 		At:   time.Now().UTC(),
-		Kind: crux.KindToolCall,
-		ToolCall: &crux.ToolCall{
+		Kind: KindToolCall,
+		ToolCall: &ToolCall{
 			ID:   "call_123",
 			Name: "check_disk",
 			Args: []byte(`{"path":"/"}`),
@@ -98,11 +96,11 @@ func TestGORMStore_AppendAndGet(t *testing.T) {
 
 	// Verify session was updated (not duplicated)
 	var sessionCount int64
-	err = store.DB().Model(&gormstore.SessionRecord{}).Where("id = ?", sessionID).Count(&sessionCount).Error
+	err = store.DB().Model(&SessionRecord{}).Where("id = ?", sessionID).Count(&sessionCount).Error
 	require.NoError(t, err)
 	require.Equal(t, int64(1), sessionCount)
 
-	var updatedSess gormstore.SessionRecord
+	var updatedSess SessionRecord
 	err = store.DB().First(&updatedSess, "id = ?", sessionID).Error
 	require.NoError(t, err)
 	require.True(t, updatedSess.UpdatedAt.After(sessRec.CreatedAt) || updatedSess.UpdatedAt.Equal(sessRec.CreatedAt))
@@ -113,15 +111,15 @@ func TestGORMStore_AppendAndGet(t *testing.T) {
 	require.Len(t, entries, 3)
 
 	require.Equal(t, uint64(1), entries[0].Seq)
-	require.Equal(t, crux.KindUser, entries[0].Kind)
+	require.Equal(t, KindUser, entries[0].Kind)
 	require.Equal(t, "Hello server", entries[0].Text())
 
 	require.Equal(t, uint64(2), entries[1].Seq)
-	require.Equal(t, crux.KindAssistant, entries[1].Kind)
+	require.Equal(t, KindAssistant, entries[1].Kind)
 	require.Equal(t, "Hello! How can I help?", entries[1].Text())
 
 	require.Equal(t, uint64(3), entries[2].Seq)
-	require.Equal(t, crux.KindToolCall, entries[2].Kind)
+	require.Equal(t, KindToolCall, entries[2].Kind)
 	require.Equal(t, "check_disk", entries[2].ToolCall.Name)
 	require.Equal(t, `{"path":"/"}`, string(entries[2].ToolCall.Args))
 }
@@ -130,14 +128,14 @@ func TestGORMStore_SessionIsolation(t *testing.T) {
 	store := setupGORMTestDB(t)
 	ctx := context.Background()
 
-	agent := crux.Must(crux.New("bot", crux.ChatModelGPT4))
+	agent := Must(New("bot", ChatModelGPT4))
 
 	session1 := uuid.New()
 	session2 := uuid.New()
 
-	e1, _ := crux.NewUserEntry("Session 1 message")
+	e1, _ := NewUserEntry("Session 1 message")
 	e1.Seq = 1
-	e2, _ := crux.NewUserEntry("Session 2 message")
+	e2, _ := NewUserEntry("Session 2 message")
 	e2.Seq = 1
 
 	require.NoError(t, store.Append(ctx, session1, agent, e1))
@@ -158,20 +156,20 @@ func TestGORMStore_GetMissingSession(t *testing.T) {
 	store := setupGORMTestDB(t)
 
 	_, err := store.Get(context.Background(), uuid.New())
-	require.ErrorIs(t, err, crux.ErrSessionNotFound)
+	require.ErrorIs(t, err, ErrSessionNotFound)
 }
 
 func TestGORMStore_ResumeSession(t *testing.T) {
 	store := setupGORMTestDB(t)
 	ctx := context.Background()
-	agent := crux.Must(crux.New("resume-agent", crux.ChatModelGPT4, crux.WithAPIKey("test")))
+	agent := Must(New("resume-agent", ChatModelGPT4, WithAPIKey("test")))
 
-	e1, _ := crux.NewUserEntry("Initial question")
+	e1, _ := NewUserEntry("Initial question")
 	e1.Seq = 1
 	sessionID := uuid.New()
 	require.NoError(t, store.Append(ctx, sessionID, agent, e1))
 
-	resumed, err := crux.NewSession(ctx, agent, crux.WithStore(store), crux.WithSessionID(sessionID))
+	resumed, err := NewSession(ctx, agent, WithStore(store), WithSessionID(sessionID))
 	require.NoError(t, err)
 	require.Equal(t, sessionID, resumed.ID())
 	require.Len(t, resumed.Logs(), 1)
