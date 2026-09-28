@@ -103,6 +103,25 @@ for chunk, err := range session.Stream(ctx, "Write a haiku about Go.") {
 }
 ```
 
+### Toolsets
+
+A toolset registers a group of related tools in one call. Implement `Register` and add it with `AddToolset` (default registry) or `AddToolsetWithRegistry`:
+
+```go
+type mathTools struct{}
+
+func (mathTools) Register(reg crux.ToolsRegistry) error {
+	crux.RegisterToolWithRegistry(reg, "add", "Add two numbers", add)
+	crux.RegisterToolWithRegistry(reg, "multiply", "Multiply two numbers", multiply)
+	return nil
+}
+
+if err := crux.AddToolset(mathTools{}); err != nil {
+	log.Fatal(err)
+}
+agent := crux.Must(crux.New("calc", crux.ChatModelGPT5_4, crux.WithTools([]string{"add", "multiply"})))
+```
+
 ### Tool approvals
 
 ```go

@@ -93,6 +93,26 @@ func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, 
 	registry.tools[name] = tool
 }
 
+// Toolset registers a group of related tools into a registry, so they can be
+// added together with AddToolset instead of one by one.
+type Toolset interface {
+	Register(registry ToolsRegistry) error
+}
+
+// AddToolset registers the toolset's tools into the default registry.
+func AddToolset(toolset Toolset) error {
+	return AddToolsetWithRegistry(defaultToolsRegistry, toolset)
+}
+
+// AddToolsetWithRegistry registers the toolset's tools into the given registry.
+func AddToolsetWithRegistry(registry ToolsRegistry, toolset Toolset) error {
+	if err := toolset.Register(registry); err != nil {
+		return fmt.Errorf("register toolset %T: %w", toolset, err)
+	}
+
+	return nil
+}
+
 // selected returns registered tools in the order of the given names.
 // Repeated names are included only once. If any name is not registered,
 // selected returns an error wrapping ErrToolNotFound with the missing tool name.
