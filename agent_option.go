@@ -356,8 +356,11 @@ func WithSubAgent(subAgent *Agent, description string) AgentOption {
 			schema:      subAgentInputSchema,
 			kind:        toolKindSubagent,
 			invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
-				var input subAgentInput
-				if err := json.Unmarshal(args, &input); err != nil || strings.TrimSpace(input.Task) == "" {
+				input, err := decodeToolArgs[subAgentInput](name, args, subAgentArgsValidator())
+				if err != nil {
+					return "", nil, err
+				}
+				if strings.TrimSpace(input.Task) == "" {
 					return "", nil, fmt.Errorf("subagent %q needs a non-empty task", subAgent.name)
 				}
 

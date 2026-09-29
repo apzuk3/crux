@@ -76,3 +76,78 @@ func TestToolCallsFromOneTurnRunAtMostEightAtATime(t *testing.T) {
 	}
 	require.Equal(t, int32(8), peak.Load())
 }
+
+type customDecoded struct{ raw map[string]any }
+
+func (c *customDecoded) UnmarshalJSON(data []byte) error { return json.Unmarshal(data, &c.raw) }
+
+type selfDecodingInput struct {
+	Path string `json:"path"`
+}
+
+func (s *selfDecodingInput) UnmarshalJSON(data []byte) error {
+	type plain selfDecodingInput
+	return json.Unmarshal(data, (*plain)(s))
+}
+
+func TestToolArgsRejectUnknownKeys(t *testing.T) {
+	type Embedded struct {
+		Mode string `json:"mode,omitempty"`
+	}
+	type input struct {
+		Embedded
+		Path   string           `json:"path"`
+		Hidden string           `json:"-"`
+		Dash   string           `json:"-,omitempty"`
+		Inner  *struct{ N int } `json:"inner,omitempty"`
+		Extra  map[string]any   `json:"extra,omitempty"`
+		Custom *customDecoded   `json:"custom,omitempty"`
+	}
+	reg := NewToolsRegistry()
+	var got input
+	RegisterToolWithRegistry(reg, "t", "t", func(ctx context.Context, in input) (string, *StateDelta, error) {
+		got = in
+		return "", nil, nil
+	})
+	RegisterToolWithRegistry(reg, "self", "s", func(ctx context.Context, in selfDecodingInput) (string, *StateDelta, error) {
+		return "", nil, nil
+	})
+	RegisterToolWithRegistry(reg, "m", "m", func(ctx context.Context, in map[string]string) (string, *StateDelta, error) {
+		return "", nil, nil
+	})
+	call := func(name, args string) error {
+		_, _, err := reg.tools[name].invoke(t.Context(), json.RawMessage(args))
+		return err
+	}
+
+	require.ErrorContains(t, call("t", `{"pаth":"decoy","path":"real"}`), `unknown argument "pаth"`)
+	require.ErrorContains(t, call("t", `{"path":"a","Hidden":"x"}`), `unknown argument "Hidden"`)
+	require.ErrorContains(t, call("t", `{"path":"a","inner":{"N":1,"M":2}}`), `unknown argument "inner.M"`)
+	require.ErrorContains(t, call("t", `{"path":"a","nope":null}`), `unknown argument "nope"`)
+	require.ErrorContains(t, call("self", `{"path":"a","other":1}`), `unknown argument "other"`)
+
+	require.NoError(t, call("t", `{"path":"a","mode":"m","-":"d","inner":{"N":1},"extra":{"any":1},"custom":{"free":1}}`))
+	require.Equal(t, "m", got.Mode)
+	require.Equal(t, "d", got.Dash)
+	require.NoError(t, call("m", `{"any":"key","pаth":"x"}`))
+}
+
+func TestSubAgentArgsAreValidatedStrictly(t *testing.T) {
+	helper, err := New("helper", ChatModelGPT5, WithAPIKey("k"))
+	require.NoError(t, err)
+	parent, err := New("p", ChatModelGPT5, WithAPIKey("k"), WithSubAgent(helper, "d"))
+	require.NoError(t, err)
+	tool := parent.tools[len(parent.tools)-1]
+	require.Equal(t, "agent_helper", tool.name)
+	call := func(args string) error {
+		_, _, err := tool.invoke(t.Context(), json.RawMessage(args))
+		return err
+	}
+
+	require.ErrorContains(t, call(`{"task":"safe","task":"evil"}`), `argument "task" is given more than once`)
+	require.ErrorContains(t, call(`{"TASK":"evil"}`), `"TASK" must be spelled "task"`)
+	require.ErrorContains(t, call(`{"task":"a","note":"b"}`), `unknown argument "note"`)
+	require.ErrorContains(t, call(`{"task":1}`), "invalid arguments")
+	require.ErrorContains(t, call(`{"task":"  "}`), "needs a non-empty task")
+	require.ErrorContains(t, call(`{}`), "invalid arguments")
+}

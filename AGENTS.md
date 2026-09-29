@@ -28,7 +28,7 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
   2. call the provider (`step`);
   3. append what the model produced;
   4. stop on approvals, refusals or a final answer; otherwise repeat, up to `maxTurns`.
-- **Tool failures never stop a run.** Tool errors, and tool panics (recovered in `invokeTool`), are sent to the model as `ToolResult.Error`. Arguments are validated against the tool's input schema first; repeated keys and keys that match a field only case-insensitively are rejected, so an approval shown from the raw arguments matches what the tool receives.
+- **Tool failures never stop a run.** Tool errors, and tool panics (recovered in `invokeTool`), are sent to the model as `ToolResult.Error`. Arguments are validated against the tool's input schema first; repeated keys, keys that match a field only case-insensitively and keys of a struct input that match no field are rejected (maps and nested types with their own decoder accept any key), so an approval shown from the raw arguments matches what the tool receives.
 - **Approvals:** tools registered with `WithApprovalNeeded(true)` make `Run` return `ErrApprovalNeeded`. The caller then uses `Approve`/`Reject` and `Resume`.
 - **Stores** (`store.go`, `store_gorm.go`): `Store.Append(ctx, *Session, entries...)` and `Store.Get(ctx, id)`.
   - `MemoryStore` is the default.
@@ -41,7 +41,7 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
   - `NewSession` reads it, records the parent's ID, and reuses the parent's store.
   - `GORMStore` saves the link in `crux_sessions.parent_id`.
   - There is no public API for this, and none should be added without discussion.
-- **Subagents** (`WithSubAgent`): exposed to the parent as a tool named `agent_<name>` that takes `{"task": string}`. Each call runs a fresh child session, and its output is the tool result.
+- **Subagents** (`WithSubAgent`): exposed to the parent as a tool named `agent_<name>` that takes `{"task": string}`, validated as strictly as other tool arguments. Each call runs a fresh child session, and its output is the tool result.
 - **Fork** (`fork.go`): copies history into a new session, optionally switching model or provider. Provider-specific data (`Opaque`) is dropped when the provider changes.
 - **Errors** (`errors.go`): sentinel errors for `errors.Is` checks: `ErrApprovalNeeded`, `ErrMaxTurns`, `ErrRefused`, `ErrOutputValidation`, `ErrSessionNotFound`, `ErrSessionConflict`, `ErrToolNotFound`.
 - **`Kind` values are persisted.** Never renumber them. The value after `KindStateDelta` is a reserved blank (`_`), kept for future compaction.
