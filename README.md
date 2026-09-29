@@ -129,7 +129,7 @@ agent := crux.Must(crux.New("calc", crux.ChatModelGPT5_4,
 
 ### Filesystem tools
 
-`Filesystem(root)` is a built-in toolset for reading and editing files under `root`. Nothing outside `root` can be reached (not through `..`, absolute paths or symlinks), paths use `/` on every OS, and it works the same on Linux, macOS and Windows.
+`Filesystem(root)` is a built-in toolset for reading and editing files under `root`. Nothing outside `root` can be reached (not through `..`, absolute paths or symlinks), paths use `/` on every OS, and it works the same on Linux, macOS and Windows. Tools that change files refuse paths that go through a symlink, so the change lands on the path that was approved.
 
 ```go
 if err := crux.AddToolset(crux.Filesystem("./workspace")); err != nil {

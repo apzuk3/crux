@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"reflect"
 	"slices"
 	"strings"
@@ -277,7 +278,7 @@ func (a *Agent) CanonicalData() []byte {
 		"model":          a.model,
 		"provider":       a.provider,
 		"instructions":   a.instructions,
-		"base_url":       a.baseURL,
+		"base_url":       redactURL(a.baseURL),
 		"max_turns":      a.maxTurns,
 		"max_repairs":    a.maxRepairs,
 		"max_tokens":     a.maxTokens,
@@ -287,6 +288,27 @@ func (a *Agent) CanonicalData() []byte {
 		"output_schema":  a.outputSchema,
 	})
 	return raw
+}
+
+// redactURL removes credentials a base URL may carry in its user info or
+// query, because the canonical data is stored in plain text (GORMStore saves
+// it in crux_agents).
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if u.User != nil {
+		u.User = url.User("redacted")
+	}
+	if u.RawQuery != "" {
+		query := u.Query()
+		for key := range query {
+			query[key] = []string{"redacted"}
+		}
+		u.RawQuery = query.Encode()
+	}
+	return u.String()
 }
 
 func (a *Agent) computeAgentID() uuid.UUID {
@@ -547,6 +569,15 @@ func (s *Session) FinalOutput() (string, bool) {
 	return finalText(latestTurn), true
 }
 
+// hasAnswerOrCall reports whether a model turn contains assistant content or a
+// tool call. A turn with only reasoning or provider-tool events still needs an
+// (empty) assistant entry, or it would never count as finished.
+func hasAnswerOrCall(entries []Entry) bool {
+	return slices.ContainsFunc(entries, func(e Entry) bool {
+		return e.Kind == KindAssistant || e.Kind == KindToolCall
+	})
+}
+
 func latestRefusal(entries []Entry) (string, bool) {
 	for _, entry := range entries {
 		if entry.Kind == KindAssistant {
@@ -658,6 +689,8 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 	return entries
 }
 
+// PendingApprovals returns copies of the tool calls waiting for Approve or
+// Reject. Changing them does not change what runs.
 func (s *Session) PendingApprovals() []*ToolCall {
 	resolved := make(map[string]bool)
 	decisions := make(map[string]bool)
@@ -677,7 +710,9 @@ func (s *Session) PendingApprovals() []*ToolCall {
 			id := entry.ToolCall.ID
 			if !resolved[id] && !decisions[id] && !seen[id] && s.agent.toolRequiresApproval(entry.ToolCall.Name) {
 				seen[id] = true
-				pending = append(pending, entry.ToolCall)
+				call := *entry.ToolCall
+				call.Args = slices.Clone(call.Args)
+				pending = append(pending, &call)
 			}
 		}
 	}
@@ -799,6 +834,13 @@ func (s *Session) dispatch(ctx context.Context, call *ToolCall, snapshot map[str
 	}
 
 	if delta != nil {
+		// A delta the store cannot encode would fail every write, so the tool
+		// would run again on each Resume. Report it to the model instead.
+		if _, err := json.Marshal(delta); err != nil {
+			result.Output = ""
+			result.Error = fmt.Sprintf("tool %q returned state that cannot be stored as JSON: %v", call.Name, err)
+			return []Entry{{Kind: KindToolResult, ToolResult: &result, At: start.UTC(), Duration: duration}}, nil
+		}
 		if delta.By == "" {
 			delta.By = call.Name
 		}

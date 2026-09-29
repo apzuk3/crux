@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -772,11 +773,13 @@ func TestFilesystemAtomicWrites(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
-	mustFSTool(t, registry, "write_file", writeFileInput{Path: "link.txt", Content: "via link"})
+	// Writing through a link would change a file the approval did not name.
+	wantFSError(t, registry, "write_file", writeFileInput{Path: "link.txt", Content: "via link"}, "symbolic link to b.txt")
+	wantFSError(t, registry, "edit_file", editFileInput{Path: "link.txt", Edits: []fileEdit{{OldText: "new", NewText: "via link"}}}, "symbolic link to b.txt")
 	if info, err := os.Lstat(filepath.Join(root, "link.txt")); err != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("write replaced the symlink: %v", err)
 	}
-	if data, _ := os.ReadFile(filepath.Join(root, "b.txt")); string(data) != "via link" {
+	if data, _ := os.ReadFile(filepath.Join(root, "b.txt")); string(data) != "new" {
 		t.Fatalf("link target = %q", data)
 	}
 }
@@ -788,4 +791,44 @@ func TestFilesystemEditFileSizeLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantFSError(t, registry, "edit_file", editFileInput{Path: "big.txt", Edits: []fileEdit{{OldText: "y", NewText: "z"}}}, "larger than")
+}
+
+func TestFilesystemConcurrentEditsAreNotLost(t *testing.T) {
+	registry, root := newFilesystemRegistry(t, map[string]string{"f.txt": "A\nB\n"})
+	for range 20 {
+		if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("A\nB\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			mustFSTool(t, registry, "edit_file", editFileInput{Path: "f.txt", Edits: []fileEdit{{OldText: "A", NewText: "a"}}})
+		})
+		wg.Go(func() {
+			mustFSTool(t, registry, "edit_file", editFileInput{Path: "f.txt", Edits: []fileEdit{{OldText: "B", NewText: "b"}}})
+		})
+		wg.Wait()
+		if data, _ := os.ReadFile(filepath.Join(root, "f.txt")); string(data) != "a\nb\n" {
+			t.Fatalf("f.txt = %q, want both edits", data)
+		}
+	}
+}
+
+func TestFilesystemRefusesWritesThroughSymlinkedDirectories(t *testing.T) {
+	registry, root := newFilesystemRegistry(t, map[string]string{"real/b.txt": "old"})
+	if err := os.Symlink("real", filepath.Join(root, "alias")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("cannot create symlinks: %v", err)
+		}
+		t.Fatal(err)
+	}
+	wantFSError(t, registry, "write_file", writeFileInput{Path: "alias/b.txt", Content: "changed"}, "alias is a symbolic link")
+	wantFSError(t, registry, "edit_file", editFileInput{Path: "alias/b.txt", Edits: []fileEdit{{OldText: "old", NewText: "changed"}}}, "alias is a symbolic link")
+	wantFSError(t, registry, "create_directory", directoriesInput{Paths: []string{"alias/sub"}}, "alias is a symbolic link")
+	if data, _ := os.ReadFile(filepath.Join(root, "real", "b.txt")); string(data) != "old" {
+		t.Fatalf("real/b.txt = %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(root, "real", "sub")); !os.IsNotExist(err) {
+		t.Fatal("create_directory went through the link")
+	}
+	mustFSTool(t, registry, "write_file", writeFileInput{Path: "new/dir/c.txt", Content: "c"})
 }

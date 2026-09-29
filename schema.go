@@ -2,6 +2,7 @@ package crux
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -14,7 +15,14 @@ import (
 func decodeJSONNumber(r io.Reader, target any) error {
 	dec := json.NewDecoder(r)
 	dec.UseNumber()
-	return dec.Decode(target)
+	if err := dec.Decode(target); err != nil {
+		return err
+	}
+	// Trailing data would make validation accept output that decoding rejects.
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("unexpected data after the JSON value")
+	}
+	return nil
 }
 
 // wireSchemaFor adapts a jsonschema.Schema for a specific provider's wire format.

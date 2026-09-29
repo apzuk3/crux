@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -115,6 +116,10 @@ func registerFSTool[In any](registry ToolsRegistry, name, description string, fn
 
 type fsTools struct {
 	root string
+	// writeMu runs the tools that change files one at a time. Calls from one
+	// model turn run concurrently, and two edits of the same file would
+	// otherwise both read the old content and one would be lost.
+	writeMu sync.Mutex
 }
 
 // open opens the root for one tool call. os.Root keeps every operation inside
@@ -755,6 +760,8 @@ type writeFileInput struct {
 }
 
 func (t *fsTools) writeFile(ctx context.Context, in writeFileInput) (string, error) {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
 	rel, err := t.resolve(in.Path)
 	if err != nil {
 		return "", err
@@ -765,6 +772,9 @@ func (t *fsTools) writeFile(ctx context.Context, in writeFileInput) (string, err
 	}
 	defer root.Close()
 
+	if err := refuseSymlinkParents(root, rel); err != nil {
+		return "", err
+	}
 	if dir := filepath.Dir(rel); dir != "." {
 		if err := root.MkdirAll(dir, 0o755); err != nil {
 			return "", fsError(in.Path, err)
@@ -787,6 +797,8 @@ type editFileInput struct {
 }
 
 func (t *fsTools) editFile(ctx context.Context, in editFileInput) (string, error) {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
 	if len(in.Edits) == 0 {
 		return "", errors.New("edits must not be empty")
 	}
@@ -800,6 +812,9 @@ func (t *fsTools) editFile(ctx context.Context, in editFileInput) (string, error
 	}
 	defer root.Close()
 
+	if err := refuseSymlinkParents(root, rel); err != nil {
+		return "", err
+	}
 	data, err := readForEdit(root, rel)
 	if err != nil {
 		return "", fsError(in.Path, err)
@@ -853,16 +868,14 @@ func readForEdit(root *os.Root, rel string) ([]byte, error) {
 
 // replaceFile writes data to a temporary file next to rel and renames it over
 // rel, so rel never holds partly written content. An existing file keeps its
-// permissions. A symlink is written through in place, so it stays a link.
+// permissions. Symlinks are not written through, because the change would
+// land on a file other than the one the approval named.
 func replaceFile(root *os.Root, rel string, data []byte) error {
 	perm, keepPerm := os.FileMode(0o644), false
 	if info, err := root.Lstat(rel); err == nil {
 		switch {
 		case info.Mode()&fs.ModeSymlink != 0:
-			if target, err := root.Stat(rel); err == nil && !target.Mode().IsRegular() {
-				return errNotRegular
-			}
-			return root.WriteFile(rel, data, perm)
+			return errSymlinkWrite(root, rel)
 		case info.IsDir():
 			return errIsDir
 		case !info.Mode().IsRegular():
@@ -898,11 +911,50 @@ func replaceFile(root *os.Root, rel string, data []byte) error {
 	return nil
 }
 
+// refuseSymlinkParents fails when a directory on the way to rel is a symbolic
+// link, since a change there would land somewhere the approval did not name.
+// Missing directories are fine; they are created as real directories.
+func refuseSymlinkParents(root *os.Root, rel string) error {
+	dir := filepath.Dir(rel)
+	if dir == "." {
+		return nil
+	}
+	var prefix string
+	for _, part := range strings.Split(filepath.ToSlash(dir), "/") {
+		prefix = filepath.Join(prefix, part)
+		info, err := root.Lstat(prefix)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symbolic link; use the path it points to instead", filepath.ToSlash(prefix))
+		}
+	}
+	return nil
+}
+
+// errSymlinkWrite names the link's target when it is a relative path, so the
+// model can write the target itself. An absolute target is not shown, because
+// it would reveal host paths.
+func errSymlinkWrite(root *os.Root, rel string) error {
+	target, err := root.Readlink(rel)
+	if err != nil || filepath.IsAbs(target) || filepath.VolumeName(target) != "" {
+		return errors.New("is a symbolic link; write to the file it points to instead")
+	}
+	target = filepath.ToSlash(filepath.Join(filepath.Dir(rel), target))
+	return fmt.Errorf("is a symbolic link to %s; write to that file instead", target)
+}
+
 type directoriesInput struct {
 	Paths []string `json:"paths" description:"Directories"`
 }
 
 func (t *fsTools) createDirectory(ctx context.Context, in directoriesInput) (string, error) {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
 	root, err := t.open()
 	if err != nil {
 		return "", err
@@ -915,6 +967,9 @@ func (t *fsTools) createDirectory(ctx context.Context, in directoriesInput) (str
 		if err != nil {
 			return "", err
 		}
+		if err := refuseSymlinkParents(root, filepath.Join(rel, "x")); err != nil {
+			return "", err
+		}
 		if err := root.MkdirAll(rel, 0o755); err != nil {
 			return "", fsError(name, err)
 		}
@@ -924,6 +979,8 @@ func (t *fsTools) createDirectory(ctx context.Context, in directoriesInput) (str
 }
 
 func (t *fsTools) removeDirectory(ctx context.Context, in directoriesInput) (string, error) {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
 	root, err := t.open()
 	if err != nil {
 		return "", err
@@ -938,6 +995,9 @@ func (t *fsTools) removeDirectory(ctx context.Context, in directoriesInput) (str
 		}
 		if rel == "." {
 			return "", errors.New("cannot remove the root directory")
+		}
+		if err := refuseSymlinkParents(root, rel); err != nil {
+			return "", err
 		}
 		info, err := root.Lstat(rel)
 		if err != nil {

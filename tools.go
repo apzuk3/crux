@@ -83,12 +83,23 @@ func RegisterToolStateMutate[In, Out any](name string, description string, fn fu
 
 // RegisterToolWithRegistry registers a tool in registry. It panics if name is
 // not a valid tool name (letters, digits, '_' and '-', at most 64 characters)
-// or is already registered, like http.HandleFunc does for a repeated pattern.
+// or is already registered, like http.HandleFunc does for a repeated pattern,
+// and if In is not a struct or map, since tool arguments are a JSON object. A
+// struct decoded by UnmarshalText, or by a decoder it gets from an embedded
+// field, is rejected too, because its fields do not describe its arguments.
 func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, description string, fn func(ctx context.Context, input In) (Out, *StateDelta, error), opts ...ToolOption) {
 	if err := validateToolName(name); err != nil {
 		panic(toolRegistrationError{err})
 	}
 	schema := jsonSchemaOf[In]()
+	if schema["type"] != "object" {
+		// Providers only accept tools whose arguments are a JSON object.
+		in := reflect.TypeFor[In]()
+		if in.Kind() == reflect.Struct {
+			panic(toolRegistrationError{fmt.Errorf("tool %q: input type %s must decode from a JSON object field by field; its UnmarshalText or embedded decoder does not", name, in)})
+		}
+		panic(toolRegistrationError{fmt.Errorf("tool %q: input type %s must be a struct or a map", name, in)})
+	}
 	validator, err := compileToolSchema(schema)
 	if err != nil {
 		panic(toolRegistrationError{fmt.Errorf("tool %q: %w", name, err)})
@@ -101,12 +112,15 @@ func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, 
 		kind:        toolKindTool,
 		invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
 			var input In
-			if len(args) > 0 {
+			if len(bytes.TrimSpace(args)) == 0 {
+				args = json.RawMessage(`{}`) // still checked for required arguments
+			}
+			{
 				var malformed string
 				if schema["type"] != "string" && args[0] == '"' && json.Unmarshal(args, &malformed) == nil {
 					return "", nil, fmt.Errorf("arguments for %q are not valid JSON: %s", name, malformed)
 				}
-				if err := checkToolArgs(args, schema, validator); err != nil {
+				if err := checkToolArgs(args, reflect.TypeFor[In](), validator); err != nil {
 					return "", nil, fmt.Errorf("invalid arguments for %q: %w", name, err)
 				}
 				if err := json.Unmarshal(args, &input); err != nil {
@@ -271,7 +285,41 @@ func jsonSchemaOf[In any]() map[string]any {
 // optional when it is a pointer or tagged omitempty. A `description` tag is
 // passed on to the model.
 func jsonSchema(t reflect.Type) map[string]any {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	// An input struct with its own UnmarshalJSON (often to fill in defaults)
+	// still describes its arguments with its fields.
+	if t.Kind() == reflect.Struct && t != timeType && !promotesUnmarshaler(t) &&
+		(reflect.PointerTo(t).Implements(jsonUnmarshalerType) || !reflect.PointerTo(t).Implements(textUnmarshalerType)) {
+		return structSchema(t, map[reflect.Type]bool{t: true})
+	}
 	return schemaOf(t, make(map[reflect.Type]bool))
+}
+
+// promotesUnmarshaler reports whether struct t gets UnmarshalJSON or
+// UnmarshalText from an embedded field. Decoding then fills only that field,
+// so t's own fields do not describe its arguments.
+func promotesUnmarshaler(t reflect.Type) bool {
+	for i := range t.NumField() {
+		field := t.Field(i)
+		if !field.Anonymous {
+			continue
+		}
+		for _, iface := range []reflect.Type{jsonUnmarshalerType, textUnmarshalerType} {
+			if field.Type.Implements(iface) || reflect.PointerTo(field.Type).Implements(iface) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// decodesItself reports whether values of t are decoded by their own
+// UnmarshalJSON or UnmarshalText rather than field by field.
+func decodesItself(t reflect.Type) bool {
+	p := reflect.PointerTo(t)
+	return p.Implements(jsonUnmarshalerType) || p.Implements(textUnmarshalerType)
 }
 
 var (
@@ -287,16 +335,15 @@ func schemaOf(t reflect.Type, visiting map[reflect.Type]bool) map[string]any {
 		t = t.Elem()
 	}
 
-	switch t.Kind() {
-	case reflect.Struct, reflect.Slice, reflect.Array, reflect.Map:
-		switch {
-		case t == timeType:
-			return map[string]any{"type": "string", "format": "date-time"}
-		case reflect.PointerTo(t).Implements(jsonUnmarshalerType):
-			return map[string]any{} // decoded by its own UnmarshalJSON
-		case reflect.PointerTo(t).Implements(textUnmarshalerType):
-			return map[string]any{"type": "string"}
-		}
+	// A type with its own decoder, such as an int enum read from names or
+	// slog.Level, is described by what that decoder accepts, not by its kind.
+	switch {
+	case t == timeType:
+		return map[string]any{"type": "string", "format": "date-time"}
+	case reflect.PointerTo(t).Implements(jsonUnmarshalerType):
+		return map[string]any{} // decoded by its own UnmarshalJSON
+	case reflect.PointerTo(t).Implements(textUnmarshalerType):
+		return map[string]any{"type": "string"}
 	}
 
 	switch t.Kind() {
@@ -315,7 +362,8 @@ func schemaOf(t reflect.Type, visiting map[reflect.Type]bool) map[string]any {
 		}
 		return map[string]any{"type": "array", "items": schemaOf(t.Elem(), visiting)}
 	case reflect.Array:
-		return map[string]any{"type": "array", "items": schemaOf(t.Elem(), visiting)}
+		// encoding/json drops extra elements and zero-fills missing ones.
+		return map[string]any{"type": "array", "items": schemaOf(t.Elem(), visiting), "minItems": t.Len(), "maxItems": t.Len()}
 	case reflect.Map:
 		return map[string]any{"type": "object", "additionalProperties": schemaOf(t.Elem(), visiting)}
 	case reflect.Struct:
@@ -331,6 +379,7 @@ func schemaOf(t reflect.Type, visiting map[reflect.Type]bool) map[string]any {
 }
 
 type schemaField struct {
+	typ      reflect.Type
 	name     string
 	depth    int
 	tagged   bool
@@ -417,6 +466,7 @@ func collectFields(t reflect.Type, depth int, required bool, visiting map[reflec
 		}
 
 		*out = append(*out, schemaField{
+			typ:      field.Type,
 			name:     name,
 			depth:    depth,
 			tagged:   tagged,
@@ -488,7 +538,7 @@ func compileToolSchema(schema map[string]any) (*sjs.Schema, error) {
 // arguments describes exactly what the tool receives. It then validates the
 // arguments against the input schema, treating null like a missing value as
 // encoding/json does.
-func checkToolArgs(args json.RawMessage, schema map[string]any, validator *sjs.Schema) error {
+func checkToolArgs(args json.RawMessage, input reflect.Type, validator *sjs.Schema) error {
 	dec := json.NewDecoder(bytes.NewReader(args))
 	dec.UseNumber()
 	doc, err := decodeStrictJSON(dec)
@@ -498,7 +548,7 @@ func checkToolArgs(args json.RawMessage, schema map[string]any, validator *sjs.S
 	if _, err := dec.Token(); err != io.EOF {
 		return errors.New("unexpected data after the arguments object")
 	}
-	doc, err = normalizeArgs(doc, schema, "")
+	doc, err = normalizeArgs(doc, input, "")
 	if err != nil {
 		return err
 	}
@@ -556,24 +606,44 @@ func decodeStrictJSON(dec *json.Decoder) (any, error) {
 }
 
 // normalizeArgs drops null object members and rejects keys that differ only
-// in case from a declared property.
-func normalizeArgs(value any, schema map[string]any, path string) (any, error) {
+// in case from a field of the Go type t, which encoding/json would decode into
+// that field anyway. It follows the Go type rather than the schema, because the
+// schema of a recursive type is cut off.
+func normalizeArgs(value any, t reflect.Type, path string) (any, error) {
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t != nil && path != "" && decodesItself(t) {
+		// A nested type with its own decoder may read any keys; the
+		// top-level input's own UnmarshalJSON is checked by its fields.
+		t = nil
+	}
 	switch v := value.(type) {
 	case map[string]any:
-		props, _ := schema["properties"].(map[string]any)
+		var fields map[string]reflect.Type
+		var elem reflect.Type
+		switch {
+		case t == nil:
+		case t.Kind() == reflect.Struct:
+			fields = jsonFields(t)
+		case t.Kind() == reflect.Map:
+			elem = t.Elem()
+		}
 		for key, item := range v {
-			if item == nil {
-				delete(v, key)
-				continue
-			}
-			sub, declared := props[key].(map[string]any)
-			if !declared {
-				for name := range props {
+			sub, declared := fields[key]
+			if !declared && fields != nil {
+				for name := range fields {
 					if strings.EqualFold(name, key) {
 						return nil, fmt.Errorf("argument %q must be spelled %q", path+key, path+name)
 					}
 				}
-				sub, _ = schema["additionalProperties"].(map[string]any)
+			}
+			if item == nil {
+				delete(v, key)
+				continue
+			}
+			if !declared {
+				sub = elem
 			}
 			normalized, err := normalizeArgs(item, sub, path+key+".")
 			if err != nil {
@@ -582,9 +652,12 @@ func normalizeArgs(value any, schema map[string]any, path string) (any, error) {
 			v[key] = normalized
 		}
 	case []any:
-		items, _ := schema["items"].(map[string]any)
+		var elem reflect.Type
+		if t != nil && (t.Kind() == reflect.Slice || t.Kind() == reflect.Array) {
+			elem = t.Elem()
+		}
 		for i, item := range v {
-			normalized, err := normalizeArgs(item, items, fmt.Sprintf("%s%d.", path, i))
+			normalized, err := normalizeArgs(item, elem, fmt.Sprintf("%s%d.", path, i))
 			if err != nil {
 				return nil, err
 			}
@@ -592,6 +665,30 @@ func normalizeArgs(value any, schema map[string]any, path string) (any, error) {
 		}
 	}
 	return value, nil
+}
+
+var jsonFieldsCache sync.Map // reflect.Type -> map[string]reflect.Type
+
+// jsonFields returns the JSON names encoding/json decodes into for struct t,
+// with the Go type of each field.
+func jsonFields(t reflect.Type) map[string]reflect.Type {
+	if cached, ok := jsonFieldsCache.Load(t); ok {
+		return cached.(map[string]reflect.Type)
+	}
+	var all []schemaField
+	collectFields(t, 0, true, map[reflect.Type]bool{t: true}, &all)
+	byName := make(map[string][]schemaField)
+	for _, f := range all {
+		byName[f.name] = append(byName[f.name], f)
+	}
+	fields := make(map[string]reflect.Type, len(byName))
+	for name, candidates := range byName {
+		if f, ok := dominantField(candidates); ok {
+			fields[name] = f.typ
+		}
+	}
+	jsonFieldsCache.Store(t, fields)
+	return fields
 }
 
 func validationMessages(err *sjs.ValidationError) []string {

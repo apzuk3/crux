@@ -113,7 +113,7 @@ func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Ent
 		return errors.New("agent cannot be nil")
 	}
 
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		now := time.Now().UTC()
 
 		// 1. Upsert crux_agents
@@ -187,6 +187,19 @@ func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Ent
 
 		return nil
 	})
+	if err == nil || errors.Is(err, ErrSessionConflict) || len(entries) == 0 {
+		return err
+	}
+	// Two writers can both pass the seq check; the unique index then rejects
+	// the second with a driver-specific error. Report it as a conflict.
+	var last uint64
+	if s.db.WithContext(ctx).Model(&logRecord{}).
+		Where("session_id = ?", dbUUID(sessionID)).
+		Select("COALESCE(MAX(seq), 0)").
+		Scan(&last).Error == nil && entries[0].Seq <= last {
+		return fmt.Errorf("%w: session %s already has entry %d", ErrSessionConflict, sessionID, entries[0].Seq)
+	}
+	return err
 }
 
 // Get retrieves all log entries for the specified session in sequential order.

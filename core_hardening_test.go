@@ -3,6 +3,8 @@ package crux
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"github.com/google/uuid"
+	"github.com/invopop/jsonschema"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
@@ -178,4 +181,215 @@ func TestZeroToolsRegistryPanicsWithAClearMessage(t *testing.T) {
 	require.PanicsWithValue(t, "crux: ToolsRegistry must be created with NewToolsRegistry", func() {
 		RegisterToolWithRegistry(reg, "x", "x", func(ctx context.Context, in struct{}) (string, *StateDelta, error) { return "", nil, nil })
 	})
+}
+
+func TestToolRegistrationRejectsNonObjectInput(t *testing.T) {
+	reg := NewToolsRegistry()
+	require.PanicsWithError(t, `tool "echo": input type string must be a struct or a map`, func() {
+		RegisterToolWithRegistry(reg, "echo", "e", func(ctx context.Context, in string) (string, *StateDelta, error) { return in, nil, nil })
+	})
+	require.NotPanics(t, func() {
+		RegisterToolWithRegistry(reg, "any_map", "m", func(ctx context.Context, in map[string]any) (string, *StateDelta, error) { return "", nil, nil })
+	})
+}
+
+func TestCanonicalDataRedactsBaseURLCredentials(t *testing.T) {
+	agent, err := New("a", "some-model", WithProvider(ProviderOpenAI), WithAPIKey("k"),
+		WithBaseURL("https://user:secret@gateway.example/v1?key=token123&region=eu"))
+	require.NoError(t, err)
+	data := string(agent.CanonicalData())
+	require.NotContains(t, data, "secret")
+	require.NotContains(t, data, "token123")
+	require.Contains(t, data, "gateway.example/v1")
+	require.Equal(t, "https://user:secret@gateway.example/v1?key=token123&region=eu", agent.BaseURL())
+}
+
+func TestReplaySkipsEmptyText(t *testing.T) {
+	log := []Entry{
+		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}},
+		{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: " "}}},
+		{Kind: KindToolCall, ToolCall: &ToolCall{ID: "c1", Name: "t", Args: []byte(`{}`)}},
+		{Kind: KindToolResult, ToolResult: &ToolResult{CallID: "c1", Output: "ok"}},
+	}
+
+	messages, err := toAnthropicMessages(log)
+	require.NoError(t, err)
+	require.Len(t, messages, 3)
+	require.Len(t, messages[1].Content, 1)
+	require.NotNil(t, messages[1].Content[0].OfToolUse)
+
+	contents, err := toGeminiContents(log)
+	require.NoError(t, err)
+	require.Len(t, contents, 3)
+	require.Len(t, contents[1].Parts, 1)
+	call := contents[1].Parts[0]
+	require.NotNil(t, call.FunctionCall)
+	require.NotEmpty(t, call.ThoughtSignature, "unsigned calls need Gemini 3's stand-in signature")
+}
+
+func TestEmptyToolArgumentsAreValidated(t *testing.T) {
+	type input struct {
+		Path string `json:"path"`
+	}
+	reg := NewToolsRegistry()
+	ran := false
+	RegisterToolWithRegistry(reg, "needs_path", "n", func(ctx context.Context, in input) (string, *StateDelta, error) {
+		ran = true
+		return "", nil, nil
+	})
+	for _, args := range []string{"", "  "} {
+		_, _, err := reg.tools["needs_path"].invoke(t.Context(), json.RawMessage(args))
+		require.ErrorContains(t, err, "path")
+	}
+	require.False(t, ran)
+}
+
+func TestOutputValidationRejectsTrailingData(t *testing.T) {
+	validator, err := compileValidator(&jsonschema.Schema{Type: "object"})
+	require.NoError(t, err)
+	require.NoError(t, validateOutput(validator, `{"a":1}`))
+	require.ErrorIs(t, validateOutput(validator, `{"a":1} and some prose`), ErrOutputValidation)
+}
+
+type recursiveNode struct {
+	Name     string          `json:"name"`
+	Children []recursiveNode `json:"children,omitempty"`
+}
+
+type defaultedInput struct {
+	Target string `json:"target"`
+	DryRun *bool  `json:"dry_run,omitempty"`
+}
+
+func (d *defaultedInput) UnmarshalJSON(data []byte) error {
+	type plain defaultedInput
+	return json.Unmarshal(data, (*plain)(d))
+}
+
+// Approval shows the raw arguments, so no key may reach a field under a
+// spelling the approval does not show.
+func TestToolArgumentCaseChecksCoverNullsAndRecursiveTypes(t *testing.T) {
+	reg := NewToolsRegistry()
+	var gotDefaulted defaultedInput
+	RegisterToolWithRegistry(reg, "deploy", "d", func(ctx context.Context, in defaultedInput) (string, *StateDelta, error) {
+		gotDefaulted = in
+		return "", nil, nil
+	})
+	RegisterToolWithRegistry(reg, "tree", "t", func(ctx context.Context, in recursiveNode) (string, *StateDelta, error) {
+		return "", nil, nil
+	})
+	require.Equal(t, "object", reg.tools["deploy"].schema["type"], "a struct with UnmarshalJSON is described by its fields")
+
+	_, _, err := reg.tools["deploy"].invoke(t.Context(), json.RawMessage(`{"target":"prod","dry_run":true,"DRY_RUN":null}`))
+	require.ErrorContains(t, err, `must be spelled "dry_run"`)
+
+	_, _, err = reg.tools["tree"].invoke(t.Context(), json.RawMessage(`{"name":"root","children":[{"name":"safe","NAME":"evil"}]}`))
+	require.ErrorContains(t, err, `must be spelled "children.0.name"`)
+
+	_, _, err = reg.tools["deploy"].invoke(t.Context(), json.RawMessage(`{"target":"prod","dry_run":true}`))
+	require.NoError(t, err)
+	require.True(t, *gotDefaulted.DryRun)
+}
+
+type promotedBase struct {
+	Mode string `json:"mode"`
+}
+
+func (b *promotedBase) UnmarshalJSON(data []byte) error {
+	type plain promotedBase
+	return json.Unmarshal(data, (*plain)(b))
+}
+
+func TestToolInputsThatDecodeDifferentlyFromTheirFields(t *testing.T) {
+	type promoted struct {
+		promotedBase
+		DryRun bool `json:"dry_run"`
+	}
+	reg := NewToolsRegistry()
+	// Only the embedded field would be decoded, so the fields cannot describe it.
+	require.Panics(t, func() {
+		RegisterToolWithRegistry(reg, "promoted", "p", func(ctx context.Context, in promoted) (string, *StateDelta, error) { return "", nil, nil })
+	})
+
+	type fixed struct {
+		Paths [1]string `json:"paths"`
+	}
+	RegisterToolWithRegistry(reg, "fixed", "f", func(ctx context.Context, in fixed) (string, *StateDelta, error) { return "", nil, nil })
+	_, _, err := reg.tools["fixed"].invoke(t.Context(), json.RawMessage(`{"paths":["a","b"]}`))
+	require.Error(t, err)
+	_, _, err = reg.tools["fixed"].invoke(t.Context(), json.RawMessage(`{"paths":["a"]}`))
+	require.NoError(t, err)
+}
+
+type textDecodedInput struct {
+	Path string `json:"path"`
+}
+
+func (t *textDecodedInput) UnmarshalText(data []byte) error { t.Path = string(data); return nil }
+
+type selfDecodedMap map[string]struct {
+	Name string `json:"name"`
+}
+
+func (m *selfDecodedMap) UnmarshalJSON(data []byte) error {
+	var raw map[string]map[string]string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*m = make(selfDecodedMap)
+	for key, value := range raw {
+		(*m)[key] = struct {
+			Name string `json:"name"`
+		}{Name: value["NAME"]}
+	}
+	return nil
+}
+
+func TestToolInputsWithOwnDecoders(t *testing.T) {
+	reg := NewToolsRegistry()
+	require.PanicsWithError(t, `tool "text": input type crux.textDecodedInput must decode from a JSON object field by field; its UnmarshalText or embedded decoder does not`, func() {
+		RegisterToolWithRegistry(reg, "text", "t", func(ctx context.Context, in textDecodedInput) (string, *StateDelta, error) { return "", nil, nil })
+	})
+
+	type withMap struct {
+		M selfDecodedMap `json:"m"`
+	}
+	var got withMap
+	RegisterToolWithRegistry(reg, "nested", "n", func(ctx context.Context, in withMap) (string, *StateDelta, error) {
+		got = in
+		return "", nil, nil
+	})
+	_, _, err := reg.tools["nested"].invoke(t.Context(), json.RawMessage(`{"m":{"x":{"NAME":"v"}}}`))
+	require.NoError(t, err)
+	require.Equal(t, "v", got.M["x"].Name)
+}
+
+type namedPriority int
+
+func (p *namedPriority) UnmarshalText(data []byte) error {
+	switch string(data) {
+	case "low":
+		*p = 1
+	case "high":
+		*p = 2
+	default:
+		return fmt.Errorf("unknown priority %q", data)
+	}
+	return nil
+}
+
+func TestScalarInputsWithOwnDecoders(t *testing.T) {
+	type input struct {
+		P namedPriority `json:"p"`
+		L slog.Level    `json:"l"`
+	}
+	reg := NewToolsRegistry()
+	var got input
+	RegisterToolWithRegistry(reg, "prio", "p", func(ctx context.Context, in input) (string, *StateDelta, error) {
+		got = in
+		return "", nil, nil
+	})
+	_, _, err := reg.tools["prio"].invoke(t.Context(), json.RawMessage(`{"p":"high","l":"WARN"}`))
+	require.NoError(t, err)
+	require.Equal(t, input{P: 2, L: slog.LevelWarn}, got)
 }

@@ -3,11 +3,13 @@ package crux
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"google.golang.org/genai"
@@ -131,7 +133,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		}
 		produced = append(produced, entry)
 	}
-	if len(produced) == 0 {
+	if !hasAnswerOrCall(produced) {
 		// The model may stop (finish reason STOP) without saying anything;
 		// that is still a final answer, and its usage must not be lost.
 		// https://ai.google.dev/api/generate-content#FinishReason
@@ -325,6 +327,12 @@ func toGeminiContents(log []Entry) ([]*genai.Content, error) {
 	return contents, nil
 }
 
+// geminiStandInSignature is the documented "skip_thought_signature_validator"
+// value. The field is bytes sent as base64, so it holds that string decoded;
+// Go encodes it with the standard alphabet ('/' for '_'), which the API
+// decodes to the same bytes.
+var geminiStandInSignature, _ = base64.URLEncoding.DecodeString("skip_thought_signature_validator")
+
 // toGeminiParts renders an entry as content parts.
 func toGeminiParts(e Entry, calls map[string]*genai.FunctionCall) ([]*genai.Part, error) {
 	if raw := e.Opaque[geminiPartOpaqueKey]; len(raw) > 0 && e.Kind != KindUser && e.Kind != KindToolResult {
@@ -341,6 +349,9 @@ func toGeminiParts(e Entry, calls map[string]*genai.FunctionCall) ([]*genai.Part
 			if part.Kind != ContentKindText && part.Kind != ContentKindRefusal {
 				return nil, fmt.Errorf("unsupported content part kind %q", part.Kind)
 			}
+			if strings.TrimSpace(part.Text) == "" {
+				continue // Gemini rejects empty text parts.
+			}
 			parts = append(parts, genai.NewPartFromText(part.Text))
 		}
 	case KindReasoning:
@@ -356,7 +367,13 @@ func toGeminiParts(e Entry, calls map[string]*genai.FunctionCall) ([]*genai.Part
 				return nil, fmt.Errorf("decode Gemini function arguments: %w", err)
 			}
 		}
-		parts = []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: call.ID, Name: call.Name, Args: args}}}
+		// History from another provider has no thought signature, which
+		// Gemini 3 requires on function calls; this is the documented stand-in:
+		// https://ai.google.dev/gemini-api/docs/thought-signatures
+		parts = []*genai.Part{{
+			FunctionCall:     &genai.FunctionCall{ID: call.ID, Name: call.Name, Args: args},
+			ThoughtSignature: geminiStandInSignature,
+		}}
 	case KindToolResult:
 		if e.ToolResult == nil {
 			return nil, errors.New("tool result entry carries no tool result")
