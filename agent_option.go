@@ -185,6 +185,7 @@ func WithModel(model string) AgentOption {
 }
 
 // WithMaxTurns limits how many model requests one Run may make. The default is 10.
+// Requests that repair invalid output (WithMaxRepairs) are not counted.
 func WithMaxTurns(turns int) AgentOption {
 	return func(a *Agent) error {
 		if turns < 1 {
@@ -241,6 +242,8 @@ func WithTemperature(temperature float64) AgentOption {
 
 // WithMaxRepairs sets the number of attempts the agent will make
 // to ask the model to repair its response if output validation fails.
+// Each Run or Resume has this many repairs, on top of WithMaxTurns; Resume
+// also repairs a stored final answer that fails validation.
 func WithMaxRepairs(repairs int) AgentOption {
 	return func(a *Agent) error {
 		if repairs < 0 {

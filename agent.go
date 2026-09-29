@@ -439,14 +439,24 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 		return "", fmt.Errorf("invalid output schema: %w", err)
 	}
 
+	repairsLeft := s.agent.maxRepairs
 	if input == nil {
 		if text, ok := s.FinalOutput(); ok {
-			if validator != nil {
-				if err := validateOutput(validator, text); err != nil {
-					return "", err
-				}
+			if validator == nil {
+				return text, nil
 			}
-			return text, nil
+			valErr := validateOutput(validator, text)
+			if valErr == nil {
+				return text, nil
+			}
+			if repairsLeft == 0 {
+				return "", valErr
+			}
+			// A stored answer that fails validation is repaired like a new one.
+			repairsLeft--
+			if err := s.requestRepair(ctx, valErr); err != nil {
+				return "", err
+			}
 		}
 	}
 
@@ -470,9 +480,9 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 		}
 	}
 
-	repairsLeft := s.agent.maxRepairs
 	// ---> Notify start
-	for turn := 0; turn < s.agent.maxTurns; turn++ {
+	// Repair requests do not count against maxTurns.
+	for turn := 0; turn < s.agent.maxTurns+s.agent.maxRepairs-repairsLeft; turn++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -526,14 +536,9 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 		if text, ok := s.FinalOutput(); ok {
 			if validator != nil {
 				if valErr := validateOutput(validator, text); valErr != nil {
-					if repairsLeft > 0 && turn+1 < s.agent.maxTurns {
+					if repairsLeft > 0 {
 						repairsLeft--
-						repairMsg := fmt.Sprintf("Return corrected JSON. Output validation failed: %v", valErr)
-						entry, err := NewUserEntry(repairMsg)
-						if err != nil {
-							return "", err
-						}
-						if err := s.appendLogs(ctx, entry); err != nil {
+						if err := s.requestRepair(ctx, valErr); err != nil {
 							return "", err
 						}
 						continue
@@ -547,6 +552,15 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 	}
 
 	return "", fmt.Errorf("%w (%d)", ErrMaxTurns, s.agent.maxTurns)
+}
+
+// requestRepair asks the model to correct an answer that failed validation.
+func (s *Session) requestRepair(ctx context.Context, valErr error) error {
+	entry, err := NewUserEntry(fmt.Sprintf("Return corrected JSON. Output validation failed: %v", valErr))
+	if err != nil {
+		return err
+	}
+	return s.appendLogs(ctx, entry)
 }
 
 func (s *Session) step(ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error) {
