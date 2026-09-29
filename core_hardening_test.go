@@ -318,3 +318,46 @@ func TestToolInputsThatDecodeDifferentlyFromTheirFields(t *testing.T) {
 	_, _, err = reg.tools["fixed"].invoke(t.Context(), json.RawMessage(`{"paths":["a"]}`))
 	require.NoError(t, err)
 }
+
+type textDecodedInput struct {
+	Path string `json:"path"`
+}
+
+func (t *textDecodedInput) UnmarshalText(data []byte) error { t.Path = string(data); return nil }
+
+type selfDecodedMap map[string]struct {
+	Name string `json:"name"`
+}
+
+func (m *selfDecodedMap) UnmarshalJSON(data []byte) error {
+	var raw map[string]map[string]string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*m = make(selfDecodedMap)
+	for key, value := range raw {
+		(*m)[key] = struct {
+			Name string `json:"name"`
+		}{Name: value["NAME"]}
+	}
+	return nil
+}
+
+func TestToolInputsWithOwnDecoders(t *testing.T) {
+	reg := NewToolsRegistry()
+	require.PanicsWithError(t, `tool "text": input type crux.textDecodedInput must decode from a JSON object field by field; its UnmarshalText or embedded decoder does not`, func() {
+		RegisterToolWithRegistry(reg, "text", "t", func(ctx context.Context, in textDecodedInput) (string, *StateDelta, error) { return "", nil, nil })
+	})
+
+	type withMap struct {
+		M selfDecodedMap `json:"m"`
+	}
+	var got withMap
+	RegisterToolWithRegistry(reg, "nested", "n", func(ctx context.Context, in withMap) (string, *StateDelta, error) {
+		got = in
+		return "", nil, nil
+	})
+	_, _, err := reg.tools["nested"].invoke(t.Context(), json.RawMessage(`{"m":{"x":{"NAME":"v"}}}`))
+	require.NoError(t, err)
+	require.Equal(t, "v", got.M["x"].Name)
+}

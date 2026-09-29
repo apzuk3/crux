@@ -84,7 +84,9 @@ func RegisterToolStateMutate[In, Out any](name string, description string, fn fu
 // RegisterToolWithRegistry registers a tool in registry. It panics if name is
 // not a valid tool name (letters, digits, '_' and '-', at most 64 characters)
 // or is already registered, like http.HandleFunc does for a repeated pattern,
-// and if In is not a struct or map, since tool arguments are a JSON object.
+// and if In is not a struct or map, since tool arguments are a JSON object. A
+// struct decoded by UnmarshalText, or by a decoder it gets from an embedded
+// field, is rejected too, because its fields do not describe its arguments.
 func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, description string, fn func(ctx context.Context, input In) (Out, *StateDelta, error), opts ...ToolOption) {
 	if err := validateToolName(name); err != nil {
 		panic(toolRegistrationError{err})
@@ -92,7 +94,11 @@ func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, 
 	schema := jsonSchemaOf[In]()
 	if schema["type"] != "object" {
 		// Providers only accept tools whose arguments are a JSON object.
-		panic(toolRegistrationError{fmt.Errorf("tool %q: input type %s must be a struct or a map", name, reflect.TypeFor[In]())})
+		in := reflect.TypeFor[In]()
+		if in.Kind() == reflect.Struct {
+			panic(toolRegistrationError{fmt.Errorf("tool %q: input type %s must decode from a JSON object field by field; its UnmarshalText or embedded decoder does not", name, in)})
+		}
+		panic(toolRegistrationError{fmt.Errorf("tool %q: input type %s must be a struct or a map", name, in)})
 	}
 	validator, err := compileToolSchema(schema)
 	if err != nil {
@@ -284,7 +290,8 @@ func jsonSchema(t reflect.Type) map[string]any {
 	}
 	// An input struct with its own UnmarshalJSON (often to fill in defaults)
 	// still describes its arguments with its fields.
-	if t.Kind() == reflect.Struct && t != timeType && !promotesUnmarshaler(t) {
+	if t.Kind() == reflect.Struct && t != timeType && !promotesUnmarshaler(t) &&
+		(reflect.PointerTo(t).Implements(jsonUnmarshalerType) || !reflect.PointerTo(t).Implements(textUnmarshalerType)) {
 		return structSchema(t, map[reflect.Type]bool{t: true})
 	}
 	return schemaOf(t, make(map[reflect.Type]bool))
@@ -607,15 +614,18 @@ func normalizeArgs(value any, t reflect.Type, path string) (any, error) {
 	for t != nil && t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
+	if t != nil && path != "" && decodesItself(t) {
+		// A nested type with its own decoder may read any keys; the
+		// top-level input's own UnmarshalJSON is checked by its fields.
+		t = nil
+	}
 	switch v := value.(type) {
 	case map[string]any:
 		var fields map[string]reflect.Type
 		var elem reflect.Type
 		switch {
 		case t == nil:
-		case t.Kind() == reflect.Struct && (path == "" || !decodesItself(t)):
-			// A nested type with its own decoder may read any keys; the
-			// top-level input's own UnmarshalJSON is checked by its fields.
+		case t.Kind() == reflect.Struct:
 			fields = jsonFields(t)
 		case t.Kind() == reflect.Map:
 			elem = t.Elem()
