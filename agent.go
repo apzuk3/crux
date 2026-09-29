@@ -733,11 +733,15 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 		return nil
 	}
 
-	// Calls from one model turn run concurrently and see the same state; their
-	// results are recorded in the order the model requested them.
+	// Calls from one model turn run concurrently, at most
+	// maxConcurrentToolCalls at a time, and see the same state; their results
+	// are recorded in the order the model requested them.
+	const maxConcurrentToolCalls = 8
 	state := s.StateSnapshot()
 	results := make([][]Entry, len(unexecuted))
+	slots := make(chan struct{}, maxConcurrentToolCalls)
 	var wg sync.WaitGroup
+calls:
 	for i, open := range unexecuted {
 		if ctx.Err() != nil {
 			break
@@ -757,7 +761,13 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 			continue
 		}
 
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			break calls
+		}
 		wg.Go(func() {
+			defer func() { <-slots }()
 			results[i], _ = s.dispatch(ctx, call, state)
 		})
 	}
