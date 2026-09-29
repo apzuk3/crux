@@ -24,7 +24,7 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
 - **Toolsets** group tools. A `Toolset` registers its tools in `Register(registry)` and labels each one with the `WithToolset(name)` tool option; `AddToolset`/`AddToolsetWithRegistry` call `Register`. Agents select a whole set with `WithToolsets`/`WithToolsetsRegistry`, which add to the tool list (unlike `WithTools`, which replaces it).
 - **Agent** (`agent.go`): an immutable, stateless blueprint (model, instructions, tool names, limits), safe for concurrent use. Its ID is derived from `CanonicalData()` unless `WithAgentID` is given.
 - **Session** (`agent.go`): one conversation, stored as an append-only log of `Entry` values (`types.go`). Not safe for concurrent use. `Run`/`RunInto`/`Stream` drive the loop:
-  1. run any pending tool calls (the calls from one model turn run concurrently; results keep the model's order);
+  1. run any pending tool calls (the calls from one model turn run concurrently, at most 8 at a time; results keep the model's order);
   2. call the provider (`step`);
   3. append what the model produced;
   4. stop on approvals, refusals or a final answer; otherwise repeat, up to `maxTurns`.

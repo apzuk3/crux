@@ -1,8 +1,13 @@
 package crux
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -37,4 +42,37 @@ func TestRegexSearchReadsOnlyTheStartOfLongLines(t *testing.T) {
 	got = mustFSTool(t, registry, "search_files_content", searchFilesContentInput{Query: "needle"})
 	require.Contains(t, got, "a.txt:2:1501: ")
 	require.NotContains(t, got, "Lines longer than")
+}
+
+func TestToolCallsFromOneTurnRunAtMostEightAtATime(t *testing.T) {
+	var running, peak atomic.Int32
+	slow := Tool{
+		name: "slow",
+		kind: toolKindTool,
+		invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
+			n := running.Add(1)
+			for {
+				p := peak.Load()
+				if n <= p || peak.CompareAndSwap(p, n) {
+					break
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+			running.Add(-1)
+			return string(args), nil, nil
+		},
+	}
+	agent := &Agent{tools: []Tool{slow}}
+	var logs []Entry
+	for i := range 20 {
+		logs = append(logs, Entry{Kind: KindToolCall, ToolCall: &ToolCall{ID: fmt.Sprintf("c%d", i), Name: "slow", Args: json.RawMessage(fmt.Sprintf(`{"i":%d}`, i))}})
+	}
+	session := MustSession(NewSession(t.Context(), agent, WithSessionLogs(logs)))
+
+	results := session.executeUnexecutedToolCalls(t.Context())
+	require.Len(t, results, 20)
+	for i, result := range results {
+		require.Equal(t, fmt.Sprintf("c%d", i), result.ToolResult.CallID)
+	}
+	require.Equal(t, int32(8), peak.Load())
 }
