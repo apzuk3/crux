@@ -68,7 +68,7 @@ func main() {
 
 | | |
 |---|---|
-| **Tool** | A Go function `func(ctx, In) (Out, error)` registered with `RegisterTool`. Tools live in a registry (the default one or your own `NewToolsRegistry`), not inside an agent, so any package can contribute tools. |
+| **Tool** | A Go function `func(ctx, In) (Out, error)` registered with `RegisterTool`. Tools live in a registry (the default one or your own `NewToolsRegistry`), not inside an agent, so any package can contribute tools. Registering a name twice panics. When the model calls several tools in one turn, they run concurrently. |
 | **Agent** | An immutable blueprint: model, instructions, and the names of the tools it may use. It is safe to share across goroutines. |
 | **Session** | One conversation with an agent. It holds an append-only log of entries (user input, assistant text, tool calls and results). It must not be used from multiple goroutines at once. |
 | **Store** | Where a session's log is persisted. The default is in memory. |
@@ -151,6 +151,8 @@ agent := crux.Must(crux.New("coder", crux.ChatModelGPT5_4, crux.WithToolsets("fi
 | `create_directory` | create directories | yes |
 | `remove_directory` | remove empty directories | yes |
 
+Read-only tools run without approval, so the model can read any file under `root` (including `.env` files and keys) and its content is sent to the provider. Point `root` at the narrowest directory the agent needs. Each call is bounded (1 MB per file read, capped listings, walks and searches), and output that hits a limit ends with a note telling the model how to narrow the request. Writes and edits replace the file atomically.
+
 ### Tool approvals
 
 ```go
@@ -197,6 +199,8 @@ session, _ = crux.NewSession(ctx, agent, crux.WithStore(store), crux.WithSession
 
 The store is the source of truth: an entry joins the session only once the store has saved it. If a write fails, `Run` returns the error and the session is unchanged, so a tool whose result was not saved runs again on the next `Run` or `Resume`. Make tools with side effects idempotent.
 
+If two `Session` values for the same ID write to one store (for example two requests for the same chat), the second write fails with `ErrSessionConflict`. Load the session again with `WithSessionID` and retry.
+
 ### Forking
 
 ```go
@@ -206,7 +210,9 @@ forked, err := session.Fork(ctx, crux.WithModel(crux.Gemini3_8Flash), crux.WithP
 
 ### Errors
 
-`Run` returns sentinel errors you can check with `errors.Is`: `ErrApprovalNeeded`, `ErrMaxTurns`, `ErrRefused`, `ErrOutputValidation`. A tool that returns an error or panics does not stop the run. The error is sent to the model as the tool result so it can recover.
+`Run` returns sentinel errors you can check with `errors.Is`: `ErrApprovalNeeded`, `ErrMaxTurns`, `ErrRefused`, `ErrOutputValidation`, `ErrSessionConflict`. A tool that returns an error or panics does not stop the run, and neither do arguments that don't match the tool's input type. The error is sent to the model as the tool result so it can recover.
+
+If `Run` fails after your input was recorded (a network error, say), retry with `Resume`. Calling `Run` again with the same input adds it to the conversation twice.
 
 ## Providers
 

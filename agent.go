@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"net/http"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -107,10 +107,12 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 		session.logs = stored
 	case len(session.logs) > 0:
 		now := time.Now().UTC()
+		var prev uint64
 		for i := range session.logs {
-			if session.logs[i].Seq == 0 {
-				session.logs[i].Seq = uint64(i + 1)
+			if session.logs[i].Seq <= prev {
+				session.logs[i].Seq = prev + 1
 			}
+			prev = session.logs[i].Seq
 			if session.logs[i].At.IsZero() {
 				session.logs[i].At = now
 			}
@@ -167,10 +169,12 @@ func (s *Session) Store() Store {
 // session is unchanged, so the entries are produced again on the next run.
 func (s *Session) appendLogs(ctx context.Context, entries ...Entry) error {
 	now := time.Now().UTC()
+	var last uint64
+	if n := len(s.logs); n > 0 {
+		last = s.logs[n-1].Seq
+	}
 	for i := range entries {
-		if entries[i].Seq == 0 {
-			entries[i].Seq = uint64(len(s.logs) + i + 1)
-		}
+		entries[i].Seq = last + uint64(i) + 1
 		if entries[i].At.IsZero() {
 			entries[i].At = now
 		}
@@ -206,6 +210,14 @@ func New(name, model string, opts ...AgentOption) (*Agent, error) {
 
 	if agent.provider == "" {
 		agent.provider = inferProvider(agent.model)
+	}
+
+	seen := make(map[string]bool, len(agent.tools))
+	for _, tool := range agent.tools {
+		if seen[tool.name] {
+			return nil, fmt.Errorf("agent %q has two tools named %q", agent.name, tool.name)
+		}
+		seen[tool.name] = true
 	}
 
 	if agent.provider == "" {
@@ -248,8 +260,8 @@ func Must(agent *Agent, err error) *Agent {
 	return agent
 }
 
-// AgentNamespace is the base UUID namespace for computing deterministic agent IDs.
-var AgentNamespace = uuid.MustParse("e0f4f9a0-6f91-4c74-9844-3bfa3eb238b1")
+// agentNamespace is the base UUID namespace for computing deterministic agent IDs.
+var agentNamespace = uuid.MustParse("e0f4f9a0-6f91-4c74-9844-3bfa3eb238b1")
 
 func (a *Agent) CanonicalData() []byte {
 	var toolNames []string
@@ -278,7 +290,7 @@ func (a *Agent) CanonicalData() []byte {
 }
 
 func (a *Agent) computeAgentID() uuid.UUID {
-	return uuid.NewSHA1(AgentNamespace, a.CanonicalData())
+	return uuid.NewSHA1(agentNamespace, a.CanonicalData())
 }
 
 func (a *Agent) ID() uuid.UUID {
@@ -324,7 +336,9 @@ func (a *Agent) ToolNames() []string {
 
 // Run continues the retained conversation and returns its final text response.
 // User inputs, model entries, and tool results are retained even if a later step
-// fails. Run must not execute concurrently with other operations on the session.
+// fails, so retry a failed Run with Resume: calling Run again with the same
+// input would add it to the conversation twice. Run must not execute
+// concurrently with other operations on the session.
 func (s *Session) Run(ctx context.Context, input any) (string, error) {
 	return s.run(ctx, input, nil)
 }
@@ -607,11 +621,13 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 		return nil
 	}
 
+	// Calls from one model turn run concurrently and see the same state; their
+	// results are recorded in the order the model requested them.
 	state := s.StateSnapshot()
-	var entries []Entry
-	// Execute in the exact order requested by the model.
-	for _, call := range unexecuted {
-		if err := ctx.Err(); err != nil {
+	results := make([][]Entry, len(unexecuted))
+	var wg sync.WaitGroup
+	for i, call := range unexecuted {
+		if ctx.Err() != nil {
 			break
 		}
 
@@ -625,22 +641,20 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 				CallID: call.ID,
 				Error:  reason,
 			}
-			entries = append(entries, Entry{Kind: KindToolResult, ToolResult: &result, At: time.Now().UTC()})
+			results[i] = []Entry{{Kind: KindToolResult, ToolResult: &result, At: time.Now().UTC()}}
 			continue
 		}
 
-		results, delta := s.dispatch(ctx, call, state)
-		entries = append(entries, results...)
-		if delta != nil {
-			if delta.Set != nil {
-				maps.Copy(state, delta.Set)
-			}
-			for _, key := range delta.Delete {
-				delete(state, key)
-			}
-		}
+		wg.Go(func() {
+			results[i], _ = s.dispatch(ctx, call, state)
+		})
 	}
+	wg.Wait()
 
+	var entries []Entry
+	for _, result := range results {
+		entries = append(entries, result...)
+	}
 	return entries
 }
 

@@ -65,7 +65,15 @@ func cleanBaseSchema(m map[string]any) {
 //   - Optional properties are placed in "required" and marked nullable ("anyOf": [prop, {"type": "null"}]).
 //   - "additionalProperties": false on every object.
 //   - Dynamic map/dictionary schemas (arbitrary keys) are rejected in strict mode.
+//   - The root must be an object (Ollama excepted):
+//     https://platform.openai.com/docs/guides/structured-outputs#supported-schemas
 func adaptOpenAI(root map[string]any, provider Provider) (map[string]any, error) {
+	// Ollama does not enforce strict mode and accepts any root.
+	if provider != ProviderOllama {
+		if typ, ok := root["type"]; ok && typ != "object" {
+			return nil, fmt.Errorf("%s structured outputs require an object at the root of the output schema, got type %v; wrap the value in a struct field", provider, typ)
+		}
+	}
 	err := walkSchemas(root, func(m map[string]any) error {
 		isObject := m["type"] == "object" || m["properties"] != nil
 		if !isObject {
@@ -117,52 +125,77 @@ func adaptOpenAI(root map[string]any, provider Provider) (map[string]any, error)
 
 // adaptAnthropic adapts schemas for Anthropic Claude structured outputs.
 // Official documentation:
-//   - Anthropic Structured Outputs: https://docs.anthropic.com/en/docs/build-with-claude/structured-outputs
+//   - Anthropic Structured Outputs: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
 //
 // Requirements:
 //   - "additionalProperties": false on all objects.
 //   - Dynamic map/dictionary schemas are not supported.
-//   - Numeric validation constraints ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")
-//     are not supported as schema keywords and must be transformed into descriptions.
+//   - Numeric, string length, pattern and most array constraints are not
+//     supported as schema keywords ("JSON Schema limitations" in the page
+//     above), so they move into the description of the schema that had them.
+//     Output validation still enforces them.
 func adaptAnthropic(root map[string]any) (map[string]any, error) {
 	err := walkSchemas(root, func(m map[string]any) error {
+		moveToDescription(m, anthropicUnsupportedKeywords)
+		if minItems, ok := m["minItems"]; ok && !isZeroOrOne(minItems) {
+			moveToDescription(m, []string{"minItems"})
+		}
+
 		isObject := m["type"] == "object" || m["properties"] != nil
 		if !isObject {
 			return nil
 		}
-
 		if additional, exists := m["additionalProperties"]; exists && additional != false {
 			return fmt.Errorf("anthropic does not support dynamic map schemas in structured outputs")
 		}
 		m["additionalProperties"] = false
-
-		props, ok := m["properties"].(map[string]any)
-		if !ok {
-			return nil
-		}
-
-		for _, propVal := range props {
-			prop, ok := propVal.(map[string]any)
-			if !ok {
-				continue
-			}
-			for _, constraint := range []string{"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"} {
-				val, exists := prop[constraint]
-				if !exists {
-					continue
-				}
-				delete(prop, constraint)
-				descStr := fmt.Sprintf("%s=%v", constraint, val)
-				if d, ok := prop["description"].(string); ok && strings.TrimSpace(d) != "" {
-					prop["description"] = strings.TrimSpace(d) + ", " + descStr
-				} else {
-					prop["description"] = descStr
-				}
-			}
-		}
 		return nil
 	})
 	return root, err
+}
+
+// anthropicUnsupportedKeywords are constraints Anthropic structured outputs
+// reject. minItems is supported only as 0 or 1 and is handled separately.
+var anthropicUnsupportedKeywords = []string{
+	"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+	"minLength", "maxLength", "pattern",
+	"maxItems", "uniqueItems", "minContains", "maxContains",
+	"minProperties", "maxProperties",
+}
+
+// moveToDescription removes the given keywords from a schema and records them
+// in its description, so the model still sees them.
+func moveToDescription(m map[string]any, keywords []string) {
+	var notes []string
+	for _, keyword := range keywords {
+		value, exists := m[keyword]
+		if !exists {
+			continue
+		}
+		delete(m, keyword)
+		notes = append(notes, fmt.Sprintf("%s=%v", keyword, value))
+	}
+	if len(notes) == 0 {
+		return
+	}
+	note := strings.Join(notes, ", ")
+	if d, ok := m["description"].(string); ok && strings.TrimSpace(d) != "" {
+		m["description"] = strings.TrimSpace(d) + ", " + note
+	} else {
+		m["description"] = note
+	}
+}
+
+func isZeroOrOne(value any) bool {
+	switch v := value.(type) {
+	case json.Number:
+		return v == "0" || v == "1"
+	case float64:
+		return v == 0 || v == 1
+	case int:
+		return v == 0 || v == 1
+	}
+	return false
 }
 
 // adaptPermissive adapts schemas for providers supporting dynamic dictionaries (Google Gemini).

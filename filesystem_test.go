@@ -1,12 +1,17 @@
 package crux
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 func newFilesystemRegistry(t *testing.T, files map[string]string) (ToolsRegistry, string) {
@@ -319,7 +324,7 @@ func TestFilesystemEditFile(t *testing.T) {
 	}
 	wantFSError(t, registry, "edit_file", editFileInput{Path: "a.go", Edits: []fileEdit{{OldText: "\n", NewText: ""}}}, "appears 4 times")
 	wantFSError(t, registry, "edit_file", editFileInput{Path: "a.go", Edits: []fileEdit{{OldText: "", NewText: "x"}}}, "must not be empty")
-	wantFSError(t, registry, "edit_file", editFileInput{Path: "a.go"}, "edits must not be empty")
+	wantFSError(t, registry, "edit_file", editFileInput{Path: "a.go", Edits: []fileEdit{}}, "edits must not be empty")
 	wantFSError(t, registry, "edit_file", editFileInput{Path: "missing.go", Edits: []fileEdit{{OldText: "a", NewText: "b"}}}, "not found")
 
 	mustFSTool(t, registry, "edit_file", editFileInput{Path: "crlf.c", Edits: []fileEdit{{OldText: "one\ntwo", NewText: "1\n2"}}})
@@ -414,4 +419,373 @@ func TestMatchGlob(t *testing.T) {
 			t.Errorf("matchGlob(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
 		}
 	}
+}
+
+// withTimeout fails the test when fn does not return within d.
+func withTimeout(t *testing.T, d time.Duration, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("did not finish within %v", d)
+	}
+}
+
+func allocatedDuring(fn func()) uint64 {
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+func TestCleanGlob(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{"**/**/*.go", "**/*.go"},
+		{"a/**/**/**/b", "a/**/b"},
+		{"**", "**"},
+		{"a/*/b", "a/*/b"},
+	} {
+		got, err := cleanGlob(tt.in)
+		if err != nil || got != tt.want {
+			t.Errorf("cleanGlob(%q) = %q, %v; want %q", tt.in, got, err, tt.want)
+		}
+	}
+	if _, err := cleanGlob(strings.Repeat("a/", fsMaxGlobSegments) + "b"); err == nil || !strings.Contains(err.Error(), "segments") {
+		t.Errorf("expected segment limit error, got %v", err)
+	}
+	if _, err := cleanGlob(strings.Repeat("a", fsMaxGlobLength+1)); err == nil || !strings.Contains(err.Error(), "longer than") {
+		t.Errorf("expected length limit error, got %v", err)
+	}
+	if got, err := cleanGlob(strings.Repeat("**/", 40) + "x"); err != nil || got != "**/x" {
+		t.Errorf("repeated ** = %q, %v", got, err)
+	}
+}
+
+func TestMatchGlobPathological(t *testing.T) {
+	pattern := strings.Repeat("**/d/", 15) + "x"
+	withTimeout(t, 5*time.Second, func() {
+		if matchGlob(pattern, strings.Repeat("d/", 200)+"y") {
+			t.Error("unexpected match")
+		}
+		if !matchGlob(pattern, strings.Repeat("d/", 200)+"x") {
+			t.Error("expected match")
+		}
+	})
+}
+
+func TestFilesystemGlobPathological(t *testing.T) {
+	registry, root := newFilesystemRegistry(t, nil)
+	deep := filepath.Join(root, filepath.FromSlash(strings.Repeat("d/", 25)))
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "x.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	withTimeout(t, 10*time.Second, func() {
+		for _, pattern := range []string{strings.Repeat("**/", 11) + "nomatch", strings.Repeat("**/d/", 6) + "nomatch"} {
+			if got := mustFSTool(t, registry, "glob", globInput{Pattern: pattern}); got != "No files found" {
+				t.Errorf("glob(%q) = %q", pattern, got)
+			}
+			got := mustFSTool(t, registry, "search_files_content", searchFilesContentInput{Query: "x", Include: pattern})
+			if got != "No results found" {
+				t.Errorf("search include %q = %q", pattern, got)
+			}
+		}
+	})
+}
+
+func TestFilesystemWalkHonorsContext(t *testing.T) {
+	registry, _ := newFilesystemRegistry(t, map[string]string{"a/b.txt": "x", "c.txt": "x"})
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	for name, args := range map[string]any{
+		"glob":                 globInput{Pattern: "**"},
+		"directory_tree":       directoryTreeInput{},
+		"search_files_content": searchFilesContentInput{Query: "x"},
+	} {
+		raw, _ := json.Marshal(args)
+		if _, _, err := registry.tools[name].invoke(ctx, raw); err == nil || !strings.Contains(err.Error(), "context canceled") {
+			t.Errorf("%s with canceled context: err = %v", name, err)
+		}
+	}
+}
+
+func TestFilesystemReadFileLongLine(t *testing.T) {
+	line := strings.Repeat("a", 8*fsMaxReadBytes)
+	registry, _ := newFilesystemRegistry(t, map[string]string{
+		"one.txt":   line,
+		"two.txt":   line + "\nsecond\n",
+		"multi.txt": strings.Repeat("é", fsMaxReadBytes),
+	})
+
+	var got string
+	alloc := allocatedDuring(func() { got = mustFSTool(t, registry, "read_file", readFileInput{Path: "one.txt"}) })
+	if !strings.HasPrefix(got, strings.Repeat("a", fsMaxReadBytes)+"\n[Output truncated") || !strings.Contains(got, "within line 1") {
+		t.Fatalf("long line read = %q...", got[:min(len(got), 100)])
+	}
+	if alloc > 4*fsMaxReadBytes {
+		t.Errorf("read_file of a %d byte line allocated %d bytes", len(line), alloc)
+	}
+
+	second := 2
+	alloc = allocatedDuring(func() { got = mustFSTool(t, registry, "read_file", readFileInput{Path: "two.txt", Line: &second}) })
+	if got != "second\n" {
+		t.Fatalf("read after long line = %q", got)
+	}
+	if alloc > fsMaxReadBytes {
+		t.Errorf("skipping a %d byte line allocated %d bytes", len(line), alloc)
+	}
+
+	got = mustFSTool(t, registry, "read_file", readFileInput{Path: "multi.txt"})
+	content, _, _ := strings.Cut(got, "\n[Output truncated")
+	if !utf8.ValidString(content) || len(content) > fsMaxReadBytes || len(content) < fsMaxReadBytes-4 {
+		t.Fatalf("multi-byte truncation: %d bytes, valid=%v", len(content), utf8.ValidString(content))
+	}
+}
+
+func TestFilesystemReadMultipleFilesLimits(t *testing.T) {
+	big := strings.Repeat(strings.Repeat("x", 99)+"\n", 9000) // ~900 KB
+	registry, _ := newFilesystemRegistry(t, map[string]string{
+		"a.txt": "A", "b.txt": big, "c.txt": big, "d.txt": big, "e.txt": big,
+	})
+
+	got := mustFSTool(t, registry, "read_multiple_files", readMultipleFilesInput{Paths: []string{"a.txt", "./a.txt", "dir/../a.txt", "a.txt"}})
+	if n := strings.Count(got, "=== "); n != 1 {
+		t.Fatalf("duplicate paths read %d times: %q", n, got)
+	}
+
+	got = mustFSTool(t, registry, "read_multiple_files", readMultipleFilesInput{Paths: []string{"b.txt", "c.txt", "d.txt", "e.txt", "a.txt"}})
+	if len(got) > fsMaxMultiReadBytes+1024 {
+		t.Fatalf("output is %d bytes, cap %d", len(got), fsMaxMultiReadBytes)
+	}
+	if !strings.Contains(got, "Not read: ") || !strings.Contains(got, "a.txt") {
+		t.Fatalf("missing truncation note: %q", got[max(0, len(got)-300):])
+	}
+
+	paths := make([]string, fsMaxMultiReadFiles+1)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("f%d.txt", i)
+	}
+	wantFSError(t, registry, "read_multiple_files", readMultipleFilesInput{Paths: paths}, fmt.Sprintf("at most %d paths", fsMaxMultiReadFiles))
+	wantFSError(t, registry, "read_multiple_files", readMultipleFilesInput{Paths: []string{}}, "must not be empty")
+}
+
+func TestFilesystemSearchOutputBounded(t *testing.T) {
+	registry, _ := newFilesystemRegistry(t, map[string]string{
+		"long.txt": strings.Repeat("a", 2<<20),
+		"many.txt": strings.Repeat("match "+strings.Repeat("z", 150)+"\n", 5000),
+	})
+	got := mustFSTool(t, registry, "search_files_content", searchFilesContentInput{Query: ".*", IsRegex: true, Include: "long.txt"})
+	if len(got) > fsMaxPreview+50 {
+		t.Fatalf("preview of a long match is %d bytes", len(got))
+	}
+	got = mustFSTool(t, registry, "search_files_content", searchFilesContentInput{Query: "match"})
+	body, _, ok := strings.Cut(got, "\n[Output truncated")
+	if !ok || len(body) > fsMaxSearchOutput {
+		t.Fatalf("search output body is %d bytes (cap %d), truncation note %v", len(body), fsMaxSearchOutput, ok)
+	}
+}
+
+func TestPreviewBounded(t *testing.T) {
+	line := strings.Repeat("é", 1000)
+	for _, tt := range []struct{ from, to int }{{0, len(line)}, {500, 1500}, {1990, 2000}, {100, 102}} {
+		got := preview(line, tt.from, tt.to)
+		if len(got) > fsMaxPreview || !utf8.ValidString(got) {
+			t.Errorf("preview(%d, %d) = %d bytes, valid=%v", tt.from, tt.to, len(got), utf8.ValidString(got))
+		}
+	}
+}
+
+func TestFilesystemNonRegularFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no FIFOs on Windows")
+	}
+	mkfifo, err := exec.LookPath("mkfifo")
+	if err != nil {
+		t.Skip("mkfifo not available")
+	}
+	registry, root := newFilesystemRegistry(t, map[string]string{"a.txt": "a"})
+	if out, err := exec.Command(mkfifo, filepath.Join(root, "pipe")).CombinedOutput(); err != nil {
+		t.Skipf("mkfifo: %v: %s", err, out)
+	}
+	withTimeout(t, 5*time.Second, func() {
+		wantFSError(t, registry, "read_file", readFileInput{Path: "pipe"}, "not a regular file")
+		wantFSError(t, registry, "edit_file", editFileInput{Path: "pipe", Edits: []fileEdit{{OldText: "a", NewText: "b"}}}, "not a regular file")
+		got := mustFSTool(t, registry, "read_multiple_files", readMultipleFilesInput{Paths: []string{"pipe", "a.txt"}})
+		if !strings.Contains(got, "pipe is not a regular file") || !strings.Contains(got, "=== a.txt ===\na") {
+			t.Errorf("read_multiple_files = %q", got)
+		}
+		if got := mustFSTool(t, registry, "search_files_content", searchFilesContentInput{Query: "a"}); got != "a.txt:1:1: a" {
+			t.Errorf("search = %q", got)
+		}
+	})
+}
+
+func TestFilesystemRootErrorHidesPath(t *testing.T) {
+	registry, root := newFilesystemRegistry(t, nil)
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string]any{
+		"read_file":      readFileInput{Path: "a.txt"},
+		"list_directory": listDirectoryInput{},
+		"write_file":     writeFileInput{Path: "a.txt"},
+	} {
+		_, err := callFSTool(t, registry, name, args)
+		if err == nil || !strings.Contains(err.Error(), "open filesystem root") {
+			t.Fatalf("%s: err = %v", name, err)
+		}
+		if strings.Contains(err.Error(), root) || strings.Contains(err.Error(), filepath.ToSlash(root)) {
+			t.Fatalf("%s: error leaks the root path: %v", name, err)
+		}
+	}
+}
+
+func TestIsBinary(t *testing.T) {
+	boundary := []byte(strings.Repeat("a", fsBinarySniffBytes-1) + "é")[:fsBinarySniffBytes]
+	for _, tt := range []struct {
+		name string
+		head []byte
+		want bool
+	}{
+		{"empty", nil, false},
+		{"text", []byte("hello\nworld\n"), false},
+		{"control char", []byte("hello\x01world\n"), false},
+		{"postscript", []byte("%!PS-Adobe-3.0\nhello\n"), false},
+		{"utf8", []byte("héllo wörld ✓"), false},
+		{"rune cut at window end", boundary, false},
+		{"nul", []byte("abc\x00def"), true},
+		{"invalid utf8", []byte("abc\xff\xfedef"), true},
+		{"latin1", []byte("caf\xe9 au lait"), true},
+	} {
+		if got := isBinary(tt.head); got != tt.want {
+			t.Errorf("isBinary(%s) = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+
+	registry, _ := newFilesystemRegistry(t, map[string]string{
+		"late-nul.txt": strings.Repeat("x", 4000) + "\x00binary",
+		"ctrl.txt":     "hello\x01world\n",
+	})
+	wantFSError(t, registry, "read_file", readFileInput{Path: "late-nul.txt"}, "binary")
+	if got := mustFSTool(t, registry, "read_file", readFileInput{Path: "ctrl.txt"}); got != "hello\x01world\n" {
+		t.Fatalf("ctrl read = %q", got)
+	}
+}
+
+func TestFilesystemWalkBudget(t *testing.T) {
+	old := fsMaxWalkEntries
+	fsMaxWalkEntries = 50
+	t.Cleanup(func() { fsMaxWalkEntries = old })
+
+	files := map[string]string{}
+	for i := range 40 {
+		files[fmt.Sprintf("a/f%02d.txt", i)] = "needle"
+		files[fmt.Sprintf("b/f%02d.txt", i)] = "needle"
+	}
+	for i := range 80 {
+		files[fmt.Sprintf("flat/f%02d.txt", i)] = ""
+	}
+	registry, _ := newFilesystemRegistry(t, files)
+
+	note := "Stopped after visiting 50 entries"
+	if got := mustFSTool(t, registry, "directory_tree", directoryTreeInput{}); !strings.Contains(got, note) {
+		t.Errorf("directory_tree = %q", got)
+	}
+	if got := mustFSTool(t, registry, "glob", globInput{Pattern: "**/*.txt"}); !strings.Contains(got, note) || strings.Count(got, "\n") > 50 {
+		t.Errorf("glob = %q", got)
+	}
+	if got := mustFSTool(t, registry, "search_files_content", searchFilesContentInput{Query: "needle"}); !strings.Contains(got, note) {
+		t.Errorf("search = %q", got)
+	}
+	if got := mustFSTool(t, registry, "list_directory", listDirectoryInput{Path: "flat"}); !strings.Contains(got, "more than 50 entries") || strings.Count(got, "FILE ") != 50 {
+		t.Errorf("list_directory = %q", got)
+	}
+	if got := mustFSTool(t, registry, "glob", globInput{Pattern: "*.txt", Path: "a"}); strings.Contains(got, note) || strings.Count(got, "\n") != 39 {
+		t.Errorf("glob within budget = %q", got)
+	}
+}
+
+func TestFilesystemSearchByteBudget(t *testing.T) {
+	old := fsMaxSearchBytes
+	fsMaxSearchBytes = 100
+	t.Cleanup(func() { fsMaxSearchBytes = old })
+
+	registry, _ := newFilesystemRegistry(t, map[string]string{
+		"a.txt": strings.Repeat("needle\n", 10),
+		"b.txt": strings.Repeat("needle\n", 10),
+	})
+	got := mustFSTool(t, registry, "search_files_content", searchFilesContentInput{Query: "needle"})
+	if !strings.HasPrefix(got, "a.txt:1:1: needle") || strings.Contains(got, "b.txt") || !strings.Contains(got, "Stopped after reading") {
+		t.Fatalf("search = %q", got)
+	}
+}
+
+func TestFilesystemAtomicWrites(t *testing.T) {
+	registry, root := newFilesystemRegistry(t, map[string]string{"a.txt": "alpha\n", "b.txt": "b"})
+	if err := os.Chmod(filepath.Join(root, "a.txt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mustFSTool(t, registry, "edit_file", editFileInput{Path: "a.txt", Edits: []fileEdit{{OldText: "alpha", NewText: "beta"}}})
+	mustFSTool(t, registry, "write_file", writeFileInput{Path: "b.txt", Content: "new"})
+	mustFSTool(t, registry, "write_file", writeFileInput{Path: "c.txt", Content: "c"})
+
+	info, err := os.Stat(filepath.Join(root, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Errorf("edit changed mode to %v", info.Mode().Perm())
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if got := strings.Join(names, ","); got != "a.txt,b.txt,c.txt" {
+		t.Errorf("directory holds %s; temporary files left behind?", got)
+	}
+	for name, want := range map[string]string{"a.txt": "beta\n", "b.txt": "new", "c.txt": "c"} {
+		data, _ := os.ReadFile(filepath.Join(root, name))
+		if string(data) != want {
+			t.Errorf("%s = %q, want %q", name, data, want)
+		}
+	}
+
+	wantFSError(t, registry, "write_file", writeFileInput{Path: ".", Content: "x"}, "is a directory")
+
+	if err := os.Symlink("b.txt", filepath.Join(root, "link.txt")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("cannot create symlinks: %v", err)
+		}
+		t.Fatal(err)
+	}
+	mustFSTool(t, registry, "write_file", writeFileInput{Path: "link.txt", Content: "via link"})
+	if info, err := os.Lstat(filepath.Join(root, "link.txt")); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("write replaced the symlink: %v", err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(root, "b.txt")); string(data) != "via link" {
+		t.Fatalf("link target = %q", data)
+	}
+}
+
+func TestFilesystemEditFileSizeLimit(t *testing.T) {
+	registry, root := newFilesystemRegistry(t, nil)
+	big := filepath.Join(root, "big.txt")
+	if err := os.WriteFile(big, []byte(strings.Repeat("x", fsMaxEditBytes)+"y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantFSError(t, registry, "edit_file", editFileInput{Path: "big.txt", Edits: []fileEdit{{OldText: "y", NewText: "z"}}}, "larger than")
 }

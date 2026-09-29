@@ -12,7 +12,9 @@ type ToolCall struct {
 	Args any
 }
 
-// TokenUsage defines the usage numbers reported by the mock response.
+// TokenUsage defines the usage numbers reported by the mock response. It
+// matches crux.Usage: InputTokens is the total input, including cache reads
+// and writes, and each provider's wire format is derived from it.
 type TokenUsage struct {
 	InputTokens      int
 	OutputTokens     int
@@ -28,6 +30,7 @@ type Turn struct {
 	StatusCode int
 	RawBody    []byte
 	Usage      *TokenUsage
+	empty      bool
 }
 
 // ReturnText configures the turn to respond with a plain text assistant message.
@@ -58,6 +61,12 @@ func (t *Turn) ReturnToolCall(name string, args any) *Turn {
 // ReturnToolCalls configures the turn to invoke multiple tool calls.
 func (t *Turn) ReturnToolCalls(calls ...ToolCall) *Turn {
 	t.ToolCalls = append(t.ToolCalls, calls...)
+	return t
+}
+
+// ReturnEmpty configures the turn to complete normally with no content at all.
+func (t *Turn) ReturnEmpty() *Turn {
+	t.empty = true
 	return t
 }
 

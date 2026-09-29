@@ -18,18 +18,17 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
 
 ## Core concepts and intentional design decisions
 
-- **Tools are decoupled from agents, on purpose.** Tools are registered in a registry: the default one via `RegisterTool`, or a custom `NewToolsRegistry()` passed with `WithToolsRegistry`. Any package in an application can contribute tools independently of where agents are defined, and each agent references the tools it may use **by name** (`WithTools([]string{...})`). This keeps large LLM apps from turning into a tangle. **Do not replace this with tools defined inline on agents.** Improvements that were discussed and not yet decided:
-  - duplicate-name registration should panic (today it silently overwrites);
+- **Tools are decoupled from agents, on purpose.** Tools are registered in a registry: the default one via `RegisterTool`, or a custom `NewToolsRegistry()` passed with `WithToolsRegistry`. Any package in an application can contribute tools independently of where agents are defined, and each agent references the tools it may use **by name** (`WithTools([]string{...})`). This keeps large LLM apps from turning into a tangle. **Do not replace this with tools defined inline on agents.** Tool names must match `^[a-zA-Z0-9_-]{1,64}$`; an invalid or already registered name panics (`AddToolset*` returns it as an error), and `New` rejects an agent with two tools of the same name. Improvements that were discussed and not yet decided:
   - `RegisterTool` could return a reference value that agents can pass instead of a string;
   - a simpler custom-registry option, `WithRegistry(reg)`.
 - **Toolsets** group tools. A `Toolset` registers its tools in `Register(registry)` and labels each one with the `WithToolset(name)` tool option; `AddToolset`/`AddToolsetWithRegistry` call `Register`. Agents select a whole set with `WithToolsets`/`WithToolsetsRegistry`, which add to the tool list (unlike `WithTools`, which replaces it).
 - **Agent** (`agent.go`): an immutable, stateless blueprint (model, instructions, tool names, limits), safe for concurrent use. Its ID is derived from `CanonicalData()` unless `WithAgentID` is given.
 - **Session** (`agent.go`): one conversation, stored as an append-only log of `Entry` values (`types.go`). Not safe for concurrent use. `Run`/`RunInto`/`Stream` drive the loop:
-  1. run any pending tool calls;
+  1. run any pending tool calls (the calls from one model turn run concurrently; results keep the model's order);
   2. call the provider (`step`);
   3. append what the model produced;
   4. stop on approvals, refusals or a final answer; otherwise repeat, up to `maxTurns`.
-- **Tool failures never stop a run.** Tool errors, and tool panics (recovered in `invokeTool`), are sent to the model as `ToolResult.Error`.
+- **Tool failures never stop a run.** Tool errors, and tool panics (recovered in `invokeTool`), are sent to the model as `ToolResult.Error`. Arguments are validated against the tool's input schema first; repeated keys and keys that match a field only case-insensitively are rejected, so an approval shown from the raw arguments matches what the tool receives.
 - **Approvals:** tools registered with `WithApprovalNeeded(true)` make `Run` return `ErrApprovalNeeded`. The caller then uses `Approve`/`Reject` and `Resume`.
 - **Stores** (`store.go`, `store_gorm.go`): `Store.Append(ctx, *Session, entries...)` and `Store.Get(ctx, id)`.
   - `MemoryStore` is the default.
@@ -44,7 +43,7 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
   - There is no public API for this, and none should be added without discussion.
 - **Subagents** (`WithSubAgent`): exposed to the parent as a tool named `agent_<name>` that takes `{"task": string}`. Each call runs a fresh child session, and its output is the tool result.
 - **Fork** (`fork.go`): copies history into a new session, optionally switching model or provider. Provider-specific data (`Opaque`) is dropped when the provider changes.
-- **Errors** (`errors.go`): sentinel errors for `errors.Is` checks: `ErrApprovalNeeded`, `ErrMaxTurns`, `ErrRefused`, `ErrOutputValidation`, `ErrSessionNotFound`, `ErrToolNotFound`.
+- **Errors** (`errors.go`): sentinel errors for `errors.Is` checks: `ErrApprovalNeeded`, `ErrMaxTurns`, `ErrRefused`, `ErrOutputValidation`, `ErrSessionNotFound`, `ErrSessionConflict`, `ErrToolNotFound`.
 - **`Kind` values are persisted.** Never renumber them. The value after `KindStateDelta` is a reserved blank (`_`), kept for future compaction.
 
 ## Providers

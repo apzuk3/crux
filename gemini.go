@@ -1,10 +1,12 @@
 package crux
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 
@@ -43,7 +45,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 	}
 	config := &genai.GenerateContentConfig{Tools: tools}
 	if a.maxTokens > 0 {
-		config.MaxOutputTokens = int32(a.maxTokens)
+		config.MaxOutputTokens = int32(min(a.maxTokens, math.MaxInt32))
 	}
 	if a.temperature != nil {
 		temperature := float32(*a.temperature)
@@ -85,21 +87,36 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		return nil, fmt.Errorf("gemini generate content: %w", err)
 	}
 	if len(response.Candidates) == 0 {
+		// A blocked prompt has no candidates, only prompt feedback:
+		// https://ai.google.dev/api/generate-content#BlockReason
+		if feedback := response.PromptFeedback; feedback != nil && feedback.BlockReason != "" {
+			return nil, fmt.Errorf("gemini: %w: prompt blocked: %s", ErrRefused, feedback.BlockReason)
+		}
 		return nil, errors.New("gemini returned no candidates")
 	}
 	candidate := response.Candidates[0]
-	if candidate.FinishReason == genai.FinishReasonMaxTokens {
+	// Finish reasons: https://ai.google.dev/api/generate-content#FinishReason
+	switch candidate.FinishReason {
+	case genai.FinishReasonStop:
+	case genai.FinishReasonMaxTokens:
 		return nil, errors.New("gemini response hit the output token limit; raise it with crux.WithMaxTokens")
-	}
-	if candidate.FinishReason != genai.FinishReasonStop {
+	case genai.FinishReasonSafety, genai.FinishReasonProhibitedContent, genai.FinishReasonBlocklist,
+		genai.FinishReasonSPII, genai.FinishReasonRecitation, genai.FinishReasonImageSafety,
+		genai.FinishReasonImageProhibitedContent, genai.FinishReasonImageRecitation:
+		return nil, fmt.Errorf("gemini: %w: finish reason %s", ErrRefused, candidate.FinishReason)
+	default:
 		return nil, fmt.Errorf("gemini response did not complete: finish reason %q", candidate.FinishReason)
 	}
-	if candidate.Content == nil || len(candidate.Content.Parts) == 0 {
-		return nil, errors.New("gemini returned no content")
-	}
 	now := time.Now().UTC()
-	produced := make([]Entry, 0, len(candidate.Content.Parts))
-	for i, part := range candidate.Content.Parts {
+	var parts []*genai.Part
+	if candidate.Content != nil {
+		parts = candidate.Content.Parts
+	}
+	produced := make([]Entry, 0, len(parts)+1)
+	for i, part := range parts {
+		if geminiPartEmpty(part) {
+			continue
+		}
 		entry, err := fromGeminiPart(part)
 		if err != nil {
 			return nil, err
@@ -114,24 +131,35 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		}
 		produced = append(produced, entry)
 	}
+	if len(produced) == 0 {
+		// The model may stop (finish reason STOP) without saying anything;
+		// that is still a final answer, and its usage must not be lost.
+		// https://ai.google.dev/api/generate-content#FinishReason
+		produced = append(produced, Entry{At: now, Kind: KindAssistant})
+	}
 	if candidate.GroundingMetadata != nil {
 		raw, err := json.Marshal(candidate.GroundingMetadata)
 		if err != nil {
 			return nil, fmt.Errorf("marshal Gemini grounding metadata: %w", err)
 		}
-		produced[len(produced)-1].Opaque[geminiGroundingMetadataOpaqueKey] = raw
+		last := &produced[len(produced)-1]
+		if last.Opaque == nil {
+			last.Opaque = make(map[string][]byte)
+		}
+		last.Opaque[geminiGroundingMetadataOpaqueKey] = raw
 	}
-	if len(produced) > 0 {
-		if usage := response.UsageMetadata; usage != nil {
-			var cacheRead int
-			if usage.CachedContentTokenCount > 0 {
-				cacheRead = int(usage.CachedContentTokenCount)
-			}
-			produced[len(produced)-1].Usage = &Usage{
-				InputTokens:     int(usage.PromptTokenCount),
-				OutputTokens:    int(usage.CandidatesTokenCount + usage.ThoughtsTokenCount),
-				CacheReadTokens: cacheRead,
-			}
+	if usage := response.UsageMetadata; usage != nil {
+		var cacheRead int
+		if usage.CachedContentTokenCount > 0 {
+			cacheRead = int(usage.CachedContentTokenCount)
+		}
+		// PromptTokenCount already includes cached content; tool-use prompt
+		// tokens (such as search results) are counted separately.
+		// https://ai.google.dev/api/generate-content#UsageMetadata
+		produced[len(produced)-1].Usage = &Usage{
+			InputTokens:     int(usage.PromptTokenCount + usage.ToolUsePromptTokenCount),
+			OutputTokens:    int(usage.CandidatesTokenCount + usage.ThoughtsTokenCount),
+			CacheReadTokens: cacheRead,
 		}
 	}
 	return produced, nil
@@ -142,6 +170,7 @@ func streamGemini(ctx context.Context, client *genai.Client, model string, conte
 	// calls. Joining their text for display must not discard replay metadata.
 	candidate := &genai.Candidate{Content: &genai.Content{Role: "model"}}
 	response := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{candidate}}
+	sawCandidate := false
 	for chunk, err := range client.Models.GenerateContentStream(ctx, model, contents, config) {
 		if err != nil {
 			return nil, err
@@ -152,9 +181,13 @@ func streamGemini(ctx context.Context, client *genai.Client, model string, conte
 		if chunk.UsageMetadata != nil {
 			response.UsageMetadata = chunk.UsageMetadata
 		}
+		if chunk.PromptFeedback != nil {
+			response.PromptFeedback = chunk.PromptFeedback
+		}
 		if len(chunk.Candidates) == 0 {
 			continue
 		}
+		sawCandidate = true
 		current := chunk.Candidates[0]
 		if current.FinishReason != "" {
 			candidate.FinishReason = current.FinishReason
@@ -169,6 +202,9 @@ func streamGemini(ctx context.Context, client *genai.Client, model string, conte
 			if part == nil {
 				return nil, errors.New("gemini returned a nil part")
 			}
+			if geminiPartEmpty(part) {
+				continue
+			}
 			candidate.Content.Parts = append(candidate.Content.Parts, part)
 			kind := ChunkText
 			if part.Thought {
@@ -181,6 +217,11 @@ func streamGemini(ctx context.Context, client *genai.Client, model string, conte
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if !sawCandidate {
+		// A blocked prompt yields only prompt feedback.
+		// https://ai.google.dev/api/generate-content#BlockReason
+		response.Candidates = nil
 	}
 	return response, nil
 }
@@ -228,8 +269,26 @@ func fromGeminiPart(part *genai.Part) (Entry, error) {
 	case len(part.ThoughtSignature) > 0:
 		return Entry{Kind: KindReasoning, Reasoning: &Reasoning{}, Opaque: opaque}, nil
 	default:
-		return Entry{}, errors.New("unsupported Gemini part")
+		// Other data, such as executable code or inline media, is kept and
+		// replayed verbatim. Part types: https://ai.google.dev/api/caching#Part
+		return Entry{Kind: KindProviderTool, Opaque: opaque}, nil
 	}
+}
+
+// geminiPartEmpty reports whether a part carries nothing at all, like the
+// empty text parts Gemini sometimes sends alongside real content (often the
+// last streamed chunk, which only carries the finish reason and usage).
+// https://ai.google.dev/api/caching#Part
+func geminiPartEmpty(part *genai.Part) bool {
+	if part == nil {
+		return false
+	}
+	raw, err := json.Marshal(part)
+	if err != nil {
+		return false
+	}
+	empty, _ := json.Marshal(&genai.Part{})
+	return bytes.Equal(raw, empty)
 }
 
 // toGeminiContents groups consecutive parts by role.

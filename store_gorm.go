@@ -2,6 +2,7 @@ package crux
 
 import (
 	"context"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,41 +11,66 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/schema"
 )
 
 var _ Store = (*GORMStore)(nil)
 
-// AgentRecord stores the immutable blueprint definition for an agent in GORM.
-type AgentRecord struct {
-	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
+// The tables are internal; query them through DB() with your own structs if
+// you need to.
+type agentRecord struct {
+	ID        dbUUID    `gorm:"primaryKey"`
 	Data      []byte    `gorm:"type:bytes;not null"`
 	CreatedAt time.Time `gorm:"not null"`
 	UpdatedAt time.Time `gorm:"not null"`
 }
 
-func (AgentRecord) TableName() string { return "crux_agents" }
+func (agentRecord) TableName() string { return "crux_agents" }
 
-// SessionRecord stores active conversation instances linked to an agent blueprint in GORM.
-type SessionRecord struct {
-	ID        uuid.UUID  `gorm:"type:uuid;primaryKey"`
-	AgentID   uuid.UUID  `gorm:"type:uuid;not null;index"`
-	ParentID  *uuid.UUID `gorm:"type:uuid;index"` // session whose tool call created this one, for tracing
-	CreatedAt time.Time  `gorm:"not null"`
-	UpdatedAt time.Time  `gorm:"not null;index"`
+type sessionRecord struct {
+	ID        dbUUID    `gorm:"primaryKey"`
+	AgentID   dbUUID    `gorm:"not null;index"`
+	ParentID  *dbUUID   `gorm:"index"` // session whose tool call created this one, for tracing
+	CreatedAt time.Time `gorm:"not null"`
+	UpdatedAt time.Time `gorm:"not null;index"`
 }
 
-func (SessionRecord) TableName() string { return "crux_sessions" }
+func (sessionRecord) TableName() string { return "crux_sessions" }
 
-// LogRecord stores sequential log entries belonging to a session in GORM.
-type LogRecord struct {
+type logRecord struct {
 	ID        uint64    `gorm:"primaryKey;autoIncrement"`
-	SessionID uuid.UUID `gorm:"type:uuid;not null;index:idx_session_seq"`
-	Seq       uint64    `gorm:"not null;index:idx_session_seq"`
+	SessionID dbUUID    `gorm:"not null;uniqueIndex:idx_crux_session_logs_seq"`
+	Seq       uint64    `gorm:"not null;uniqueIndex:idx_crux_session_logs_seq"`
 	Data      []byte    `gorm:"type:bytes;not null"`
 	CreatedAt time.Time `gorm:"not null"`
 }
 
-func (LogRecord) TableName() string { return "crux_session_logs" }
+func (logRecord) TableName() string { return "crux_session_logs" }
+
+// dbUUID stores a UUID in the column type each database supports.
+type dbUUID uuid.UUID
+
+func (u dbUUID) Value() (driver.Value, error) { return uuid.UUID(u).String(), nil }
+
+func (u *dbUUID) Scan(src any) error {
+	var id uuid.UUID
+	if err := id.Scan(src); err != nil {
+		return err
+	}
+	*u = dbUUID(id)
+	return nil
+}
+
+func (dbUUID) GormDBDataType(db *gorm.DB, _ *schema.Field) string {
+	switch db.Dialector.Name() {
+	case "postgres":
+		return "uuid"
+	case "sqlserver":
+		return "uniqueidentifier"
+	default:
+		return "char(36)"
+	}
+}
 
 // GORMStore persists sessions in any database GORM supports. Bring your own
 // driver, for example github.com/glebarez/sqlite (pure Go),
@@ -64,7 +90,7 @@ func NewGORMStore(db *gorm.DB) (*GORMStore, error) {
 		return nil, errors.New("db cannot be nil")
 	}
 
-	if err := db.AutoMigrate(&AgentRecord{}, &SessionRecord{}, &LogRecord{}); err != nil {
+	if err := db.AutoMigrate(&agentRecord{}, &sessionRecord{}, &logRecord{}); err != nil {
 		return nil, fmt.Errorf("crux gorm automigrate: %w", err)
 	}
 
@@ -91,8 +117,8 @@ func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Ent
 		now := time.Now().UTC()
 
 		// 1. Upsert crux_agents
-		agentRec := AgentRecord{
-			ID:        agent.ID(),
+		agentRec := agentRecord{
+			ID:        dbUUID(agent.ID()),
 			Data:      agent.CanonicalData(),
 			CreatedAt: now,
 			UpdatedAt: now,
@@ -105,14 +131,14 @@ func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Ent
 		}
 
 		// 2. Upsert crux_sessions
-		sessRec := SessionRecord{
-			ID:        sessionID,
-			AgentID:   agent.ID(),
+		sessRec := sessionRecord{
+			ID:        dbUUID(sessionID),
+			AgentID:   dbUUID(agent.ID()),
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
 		if session.parentID != uuid.Nil {
-			parentID := session.parentID
+			parentID := dbUUID(session.parentID)
 			sessRec.ParentID = &parentID
 		}
 		if err := tx.Clauses(clause.OnConflict{
@@ -122,9 +148,21 @@ func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Ent
 			return fmt.Errorf("upsert session record: %w", err)
 		}
 
-		// 3. Insert crux_session_logs
+		// 3. Insert crux_session_logs, refusing entries another writer already
+		// stored. The unique (session_id, seq) index catches concurrent writers.
 		if len(entries) > 0 {
-			logs := make([]LogRecord, len(entries))
+			var last uint64
+			if err := tx.Model(&logRecord{}).
+				Where("session_id = ?", dbUUID(sessionID)).
+				Select("COALESCE(MAX(seq), 0)").
+				Scan(&last).Error; err != nil {
+				return fmt.Errorf("read last log seq: %w", err)
+			}
+			if entries[0].Seq <= last {
+				return fmt.Errorf("%w: session %s already has entry %d", ErrSessionConflict, sessionID, entries[0].Seq)
+			}
+
+			logs := make([]logRecord, len(entries))
 			for i, entry := range entries {
 				data, err := json.Marshal(entry)
 				if err != nil {
@@ -134,8 +172,8 @@ func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Ent
 				if at.IsZero() {
 					at = now
 				}
-				logs[i] = LogRecord{
-					SessionID: sessionID,
+				logs[i] = logRecord{
+					SessionID: dbUUID(sessionID),
 					Seq:       entry.Seq,
 					Data:      data,
 					CreatedAt: at,
@@ -156,8 +194,8 @@ func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Ent
 func (s *GORMStore) Get(ctx context.Context, sessionID uuid.UUID) ([]Entry, error) {
 	var count int64
 	if err := s.db.WithContext(ctx).
-		Model(&SessionRecord{}).
-		Where("id = ?", sessionID).
+		Model(&sessionRecord{}).
+		Where("id = ?", dbUUID(sessionID)).
 		Count(&count).Error; err != nil {
 		return nil, fmt.Errorf("check session existence: %w", err)
 	}
@@ -165,10 +203,10 @@ func (s *GORMStore) Get(ctx context.Context, sessionID uuid.UUID) ([]Entry, erro
 		return nil, ErrSessionNotFound
 	}
 
-	var records []LogRecord
+	var records []logRecord
 	if err := s.db.WithContext(ctx).
-		Where("session_id = ?", sessionID).
-		Order("seq ASC").
+		Where("session_id = ?", dbUUID(sessionID)).
+		Order("seq ASC, id ASC").
 		Find(&records).Error; err != nil {
 		return nil, fmt.Errorf("get session logs: %w", err)
 	}

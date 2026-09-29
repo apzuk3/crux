@@ -55,10 +55,10 @@ func TestGORMStore_AppendAndGet(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify agent record created
-	var agentRec AgentRecord
+	var agentRec agentRecord
 	err = store.DB().First(&agentRec, "id = ?", agent.ID()).Error
 	require.NoError(t, err)
-	require.Equal(t, agent.ID(), agentRec.ID)
+	require.Equal(t, agent.ID(), uuid.UUID(agentRec.ID))
 
 	var meta map[string]any
 	err = json.Unmarshal(agentRec.Data, &meta)
@@ -66,15 +66,15 @@ func TestGORMStore_AppendAndGet(t *testing.T) {
 	require.Equal(t, "Assist users with testing.", meta["instructions"])
 
 	// Verify session record created
-	var sessRec SessionRecord
+	var sessRec sessionRecord
 	err = store.DB().First(&sessRec, "id = ?", sessionID).Error
 	require.NoError(t, err)
-	require.Equal(t, sessionID, sessRec.ID)
-	require.Equal(t, agent.ID(), sessRec.AgentID)
+	require.Equal(t, sessionID, uuid.UUID(sessRec.ID))
+	require.Equal(t, agent.ID(), uuid.UUID(sessRec.AgentID))
 
 	// Verify log records created
 	var logCount int64
-	err = store.DB().Model(&LogRecord{}).Where("session_id = ?", sessionID).Count(&logCount).Error
+	err = store.DB().Model(&logRecord{}).Where("session_id = ?", sessionID).Count(&logCount).Error
 	require.NoError(t, err)
 	require.Equal(t, int64(2), logCount)
 
@@ -96,11 +96,11 @@ func TestGORMStore_AppendAndGet(t *testing.T) {
 
 	// Verify session was updated (not duplicated)
 	var sessionCount int64
-	err = store.DB().Model(&SessionRecord{}).Where("id = ?", sessionID).Count(&sessionCount).Error
+	err = store.DB().Model(&sessionRecord{}).Where("id = ?", sessionID).Count(&sessionCount).Error
 	require.NoError(t, err)
 	require.Equal(t, int64(1), sessionCount)
 
-	var updatedSess SessionRecord
+	var updatedSess sessionRecord
 	err = store.DB().First(&updatedSess, "id = ?", sessionID).Error
 	require.NoError(t, err)
 	require.True(t, updatedSess.UpdatedAt.After(sessRec.CreatedAt) || updatedSess.UpdatedAt.Equal(sessRec.CreatedAt))
@@ -213,13 +213,13 @@ func TestSessionsCreatedInToolsRecordTheirParent(t *testing.T) {
 	require.Equal(t, parent.id, child.parentID)
 	require.Same(t, store, child.store)
 
-	var childRec SessionRecord
+	var childRec sessionRecord
 	require.NoError(t, store.DB().First(&childRec, "id = ?", child.id).Error)
 	require.NotNil(t, childRec.ParentID)
-	require.Equal(t, parent.id, *childRec.ParentID)
+	require.Equal(t, parent.id, uuid.UUID(*childRec.ParentID))
 
 	// Top-level sessions have no parent.
-	var parentRec SessionRecord
+	var parentRec sessionRecord
 	require.NoError(t, store.DB().First(&parentRec, "id = ?", parent.id).Error)
 	require.Nil(t, parentRec.ParentID)
 }

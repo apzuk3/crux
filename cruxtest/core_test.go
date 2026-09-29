@@ -227,8 +227,11 @@ func TestSubAgentSessionIsStoredAsChild(t *testing.T) {
 	_, err = session.Run(t.Context(), "go")
 	require.NoError(t, err)
 
-	var children []crux.SessionRecord
-	require.NoError(t, db.Where("parent_id = ?", session.ID()).Find(&children).Error)
+	var children []struct {
+		ID      uuid.UUID
+		AgentID uuid.UUID
+	}
+	require.NoError(t, db.Table("crux_sessions").Where("parent_id = ?", session.ID()).Find(&children).Error)
 	require.Len(t, children, 1)
 	require.Equal(t, subAgent.ID(), children[0].AgentID)
 

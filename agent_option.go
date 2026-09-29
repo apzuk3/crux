@@ -64,7 +64,7 @@ func WithTools(tools []string) AgentOption {
 		}
 
 		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
-			return t.kind == ToolKindTool
+			return t.kind == toolKindTool
 		})
 		a.tools = append(a.tools, selected...)
 
@@ -76,7 +76,7 @@ func WithTools(tools []string) AgentOption {
 func WithoutTools() AgentOption {
 	return func(a *Agent) error {
 		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
-			return t.kind == ToolKindTool
+			return t.kind == toolKindTool
 		})
 		return nil
 	}
@@ -86,7 +86,7 @@ func WithoutTools() AgentOption {
 func WithoutSubagents() AgentOption {
 	return func(a *Agent) error {
 		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
-			return t.kind == ToolKindSubagent
+			return t.kind == toolKindSubagent
 		})
 		return nil
 	}
@@ -101,7 +101,7 @@ func WithToolsRegistry(tools []string, registry ToolsRegistry) AgentOption {
 		}
 
 		a.tools = slices.DeleteFunc(a.tools, func(t Tool) bool {
-			return t.kind == ToolKindTool
+			return t.kind == toolKindTool
 		})
 		a.tools = append(a.tools, selected...)
 
@@ -186,7 +186,13 @@ func WithModel(model string) AgentOption {
 
 // WithMaxTurns limits how many model requests one Run may make. The default is 10.
 func WithMaxTurns(turns int32) AgentOption {
-	return func(a *Agent) error { a.maxTurns = turns; return nil }
+	return func(a *Agent) error {
+		if turns < 1 {
+			return fmt.Errorf("max turns must be at least 1, got %d", turns)
+		}
+		a.maxTurns = turns
+		return nil
+	}
 }
 
 func WithBaseURL(url string) AgentOption {
@@ -237,6 +243,9 @@ func WithTemperature(temperature float64) AgentOption {
 // to ask the model to repair its response if output validation fails.
 func WithMaxRepairs(repairs int) AgentOption {
 	return func(a *Agent) error {
+		if repairs < 0 {
+			return fmt.Errorf("max repairs cannot be negative, got %d", repairs)
+		}
 		a.maxRepairs = repairs
 		return nil
 	}
@@ -336,12 +345,16 @@ func WithSubAgent(subAgent *Agent, description string) AgentOption {
 		if subAgent == nil {
 			return errors.New("subagent cannot be nil")
 		}
+		name := "agent_" + subAgent.name
+		if err := validateToolName(name); err != nil {
+			return fmt.Errorf("subagent %q: %w", subAgent.name, err)
+		}
 
 		tool := Tool{
-			name:        "agent_" + subAgent.name,
+			name:        name,
 			description: description,
 			schema:      subAgentInputSchema,
-			kind:        ToolKindSubagent,
+			kind:        toolKindSubagent,
 			invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
 				var input subAgentInput
 				if err := json.Unmarshal(args, &input); err != nil || strings.TrimSpace(input.Task) == "" {

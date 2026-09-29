@@ -11,6 +11,10 @@ var (
 	ErrOutputValidation = errors.New("output validation failed")
 	// ErrSessionNotFound is returned by a Store that has no entries for a session.
 	ErrSessionNotFound = errors.New("session not found")
+	// ErrSessionConflict is returned by a Store when another writer already
+	// appended entries to the session. Load the session again with
+	// WithSessionID and retry.
+	ErrSessionConflict = errors.New("session was changed by another writer")
 	// ErrMaxTurns is returned by Run when the agent used all its turns without a final answer.
 	ErrMaxTurns = errors.New("max turns reached")
 	// ErrRefused is returned by Run when the model refuses the request.

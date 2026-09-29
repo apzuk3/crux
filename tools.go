@@ -1,27 +1,35 @@
 package crux
 
 import (
+	"bytes"
 	"context"
 	"encoding"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	sjs "github.com/santhosh-tekuri/jsonschema/v5"
 )
 
-type ToolKind string
+type toolKind string
 
 const (
-	ToolKindTool     ToolKind = "fn"
-	ToolKindSubagent ToolKind = "agent"
+	toolKindTool     toolKind = "fn"
+	toolKindSubagent toolKind = "agent"
 )
 
+// Tool is a function the model can call. Tools are created by RegisterTool and
+// its variants and selected by agents by name.
 type Tool struct {
 	name           string
-	kind           ToolKind
+	kind           toolKind
 	description    string
 	schema         map[string]any
 	invoke         func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error)
@@ -45,6 +53,8 @@ func WithToolset(name string) ToolOption {
 	}
 }
 
+// ToolsRegistry holds registered tools. Create one with NewToolsRegistry; the
+// zero value is not usable.
 type ToolsRegistry struct {
 	mu    *sync.Mutex
 	tools map[string]Tool
@@ -71,20 +81,35 @@ func RegisterToolStateMutate[In, Out any](name string, description string, fn fu
 	RegisterToolWithRegistry(defaultToolsRegistry, name, description, fn, opts...)
 }
 
+// RegisterToolWithRegistry registers a tool in registry. It panics if name is
+// not a valid tool name (letters, digits, '_' and '-', at most 64 characters)
+// or is already registered, like http.HandleFunc does for a repeated pattern.
 func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, description string, fn func(ctx context.Context, input In) (Out, *StateDelta, error), opts ...ToolOption) {
+	if err := validateToolName(name); err != nil {
+		panic(toolRegistrationError{err})
+	}
+	schema := jsonSchemaOf[In]()
+	validator, err := compileToolSchema(schema)
+	if err != nil {
+		panic(toolRegistrationError{fmt.Errorf("tool %q: %w", name, err)})
+	}
+
 	tool := Tool{
 		name:        name,
 		description: description,
-		schema:      jsonSchemaOf[In](),
-		kind:        ToolKindTool,
+		schema:      schema,
+		kind:        toolKindTool,
 		invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
 			var input In
 			if len(args) > 0 {
+				var malformed string
+				if schema["type"] != "string" && args[0] == '"' && json.Unmarshal(args, &malformed) == nil {
+					return "", nil, fmt.Errorf("arguments for %q are not valid JSON: %s", name, malformed)
+				}
+				if err := checkToolArgs(args, schema, validator); err != nil {
+					return "", nil, fmt.Errorf("invalid arguments for %q: %w", name, err)
+				}
 				if err := json.Unmarshal(args, &input); err != nil {
-					var malformed string
-					if json.Unmarshal(args, &malformed) == nil {
-						return "", nil, fmt.Errorf("arguments for %q are not valid JSON: %s", name, malformed)
-					}
 					return "", nil, fmt.Errorf("decode arguments for %q: %w", name, err)
 				}
 			}
@@ -102,10 +127,36 @@ func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, 
 		opt(&tool)
 	}
 
+	registry.mustBeInitialized()
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 
+	if _, exists := registry.tools[name]; exists {
+		panic(toolRegistrationError{fmt.Errorf("tool %q is already registered", name)})
+	}
 	registry.tools[name] = tool
+}
+
+func (r *ToolsRegistry) mustBeInitialized() {
+	if r.mu == nil {
+		panic("crux: ToolsRegistry must be created with NewToolsRegistry")
+	}
+}
+
+// toolRegistrationError is the panic value for an invalid registration, so
+// AddToolset can return it as an error.
+type toolRegistrationError struct{ err error }
+
+func (e toolRegistrationError) Error() string { return e.err.Error() }
+func (e toolRegistrationError) Unwrap() error { return e.err }
+
+var toolNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
+func validateToolName(name string) error {
+	if !toolNamePattern.MatchString(name) {
+		return fmt.Errorf("invalid tool name %q: use 1-64 letters, digits, '_' or '-'", name)
+	}
+	return nil
 }
 
 // Toolset registers a group of related tools into a registry, so they can be
@@ -120,7 +171,17 @@ func AddToolset(toolset Toolset) error {
 }
 
 // AddToolsetWithRegistry registers the toolset's tools into the given registry.
-func AddToolsetWithRegistry(registry ToolsRegistry, toolset Toolset) error {
+// An invalid or duplicate tool name is returned as an error.
+func AddToolsetWithRegistry(registry ToolsRegistry, toolset Toolset) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			regErr, ok := r.(toolRegistrationError)
+			if !ok {
+				panic(r)
+			}
+			err = fmt.Errorf("register toolset %T: %w", toolset, regErr.err)
+		}
+	}()
 	if err := toolset.Register(registry); err != nil {
 		return fmt.Errorf("register toolset %T: %w", toolset, err)
 	}
@@ -132,6 +193,7 @@ func AddToolsetWithRegistry(registry ToolsRegistry, toolset Toolset) error {
 // Repeated names are included only once. If any name is not registered,
 // selected returns an error wrapping ErrToolNotFound with the missing tool name.
 func (r *ToolsRegistry) selected(names []string) ([]Tool, error) {
+	r.mustBeInitialized()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -156,6 +218,7 @@ func (r *ToolsRegistry) selected(names []string) ([]Tool, error) {
 // ordered by toolset and then tool name. If a toolset has no tools, it returns
 // an error wrapping ErrToolNotFound with the toolset name.
 func (r *ToolsRegistry) inToolsets(names []string) ([]Tool, error) {
+	r.mustBeInitialized()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -401,4 +464,147 @@ func isStringEncodable(t reflect.Type) bool {
 		return true
 	}
 	return false
+}
+
+func compileToolSchema(schema map[string]any) (*sjs.Schema, error) {
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return nil, fmt.Errorf("marshal input schema: %w", err)
+	}
+	compiler := sjs.NewCompiler()
+	if err := compiler.AddResource("tool.json", bytes.NewReader(raw)); err != nil {
+		return nil, fmt.Errorf("load input schema: %w", err)
+	}
+	validator, err := compiler.Compile("tool.json")
+	if err != nil {
+		return nil, fmt.Errorf("compile input schema: %w", err)
+	}
+	return validator, nil
+}
+
+// checkToolArgs rejects arguments that would decode differently from how they
+// read: repeated keys (the last one wins in encoding/json) and keys that only
+// match a field when case is ignored. So an approval shown from the raw
+// arguments describes exactly what the tool receives. It then validates the
+// arguments against the input schema, treating null like a missing value as
+// encoding/json does.
+func checkToolArgs(args json.RawMessage, schema map[string]any, validator *sjs.Schema) error {
+	dec := json.NewDecoder(bytes.NewReader(args))
+	dec.UseNumber()
+	doc, err := decodeStrictJSON(dec)
+	if err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("unexpected data after the arguments object")
+	}
+	doc, err = normalizeArgs(doc, schema, "")
+	if err != nil {
+		return err
+	}
+	if err := validator.Validate(doc); err != nil {
+		var verr *sjs.ValidationError
+		if errors.As(err, &verr) {
+			return errors.New(strings.Join(validationMessages(verr), "; "))
+		}
+		return err
+	}
+	return nil
+}
+
+// decodeStrictJSON decodes one JSON value, failing on a repeated object key.
+func decodeStrictJSON(dec *json.Decoder) (any, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return tok, nil
+	}
+	switch delim {
+	case '{':
+		object := make(map[string]any)
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			key := keyTok.(string)
+			if _, dup := object[key]; dup {
+				return nil, fmt.Errorf("argument %q is given more than once", key)
+			}
+			if object[key], err = decodeStrictJSON(dec); err != nil {
+				return nil, err
+			}
+		}
+		_, err = dec.Token()
+		return object, err
+	case '[':
+		var array []any
+		for dec.More() {
+			item, err := decodeStrictJSON(dec)
+			if err != nil {
+				return nil, err
+			}
+			array = append(array, item)
+		}
+		_, err = dec.Token()
+		return array, err
+	}
+	return nil, fmt.Errorf("unexpected %v", delim)
+}
+
+// normalizeArgs drops null object members and rejects keys that differ only
+// in case from a declared property.
+func normalizeArgs(value any, schema map[string]any, path string) (any, error) {
+	switch v := value.(type) {
+	case map[string]any:
+		props, _ := schema["properties"].(map[string]any)
+		for key, item := range v {
+			if item == nil {
+				delete(v, key)
+				continue
+			}
+			sub, declared := props[key].(map[string]any)
+			if !declared {
+				for name := range props {
+					if strings.EqualFold(name, key) {
+						return nil, fmt.Errorf("argument %q must be spelled %q", path+key, path+name)
+					}
+				}
+				sub, _ = schema["additionalProperties"].(map[string]any)
+			}
+			normalized, err := normalizeArgs(item, sub, path+key+".")
+			if err != nil {
+				return nil, err
+			}
+			v[key] = normalized
+		}
+	case []any:
+		items, _ := schema["items"].(map[string]any)
+		for i, item := range v {
+			normalized, err := normalizeArgs(item, items, fmt.Sprintf("%s%d.", path, i))
+			if err != nil {
+				return nil, err
+			}
+			v[i] = normalized
+		}
+	}
+	return value, nil
+}
+
+func validationMessages(err *sjs.ValidationError) []string {
+	if len(err.Causes) == 0 {
+		location := err.InstanceLocation
+		if location == "" {
+			location = "arguments"
+		}
+		return []string{location + ": " + err.Message}
+	}
+	var messages []string
+	for _, cause := range err.Causes {
+		messages = append(messages, validationMessages(cause)...)
+	}
+	return messages
 }

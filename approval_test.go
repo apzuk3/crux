@@ -4,11 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
+	"sync"
 	"testing"
 )
 
 func TestPendingApprovalsLifecycle(t *testing.T) {
+	var mu sync.Mutex
 	var executionOrder []string
+	record := func(name string) {
+		mu.Lock()
+		defer mu.Unlock()
+		executionOrder = append(executionOrder, name)
+	}
 
 	call1 := &ToolCall{ID: "call_1", Name: "get_weather", Args: json.RawMessage(`{"city": "Paris"}`)}
 	call2 := &ToolCall{ID: "call_2", Name: "transfer_funds", Args: json.RawMessage(`{"amount": 100}`)}
@@ -20,7 +28,7 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 				name:           "get_weather",
 				approvalNeeded: false,
 				invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
-					executionOrder = append(executionOrder, "get_weather")
+					record("get_weather")
 					return "sunny", nil, nil
 				},
 			},
@@ -28,7 +36,7 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 				name:           "transfer_funds",
 				approvalNeeded: true,
 				invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
-					executionOrder = append(executionOrder, "transfer_funds")
+					record("transfer_funds")
 					return "funds transferred", nil, nil
 				},
 			},
@@ -36,7 +44,7 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 				name:           "delete_user",
 				approvalNeeded: true,
 				invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
-					executionOrder = append(executionOrder, "delete_user")
+					record("delete_user")
 					return "user deleted", nil, nil
 				},
 			},
@@ -118,7 +126,8 @@ func TestPendingApprovalsLifecycle(t *testing.T) {
 	toolResults := session.executeUnexecutedToolCalls(ctx)
 	session.logs = append(session.logs, toolResults...)
 
-	// Tool 1 and Tool 2 were executed, Tool 3 was rejected (invoke not called)
+	// Tool 1 and Tool 2 were executed (concurrently), Tool 3 was rejected (invoke not called)
+	slices.Sort(executionOrder)
 	if len(executionOrder) != 2 || executionOrder[0] != "get_weather" || executionOrder[1] != "transfer_funds" {
 		t.Fatalf("unexpected execution order: %v", executionOrder)
 	}
