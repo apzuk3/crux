@@ -270,3 +270,46 @@ func TestResumeIdempotentWhenAlreadyCompleted(t *testing.T) {
 		t.Fatalf("expected Resume to return %q, got %q", "world", out)
 	}
 }
+
+// A cancel that arrives while an approved tool runs must not lose its result:
+// the side effect already happened, so Resume must not run the tool again.
+func TestCancelledRunKeepsResultOfToolThatRan(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	var calls int
+	agent := &Agent{maxTurns: 1, tools: []Tool{{
+		name:           "pay",
+		approvalNeeded: true,
+		invoke: func(context.Context, json.RawMessage) (string, *StateDelta, error) {
+			calls++
+			cancel() // the caller gives up while the payment goes through
+			return "paid", nil, nil
+		},
+	}}}
+	session, err := NewSession(t.Context(), agent, WithSessionLogs([]Entry{
+		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "pay"}}},
+		{Kind: KindToolCall, ToolCall: &ToolCall{ID: "call_1", Name: "pay", Args: json.RawMessage(`{}`)}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Approve(t.Context(), "call_1"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := session.Resume(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	stored, err := session.Store().Get(t.Context(), session.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last := stored[len(stored)-1]; last.Kind != KindToolResult || last.ToolResult.Output != "paid" {
+		t.Fatalf("tool result was not stored: %+v", last)
+	}
+
+	// The next Resume goes straight to the model (this agent has none).
+	_, _ = session.Resume(t.Context())
+	if calls != 1 {
+		t.Fatalf("tool ran %d times, want 1", calls)
+	}
+}

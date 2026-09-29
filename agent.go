@@ -422,7 +422,9 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 		}
 
 		if toolResults := s.executeUnexecutedToolCalls(ctx); len(toolResults) > 0 {
-			if err := s.appendLogs(ctx, toolResults...); err != nil {
+			// The tools have already run, so their results are kept even if ctx
+			// was cancelled meanwhile; otherwise the next Resume would run them again.
+			if err := s.appendLogs(context.WithoutCancel(ctx), toolResults...); err != nil {
 				return "", err
 			}
 		}
