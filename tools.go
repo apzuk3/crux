@@ -335,16 +335,15 @@ func schemaOf(t reflect.Type, visiting map[reflect.Type]bool) map[string]any {
 		t = t.Elem()
 	}
 
-	switch t.Kind() {
-	case reflect.Struct, reflect.Slice, reflect.Array, reflect.Map:
-		switch {
-		case t == timeType:
-			return map[string]any{"type": "string", "format": "date-time"}
-		case reflect.PointerTo(t).Implements(jsonUnmarshalerType):
-			return map[string]any{} // decoded by its own UnmarshalJSON
-		case reflect.PointerTo(t).Implements(textUnmarshalerType):
-			return map[string]any{"type": "string"}
-		}
+	// A type with its own decoder, such as an int enum read from names or
+	// slog.Level, is described by what that decoder accepts, not by its kind.
+	switch {
+	case t == timeType:
+		return map[string]any{"type": "string", "format": "date-time"}
+	case reflect.PointerTo(t).Implements(jsonUnmarshalerType):
+		return map[string]any{} // decoded by its own UnmarshalJSON
+	case reflect.PointerTo(t).Implements(textUnmarshalerType):
+		return map[string]any{"type": "string"}
 	}
 
 	switch t.Kind() {

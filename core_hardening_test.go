@@ -3,6 +3,8 @@ package crux
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -360,4 +362,34 @@ func TestToolInputsWithOwnDecoders(t *testing.T) {
 	_, _, err := reg.tools["nested"].invoke(t.Context(), json.RawMessage(`{"m":{"x":{"NAME":"v"}}}`))
 	require.NoError(t, err)
 	require.Equal(t, "v", got.M["x"].Name)
+}
+
+type namedPriority int
+
+func (p *namedPriority) UnmarshalText(data []byte) error {
+	switch string(data) {
+	case "low":
+		*p = 1
+	case "high":
+		*p = 2
+	default:
+		return fmt.Errorf("unknown priority %q", data)
+	}
+	return nil
+}
+
+func TestScalarInputsWithOwnDecoders(t *testing.T) {
+	type input struct {
+		P namedPriority `json:"p"`
+		L slog.Level    `json:"l"`
+	}
+	reg := NewToolsRegistry()
+	var got input
+	RegisterToolWithRegistry(reg, "prio", "p", func(ctx context.Context, in input) (string, *StateDelta, error) {
+		got = in
+		return "", nil, nil
+	})
+	_, _, err := reg.tools["prio"].invoke(t.Context(), json.RawMessage(`{"p":"high","l":"WARN"}`))
+	require.NoError(t, err)
+	require.Equal(t, input{P: 2, L: slog.LevelWarn}, got)
 }
