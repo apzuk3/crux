@@ -585,6 +585,7 @@ func TestFilesystemSearchOutputBounded(t *testing.T) {
 		"many.txt": strings.Repeat("match "+strings.Repeat("z", 150)+"\n", 5000),
 	})
 	got := mustFSTool(t, registry, "search_files_content", searchFilesContentInput{Query: ".*", IsRegex: true, Include: "long.txt"})
+	got, _, _ = strings.Cut(got, "\n[Lines longer than")
 	if len(got) > fsMaxPreview+50 {
 		t.Fatalf("preview of a long match is %d bytes", len(got))
 	}

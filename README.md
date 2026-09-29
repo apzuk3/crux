@@ -145,7 +145,7 @@ agent := crux.Must(crux.New("coder", crux.ChatModelGPT5_4, crux.WithToolsets("fi
 | `list_directory` | list a directory | no |
 | `directory_tree` | recursive tree, optional `max_depth` | no |
 | `glob` | find files by pattern, e.g. `**/*.go` | no |
-| `search_files_content` | text or regex search across files | no |
+| `search_files_content` | text or regex search across files (queries up to 1 KB; a regex reads the first 32 KB of each line) | no |
 | `write_file` | create or overwrite a file | yes |
 | `edit_file` | replace exact, unique text in a file | yes |
 | `create_directory` | create directories | yes |
