@@ -65,7 +65,7 @@ func (a *Agent) newOpenAIClient(httpClient *http.Client) *openai.Client {
 	} else if a.provider != ProviderOpenAI {
 		// Construct the Responses service directly to avoid inheriting OpenAI
 		// credentials, organization, project, or custom headers from the environment.
-		opts = append(opts, option.WithHTTPClient(http.DefaultClient))
+		opts = append(opts, option.WithHTTPClient(defaultHTTPClient()))
 	}
 	if a.provider != ProviderOpenAI {
 		return &openai.Client{Options: opts, Responses: responses.NewResponseService(opts...)}

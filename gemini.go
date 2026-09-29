@@ -29,9 +29,11 @@ func (a *Agent) newGeminiClient(ctx context.Context, httpClient *http.Client) (*
 		config.HTTPOptions.BaseURL = a.baseURL
 	}
 	client := a.effectiveHTTPClient(httpClient)
-	if client != nil {
-		config.HTTPClient = client
+	if client == nil {
+		// genai's own default client has no timeout at all.
+		client = defaultHTTPClient()
 	}
+	config.HTTPClient = client
 	return genai.NewClient(ctx, config)
 }
 

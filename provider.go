@@ -1,8 +1,10 @@
 package crux
 
 import (
+	"net/http"
 	"os"
 	"sync"
+	"time"
 )
 
 type Provider string
@@ -74,4 +76,23 @@ func discoverAPIKey(provider Provider) string {
 	}
 
 	return ""
+}
+
+// defaultHTTPClient is used when neither the agent nor the session sets a
+// client and the SDK would not supply its own. Like the OpenAI SDK's default, it
+// gives up on a server that accepts a request but never sends response headers;
+// the body is not limited, so long streams are unaffected. It is built on first
+// use, so a wrapped http.DefaultTransport (for tracing, say) is kept, though
+// then without the timeout.
+var defaultHTTPClient = sync.OnceValue(func() *http.Client {
+	return newHTTPClient(10 * time.Minute)
+})
+
+func newHTTPClient(responseHeaderTimeout time.Duration) *http.Client {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = transport.Clone()
+		transport.ResponseHeaderTimeout = responseHeaderTimeout
+		return &http.Client{Transport: transport}
+	}
+	return &http.Client{Transport: http.DefaultTransport}
 }
