@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,6 +20,36 @@ const openAIOutputItemOpaqueKey = "openai.response.output_item"
 
 // openAIUnknownOutputItemOpaqueKey holds output items that cannot be replayed.
 const openAIUnknownOutputItemOpaqueKey = "openai.response.unknown_output_item"
+
+// openAIProviderOpaqueKey records which provider produced an output item.
+// Every OpenAI-compatible provider shares the item keys, and one provider's
+// items (such as encrypted reasoning) must not be replayed to another.
+const openAIProviderOpaqueKey = "openai.response.provider"
+
+// withoutForeignOpenAIItems drops the output items another provider produced,
+// as Fork does when the provider changes, so a stored session can be resumed
+// with an agent on a different OpenAI-compatible provider. Entries recorded
+// without a provider are kept as they are.
+func withoutForeignOpenAIItems(log []Entry, provider Provider) []Entry {
+	foreign := func(e Entry) bool {
+		p, ok := e.Opaque[openAIProviderOpaqueKey]
+		return ok && Provider(p) != provider
+	}
+	if !slices.ContainsFunc(log, foreign) {
+		return log
+	}
+	out := make([]Entry, 0, len(log))
+	for _, e := range log {
+		if foreign(e) {
+			if e.Kind == KindProviderTool {
+				continue
+			}
+			e.Opaque = nil
+		}
+		out = append(out, e)
+	}
+	return out
+}
 
 func (a *Agent) newOpenAIClient(httpClient *http.Client) *openai.Client {
 	var opts []option.RequestOption
@@ -46,7 +77,7 @@ func (a *Agent) newOpenAIClient(httpClient *http.Client) *openai.Client {
 
 // openAIstep sends the log and returns the model's entries with usage attached.
 func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
-	input, err := toOpenAIResponseInput(log)
+	input, err := toOpenAIResponseInput(withoutForeignOpenAIItems(log, a.provider))
 	if err != nil {
 		return nil, err
 	}
@@ -157,10 +188,14 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 		if entry.At.IsZero() {
 			entry.At = now
 		}
+		if entry.Opaque == nil {
+			entry.Opaque = make(map[string][]byte)
+		}
+		entry.Opaque[openAIProviderOpaqueKey] = []byte(a.provider)
 		produced = append(produced, entry)
 	}
 
-	if len(produced) == 0 {
+	if !hasAnswerOrCall(produced) {
 		// A completed response with no output is an empty final answer; its
 		// usage must not be lost. https://platform.openai.com/docs/api-reference/responses/object
 		produced = append(produced, Entry{At: now, Kind: KindAssistant})

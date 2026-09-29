@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -772,11 +773,13 @@ func TestFilesystemAtomicWrites(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
-	mustFSTool(t, registry, "write_file", writeFileInput{Path: "link.txt", Content: "via link"})
+	// Writing through a link would change a file the approval did not name.
+	wantFSError(t, registry, "write_file", writeFileInput{Path: "link.txt", Content: "via link"}, "symbolic link to b.txt")
+	wantFSError(t, registry, "edit_file", editFileInput{Path: "link.txt", Edits: []fileEdit{{OldText: "new", NewText: "via link"}}}, "symbolic link to b.txt")
 	if info, err := os.Lstat(filepath.Join(root, "link.txt")); err != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("write replaced the symlink: %v", err)
 	}
-	if data, _ := os.ReadFile(filepath.Join(root, "b.txt")); string(data) != "via link" {
+	if data, _ := os.ReadFile(filepath.Join(root, "b.txt")); string(data) != "new" {
 		t.Fatalf("link target = %q", data)
 	}
 }
@@ -788,4 +791,24 @@ func TestFilesystemEditFileSizeLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantFSError(t, registry, "edit_file", editFileInput{Path: "big.txt", Edits: []fileEdit{{OldText: "y", NewText: "z"}}}, "larger than")
+}
+
+func TestFilesystemConcurrentEditsAreNotLost(t *testing.T) {
+	registry, root := newFilesystemRegistry(t, map[string]string{"f.txt": "A\nB\n"})
+	for range 20 {
+		if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("A\nB\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			mustFSTool(t, registry, "edit_file", editFileInput{Path: "f.txt", Edits: []fileEdit{{OldText: "A", NewText: "a"}}})
+		})
+		wg.Go(func() {
+			mustFSTool(t, registry, "edit_file", editFileInput{Path: "f.txt", Edits: []fileEdit{{OldText: "B", NewText: "b"}}})
+		})
+		wg.Wait()
+		if data, _ := os.ReadFile(filepath.Join(root, "f.txt")); string(data) != "a\nb\n" {
+			t.Fatalf("f.txt = %q, want both edits", data)
+		}
+	}
 }

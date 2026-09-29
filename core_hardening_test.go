@@ -179,3 +179,47 @@ func TestZeroToolsRegistryPanicsWithAClearMessage(t *testing.T) {
 		RegisterToolWithRegistry(reg, "x", "x", func(ctx context.Context, in struct{}) (string, *StateDelta, error) { return "", nil, nil })
 	})
 }
+
+func TestToolRegistrationRejectsNonObjectInput(t *testing.T) {
+	reg := NewToolsRegistry()
+	require.PanicsWithError(t, `tool "echo": input type string must be a struct or a map`, func() {
+		RegisterToolWithRegistry(reg, "echo", "e", func(ctx context.Context, in string) (string, *StateDelta, error) { return in, nil, nil })
+	})
+	require.NotPanics(t, func() {
+		RegisterToolWithRegistry(reg, "any_map", "m", func(ctx context.Context, in map[string]any) (string, *StateDelta, error) { return "", nil, nil })
+	})
+}
+
+func TestCanonicalDataRedactsBaseURLCredentials(t *testing.T) {
+	agent, err := New("a", "some-model", WithProvider(ProviderOpenAI), WithAPIKey("k"),
+		WithBaseURL("https://user:secret@gateway.example/v1?key=token123&region=eu"))
+	require.NoError(t, err)
+	data := string(agent.CanonicalData())
+	require.NotContains(t, data, "secret")
+	require.NotContains(t, data, "token123")
+	require.Contains(t, data, "gateway.example/v1")
+	require.Equal(t, "https://user:secret@gateway.example/v1?key=token123&region=eu", agent.BaseURL())
+}
+
+func TestReplaySkipsEmptyText(t *testing.T) {
+	log := []Entry{
+		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}},
+		{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: " "}}},
+		{Kind: KindToolCall, ToolCall: &ToolCall{ID: "c1", Name: "t", Args: []byte(`{}`)}},
+		{Kind: KindToolResult, ToolResult: &ToolResult{CallID: "c1", Output: "ok"}},
+	}
+
+	messages, err := toAnthropicMessages(log)
+	require.NoError(t, err)
+	require.Len(t, messages, 3)
+	require.Len(t, messages[1].Content, 1)
+	require.NotNil(t, messages[1].Content[0].OfToolUse)
+
+	contents, err := toGeminiContents(log)
+	require.NoError(t, err)
+	require.Len(t, contents, 3)
+	require.Len(t, contents[1].Parts, 1)
+	call := contents[1].Parts[0]
+	require.NotNil(t, call.FunctionCall)
+	require.NotEmpty(t, call.ThoughtSignature, "unsigned calls need Gemini 3's stand-in signature")
+}

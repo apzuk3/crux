@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"google.golang.org/genai"
@@ -131,7 +132,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		}
 		produced = append(produced, entry)
 	}
-	if len(produced) == 0 {
+	if !hasAnswerOrCall(produced) {
 		// The model may stop (finish reason STOP) without saying anything;
 		// that is still a final answer, and its usage must not be lost.
 		// https://ai.google.dev/api/generate-content#FinishReason
@@ -341,6 +342,9 @@ func toGeminiParts(e Entry, calls map[string]*genai.FunctionCall) ([]*genai.Part
 			if part.Kind != ContentKindText && part.Kind != ContentKindRefusal {
 				return nil, fmt.Errorf("unsupported content part kind %q", part.Kind)
 			}
+			if strings.TrimSpace(part.Text) == "" {
+				continue // Gemini rejects empty text parts.
+			}
 			parts = append(parts, genai.NewPartFromText(part.Text))
 		}
 	case KindReasoning:
@@ -356,7 +360,13 @@ func toGeminiParts(e Entry, calls map[string]*genai.FunctionCall) ([]*genai.Part
 				return nil, fmt.Errorf("decode Gemini function arguments: %w", err)
 			}
 		}
-		parts = []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: call.ID, Name: call.Name, Args: args}}}
+		// History from another provider has no thought signature, which
+		// Gemini 3 requires on function calls; this is the documented stand-in:
+		// https://ai.google.dev/gemini-api/docs/thought-signatures
+		parts = []*genai.Part{{
+			FunctionCall:     &genai.FunctionCall{ID: call.ID, Name: call.Name, Args: args},
+			ThoughtSignature: []byte("skip_thought_signature_validator"),
+		}}
 	case KindToolResult:
 		if e.ToolResult == nil {
 			return nil, errors.New("tool result entry carries no tool result")

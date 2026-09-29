@@ -158,7 +158,7 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 		totalCacheWriteTokens += int(response.Usage.CacheCreationInputTokens)
 
 		if response.StopReason != anthropic.StopReasonPauseTurn {
-			if len(produced) == 0 {
+			if !hasAnswerOrCall(produced) {
 				// The model may end its turn without saying anything; that is
 				// still a final answer, and its usage must not be lost. See
 				// "Empty responses with end_turn":
@@ -333,6 +333,9 @@ func toAnthropicContentBlockParamUnion(e Entry) ([]anthropic.ContentBlockParamUn
 		for _, part := range e.Content {
 			if part.Kind != ContentKindText && part.Kind != ContentKindRefusal {
 				return nil, fmt.Errorf("unsupported content part kind %q", part.Kind)
+			}
+			if strings.TrimSpace(part.Text) == "" {
+				continue // Anthropic rejects empty text blocks.
 			}
 			blocks = append(blocks, anthropic.NewTextBlock(part.Text))
 		}

@@ -83,12 +83,17 @@ func RegisterToolStateMutate[In, Out any](name string, description string, fn fu
 
 // RegisterToolWithRegistry registers a tool in registry. It panics if name is
 // not a valid tool name (letters, digits, '_' and '-', at most 64 characters)
-// or is already registered, like http.HandleFunc does for a repeated pattern.
+// or is already registered, like http.HandleFunc does for a repeated pattern,
+// and if In is not a struct or map, since tool arguments are a JSON object.
 func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, description string, fn func(ctx context.Context, input In) (Out, *StateDelta, error), opts ...ToolOption) {
 	if err := validateToolName(name); err != nil {
 		panic(toolRegistrationError{err})
 	}
 	schema := jsonSchemaOf[In]()
+	if schema["type"] != "object" {
+		// Providers only accept tools whose arguments are a JSON object.
+		panic(toolRegistrationError{fmt.Errorf("tool %q: input type %s must be a struct or a map", name, reflect.TypeFor[In]())})
+	}
 	validator, err := compileToolSchema(schema)
 	if err != nil {
 		panic(toolRegistrationError{fmt.Errorf("tool %q: %w", name, err)})
