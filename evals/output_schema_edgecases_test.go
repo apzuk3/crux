@@ -37,11 +37,10 @@ If you cannot fulfill the request perfectly, still return valid JSON.`
 // -----------------------------------------------------------------------------
 
 type NullableOutput struct {
-	Name     string         `json:"name"`
-	Email    *string        `json:"email,omitempty"`
-	Score    *int           `json:"score,omitempty"`
-	Active   *bool          `json:"active,omitempty"`
-	Metadata map[string]any `json:"metadata,omitempty"`
+	Name   string  `json:"name"`
+	Email  *string `json:"email,omitempty"`
+	Score  *int    `json:"score,omitempty"`
+	Active *bool   `json:"active,omitempty"`
 }
 
 type NumericOutput struct {
@@ -150,7 +149,7 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), edgeCaseTimeout)
 			defer cancel()
 
-			// 1. Nullable + Optional + Map fields
+			// 1. Nullable + Optional fields
 			t.Run("nullable_and_pointers", func(t *testing.T) {
 				agent := newAgent(t, "nullable-test", tc.provider, tc.model,
 					crux.WithOutputSchemaFrom[NullableOutput]())
@@ -158,7 +157,7 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 				require.NoError(t, err)
 
 				var out NullableOutput
-				prompt := `Return JSON for a person named "Alice". Include email "alice@example.com", score 95, active true, and metadata {"role": "admin"}.`
+				prompt := `Return JSON for a person named "Alice". Include email "alice@example.com", score 95, and active true.`
 
 				err = sess.RunInto(ctx, prompt, &out)
 				require.NoError(t, err)

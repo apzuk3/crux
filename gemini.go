@@ -34,6 +34,13 @@ func (a *Agent) newGeminiClient(ctx context.Context, httpClient *http.Client) (*
 		client = defaultHTTPClient()
 	}
 	config.HTTPClient = client
+	// genai retries only when asked to. Match the OpenAI and Anthropic SDKs:
+	// two retries of 408, 429, 5xx and connection errors, with backoff.
+	config.HTTPOptions.RetryOptions = &genai.HTTPRetryOptions{
+		Attempts:     genai.Ptr[int32](3),
+		InitialDelay: genai.Ptr(0.5),
+		MaxDelay:     genai.Ptr(8.0),
+	}
 	return genai.NewClient(ctx, config)
 }
 
@@ -209,7 +216,16 @@ func streamGemini(ctx context.Context, client *genai.Client, model string, conte
 			if geminiPartEmpty(part) {
 				continue
 			}
-			candidate.Content.Parts = append(candidate.Content.Parts, part)
+			parts := candidate.Content.Parts
+			if n := len(parts); n > 0 && canMergeGeminiText(parts[n-1], part) {
+				// A streamed answer arrives as many text parts; keep them as the
+				// one part a non-streamed response has, signed by the last.
+				parts[n-1].Text += part.Text
+				parts[n-1].ThoughtSignature = part.ThoughtSignature
+			} else {
+				merged := *part
+				candidate.Content.Parts = append(parts, &merged)
+			}
 			kind := ChunkText
 			if part.Thought {
 				kind = ChunkReasoning
@@ -228,6 +244,21 @@ func streamGemini(ctx context.Context, client *genai.Client, model string, conte
 		response.Candidates = nil
 	}
 	return response, nil
+}
+
+// canMergeGeminiText reports whether next continues the text of prev: both
+// carry only text of the same kind, and prev is not yet signed.
+func canMergeGeminiText(prev, next *genai.Part) bool {
+	if prev.Thought != next.Thought || len(prev.ThoughtSignature) > 0 || prev.Text == "" || next.Text == "" {
+		return false
+	}
+	return geminiTextOnly(prev) && geminiTextOnly(next)
+}
+
+func geminiTextOnly(part *genai.Part) bool {
+	rest := *part
+	rest.Text, rest.Thought, rest.ThoughtSignature = "", false, nil
+	return geminiPartEmpty(&rest)
 }
 
 func geminiTools(selected []Tool) ([]*genai.Tool, error) {

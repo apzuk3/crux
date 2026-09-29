@@ -88,7 +88,7 @@ func adaptOpenAI(root map[string]any, provider Provider) (map[string]any, error)
 			return nil
 		}
 
-		if additional, exists := m["additionalProperties"]; exists && additional != false {
+		if isDynamicMap(m) {
 			return fmt.Errorf("%s does not support dynamic map schemas in structured outputs", provider)
 		}
 		m["additionalProperties"] = false
@@ -153,7 +153,7 @@ func adaptAnthropic(root map[string]any) (map[string]any, error) {
 		if !isObject {
 			return nil
 		}
-		if additional, exists := m["additionalProperties"]; exists && additional != false {
+		if isDynamicMap(m) {
 			return fmt.Errorf("anthropic does not support dynamic map schemas in structured outputs")
 		}
 		m["additionalProperties"] = false
@@ -219,13 +219,26 @@ func adaptPermissive(root map[string]any) (map[string]any, error) {
 		if !isObject {
 			return nil
 		}
-		// If additionalProperties is not set as a dynamic schema, lock it to false.
-		if _, exists := m["additionalProperties"]; !exists {
+		// Close objects with declared properties; a dynamic map stays open.
+		if !isDynamicMap(m) {
 			m["additionalProperties"] = false
 		}
 		return nil
 	})
 	return root, err
+}
+
+// isDynamicMap reports whether an object schema accepts arbitrary keys: it
+// allows additional properties, or, like the schema reflected from
+// map[string]any, declares neither properties nor additionalProperties.
+// Closing such a schema would let the model return only an empty object.
+func isDynamicMap(m map[string]any) bool {
+	additional, exists := m["additionalProperties"]
+	if exists {
+		return additional != false
+	}
+	_, hasProps := m["properties"]
+	return !hasProps
 }
 
 // walkSchemas recursively visits every JSON schema object in the tree.
@@ -255,9 +268,11 @@ func walkSchemas(node any, visit func(m map[string]any) error) error {
 			}
 		}
 	}
-	if items, ok := m["items"]; ok {
-		if err := walkSchemas(items, visit); err != nil {
-			return err
+	for _, key := range []string{"items", "additionalProperties", "prefixItems", "not", "if", "then", "else"} {
+		if sub, ok := m[key]; ok {
+			if err := walkSchemas(sub, visit); err != nil {
+				return err
+			}
 		}
 	}
 	if defs, ok := m["$defs"].(map[string]any); ok {

@@ -286,6 +286,16 @@ func fromOpenAIResponseOutputItemUnion(item responses.ResponseOutputItemUnion) (
 				})
 			}
 		}
+		if v.Phase == responses.ResponseOutputMessagePhaseCommentary && !slices.ContainsFunc(content, func(p ContentPart) bool { return p.Kind == ContentKindRefusal }) {
+			// Commentary is what the model says while it works, not its
+			// answer, so it must not become part of the final output. It is
+			// still replayed as the original message.
+			var text strings.Builder
+			for _, part := range content {
+				text.WriteString(part.Text)
+			}
+			return Entry{Kind: KindReasoning, Reasoning: &Reasoning{Summary: text.String()}, Opaque: opaque}, nil
+		}
 		return Entry{
 			Kind:    KindAssistant,
 			Content: content,

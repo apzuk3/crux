@@ -93,7 +93,7 @@ func TestDefaultHTTPClientTimesOutWithoutResponseHeaders(t *testing.T) {
 	defaultHTTPClient = func() *http.Client { return client }
 	t.Cleanup(func() { defaultHTTPClient = original })
 
-	for _, provider := range []Provider{ProviderXAI, ProviderOllama, ProviderGoogle} {
+	for _, provider := range []Provider{ProviderXAI, ProviderOllama, ProviderGoogle, ProviderAnthropic} {
 		t.Run(string(provider), func(t *testing.T) {
 			agent, err := New("a", "some-model", WithProvider(provider), WithBaseURL(server.URL), WithAPIKey("key"))
 			if err != nil {
