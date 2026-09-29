@@ -29,9 +29,12 @@ func (a *Agent) newAnthropicClient(httpClient *http.Client) *anthropic.Client {
 	}
 
 	client := a.effectiveHTTPClient(httpClient)
-	if client != nil {
-		opts = append(opts, option.WithHTTPClient(client))
+	if client == nil {
+		// The SDK would fall back to http.DefaultClient, which never times out
+		// a server that accepts a streaming request but does not answer.
+		client = defaultHTTPClient()
 	}
+	opts = append(opts, option.WithHTTPClient(client))
 
 	c := anthropic.NewClient(opts...)
 	return &c

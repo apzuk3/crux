@@ -180,7 +180,10 @@ func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Ent
 				}
 			}
 
-			if err := tx.Create(&logs).Error; err != nil {
+			// Batches keep each INSERT under the database's limit on bound
+			// parameters (999 on older SQLite); the transaction keeps the
+			// write all-or-nothing.
+			if err := tx.CreateInBatches(&logs, 200).Error; err != nil {
 				return fmt.Errorf("insert session logs: %w", err)
 			}
 		}

@@ -45,6 +45,7 @@ const filesystemToolsetName = "filesystem"
 var (
 	errIsDir      = errors.New("is a directory")
 	errNotRegular = errors.New("not a regular file")
+	errReadOnly   = errors.New("file is read-only")
 )
 
 // Filesystem returns a toolset of file tools confined to root. Paths the model
@@ -824,13 +825,16 @@ func (t *fsTools) editFile(ctx context.Context, in editFileInput) (string, error
 
 	for i, edit := range in.Edits {
 		oldText, newText := edit.OldText, edit.NewText
-		if crlf {
-			oldText, newText = toCRLF(oldText), toCRLF(newText)
-		}
 		if oldText == "" {
 			return "", fmt.Errorf("edit %d: old_text must not be empty", i+1)
 		}
-		switch n := strings.Count(content, oldText); n {
+		n := countOverlapping(content, oldText)
+		if n == 0 && crlf && toCRLF(oldText) != oldText {
+			// The model usually writes \n; match the file's CRLF lines.
+			oldText, newText = toCRLF(oldText), toCRLF(newText)
+			n = countOverlapping(content, oldText)
+		}
+		switch n {
 		case 0:
 			return "", fmt.Errorf("edit %d: old_text not found in %s", i+1, in.Path)
 		case 1:
@@ -844,6 +848,21 @@ func (t *fsTools) editFile(ctx context.Context, in editFileInput) (string, error
 		return "", fsError(in.Path, err)
 	}
 	return fmt.Sprintf("Applied %d edit(s) to %s", len(in.Edits), display(rel)), nil
+}
+
+// countOverlapping counts the places sub starts in s, including overlapping
+// ones, which strings.Count skips. Two overlapping matches make an edit
+// ambiguous just as two separate ones do.
+func countOverlapping(s, sub string) int {
+	n := 0
+	for {
+		i := strings.Index(s, sub)
+		if i < 0 {
+			return n
+		}
+		n++
+		s = s[i+1:]
+	}
 }
 
 func readForEdit(root *os.Root, rel string) ([]byte, error) {
@@ -880,6 +899,10 @@ func replaceFile(root *os.Root, rel string, data []byte) error {
 			return errIsDir
 		case !info.Mode().IsRegular():
 			return errNotRegular
+		case info.Mode().Perm()&0o200 == 0:
+			// Renaming over the file needs only directory permission, so
+			// check the file's own before replacing it.
+			return errReadOnly
 		}
 		perm, keepPerm = info.Mode().Perm(), true
 	} else if !errors.Is(err, fs.ErrNotExist) {

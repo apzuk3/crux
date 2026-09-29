@@ -311,6 +311,62 @@ func redactURL(raw string) string {
 	return u.String()
 }
 
+// redactURLSecrets removes the credentials a base URL carries from err's
+// message, because provider SDKs print the request URL in their errors.
+// errors.Is and errors.As still see the original error.
+func redactURLSecrets(err error, raw string) error {
+	u, parseErr := url.Parse(raw)
+	if parseErr != nil || (u.User == nil && u.RawQuery == "") {
+		return err
+	}
+	msg := err.Error()
+	redacted := msg
+	if u.User != nil {
+		// As url.URL.String writes it, and as a raw string would show it.
+		for _, userinfo := range []string{u.User.String(), rawUserinfo(raw)} {
+			if userinfo != "" {
+				redacted = strings.ReplaceAll(redacted, userinfo+"@", "redacted@")
+			}
+		}
+	}
+	for key, values := range u.Query() {
+		for _, value := range values {
+			if value == "" {
+				continue
+			}
+			for _, form := range []string{url.QueryEscape(value), value} {
+				redacted = strings.ReplaceAll(redacted, url.QueryEscape(key)+"="+form, url.QueryEscape(key)+"=redacted")
+			}
+		}
+	}
+	if redacted == msg {
+		return err
+	}
+	return &redactedError{msg: redacted, err: err}
+}
+
+// rawUserinfo returns the user info of a URL exactly as written.
+func rawUserinfo(raw string) string {
+	_, rest, ok := strings.Cut(raw, "://")
+	if !ok {
+		return ""
+	}
+	authority, _, _ := strings.Cut(rest, "/")
+	userinfo, _, found := strings.Cut(authority, "@")
+	if !found {
+		return ""
+	}
+	return userinfo
+}
+
+type redactedError struct {
+	msg string
+	err error
+}
+
+func (e *redactedError) Error() string { return e.msg }
+func (e *redactedError) Unwrap() error { return e.err }
+
 func (a *Agent) computeAgentID() uuid.UUID {
 	return uuid.NewSHA1(agentNamespace, a.CanonicalData())
 }
@@ -505,6 +561,14 @@ func (a *Agent) effectiveHTTPClient(sessionClient *http.Client) *http.Client {
 }
 
 func (a *Agent) step(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
+	entries, err := a.providerStep(ctx, log, httpClient, emit)
+	if err != nil {
+		return nil, redactURLSecrets(err, a.baseURL)
+	}
+	return entries, nil
+}
+
+func (a *Agent) providerStep(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
 	client := a.effectiveHTTPClient(httpClient)
 	switch a.provider {
 	case ProviderAnthropic:
@@ -605,21 +669,44 @@ func (a *Agent) toolRequiresApproval(name string) bool {
 	return a.tools[index].approvalNeeded
 }
 
-func (s *Session) hasUnexecutedToolCalls() bool {
-	resolved := make(map[string]bool)
+// openToolCall is a tool call that has no result yet, with the user's
+// decision on it if one was recorded.
+type openToolCall struct {
+	call     *ToolCall
+	decision *Approval
+}
+
+// openToolCalls returns the tool calls without a result, in log order. A result
+// or decision applies to the open call with its ID, not to every call that ever
+// had it, so a provider that reuses call IDs across turns still gets each call
+// run and answered.
+func (s *Session) openToolCalls() []openToolCall {
+	var open []openToolCall
+	pending := make(map[string]int) // call ID -> index in open
 	for _, entry := range s.logs {
-		if entry.Kind == KindToolResult && entry.ToolResult != nil && entry.ToolResult.CallID != "" {
-			resolved[entry.ToolResult.CallID] = true
-		}
-	}
-	for _, entry := range s.logs {
-		if entry.Kind == KindToolCall && entry.ToolCall != nil && entry.ToolCall.ID != "" {
-			if !resolved[entry.ToolCall.ID] {
-				return true
+		switch {
+		case entry.Kind == KindToolCall && entry.ToolCall != nil && entry.ToolCall.ID != "":
+			if _, dup := pending[entry.ToolCall.ID]; dup {
+				continue // repeated while still open; answered once
+			}
+			pending[entry.ToolCall.ID] = len(open)
+			open = append(open, openToolCall{call: entry.ToolCall})
+		case entry.Kind == KindApproval && entry.Approval != nil:
+			if i, ok := pending[entry.Approval.CallID]; ok {
+				open[i].decision = entry.Approval
+			}
+		case entry.Kind == KindToolResult && entry.ToolResult != nil:
+			if i, ok := pending[entry.ToolResult.CallID]; ok {
+				open[i].call = nil
+				delete(pending, entry.ToolResult.CallID)
 			}
 		}
 	}
-	return false
+	return slices.DeleteFunc(open, func(c openToolCall) bool { return c.call == nil })
+}
+
+func (s *Session) hasUnexecutedToolCalls() bool {
+	return len(s.openToolCalls()) > 0
 }
 
 func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
@@ -627,29 +714,7 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 		return nil
 	}
 
-	resolved := make(map[string]bool)
-	decisions := make(map[string]*Approval)
-	for _, entry := range s.logs {
-		if entry.Kind == KindToolResult && entry.ToolResult != nil && entry.ToolResult.CallID != "" {
-			resolved[entry.ToolResult.CallID] = true
-		}
-		if entry.Kind == KindApproval && entry.Approval != nil && entry.Approval.CallID != "" {
-			decisions[entry.Approval.CallID] = entry.Approval
-		}
-	}
-
-	var unexecuted []*ToolCall
-	seen := make(map[string]bool)
-	for _, entry := range s.logs {
-		if entry.Kind == KindToolCall && entry.ToolCall != nil && entry.ToolCall.ID != "" {
-			id := entry.ToolCall.ID
-			if !resolved[id] && !seen[id] {
-				seen[id] = true
-				unexecuted = append(unexecuted, entry.ToolCall)
-			}
-		}
-	}
-
+	unexecuted := s.openToolCalls()
 	if len(unexecuted) == 0 {
 		return nil
 	}
@@ -659,12 +724,12 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 	state := s.StateSnapshot()
 	results := make([][]Entry, len(unexecuted))
 	var wg sync.WaitGroup
-	for i, call := range unexecuted {
+	for i, open := range unexecuted {
 		if ctx.Err() != nil {
 			break
 		}
 
-		dec := decisions[call.ID]
+		call, dec := open.call, open.decision
 		if dec != nil && !dec.Approved {
 			reason := dec.Reason
 			if reason == "" {
@@ -694,28 +759,12 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 // PendingApprovals returns copies of the tool calls waiting for Approve or
 // Reject. Changing them does not change what runs.
 func (s *Session) PendingApprovals() []*ToolCall {
-	resolved := make(map[string]bool)
-	decisions := make(map[string]bool)
-	for _, entry := range s.logs {
-		if entry.Kind == KindToolResult && entry.ToolResult != nil && entry.ToolResult.CallID != "" {
-			resolved[entry.ToolResult.CallID] = true
-		}
-		if entry.Kind == KindApproval && entry.Approval != nil && entry.Approval.CallID != "" {
-			decisions[entry.Approval.CallID] = true
-		}
-	}
-
 	var pending []*ToolCall
-	seen := make(map[string]bool)
-	for _, entry := range s.logs {
-		if entry.Kind == KindToolCall && entry.ToolCall != nil && entry.ToolCall.ID != "" {
-			id := entry.ToolCall.ID
-			if !resolved[id] && !decisions[id] && !seen[id] && s.agent.toolRequiresApproval(entry.ToolCall.Name) {
-				seen[id] = true
-				call := *entry.ToolCall
-				call.Args = slices.Clone(call.Args)
-				pending = append(pending, &call)
-			}
+	for _, open := range s.openToolCalls() {
+		if open.decision == nil && s.agent.toolRequiresApproval(open.call.Name) {
+			call := *open.call
+			call.Args = slices.Clone(call.Args)
+			pending = append(pending, &call)
 		}
 	}
 	return pending
@@ -843,6 +892,8 @@ func (s *Session) dispatch(ctx context.Context, call *ToolCall, snapshot map[str
 			result.Error = fmt.Sprintf("tool %q returned state that cannot be stored as JSON: %v", call.Name, err)
 			return []Entry{{Kind: KindToolResult, ToolResult: &result, At: start.UTC(), Duration: duration}}, nil
 		}
+		// The tool may keep and change its maps, so the log holds its own copy.
+		delta = &StateDelta{By: delta.By, Set: cloneState(delta.Set), Delete: slices.Clone(delta.Delete)}
 		if delta.By == "" {
 			delta.By = call.Name
 		}
