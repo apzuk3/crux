@@ -27,7 +27,7 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
   1. run any pending tool calls (the calls from one model turn run concurrently, at most 8 at a time; results keep the model's order);
   2. call the provider (`step`);
   3. append what the model produced;
-  4. stop on approvals, refusals or a final answer; otherwise repeat, up to `maxTurns`.
+  4. stop on approvals, refusals or a final answer; otherwise repeat, up to `maxTurns`. Output repair requests (`WithMaxRepairs`) are extra and don't count as turns.
 - **Tool failures never stop a run.** Tool errors, and tool panics (recovered in `invokeTool`), are sent to the model as `ToolResult.Error`. Arguments are validated against the tool's input schema first; repeated keys, keys that match a field only case-insensitively and keys of a struct input that match no field are rejected (maps and nested types with their own decoder accept any key), so an approval shown from the raw arguments matches what the tool receives.
 - **Approvals:** tools registered with `WithApprovalNeeded(true)` make `Run` return `ErrApprovalNeeded`. The caller then uses `Approve`/`Reject` and `Resume`.
 - **Stores** (`store.go`, `store_gorm.go`): `Store.Append(ctx, *Session, entries...)` and `Store.Get(ctx, id)`.
