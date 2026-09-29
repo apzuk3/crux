@@ -1,6 +1,7 @@
 package cruxtest
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 )
@@ -49,18 +50,22 @@ func buildGeminiResponse(turn *Turn, callIndex int) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-			parts = append(parts, map[string]any{
-				"functionCall": map[string]any{
-					"id":   toolID,
-					"name": tc.Name,
-					"args": argsMap,
-				},
-			})
+			call := map[string]any{"name": tc.Name, "args": argsMap}
+			if !turn.omitCallIDs {
+				call["id"] = toolID
+			}
+			part := map[string]any{"functionCall": call}
+			if i == 0 && turn.thoughtSignature != "" {
+				part["thoughtSignature"] = base64.StdEncoding.EncodeToString([]byte(turn.thoughtSignature))
+			}
+			parts = append(parts, part)
 		}
 	} else {
-		parts = append(parts, map[string]any{
-			"text": turn.Text,
-		})
+		part := map[string]any{"text": turn.Text}
+		if turn.thoughtSignature != "" {
+			part["thoughtSignature"] = base64.StdEncoding.EncodeToString([]byte(turn.thoughtSignature))
+		}
+		parts = append(parts, part)
 	}
 
 	promptTokens := 10

@@ -219,12 +219,27 @@ func streamOpenAI(ctx context.Context, client *openai.Client, params responses.R
 	stream := client.Responses.NewStreaming(ctx, params)
 	defer stream.Close()
 	var response *responses.Response
+	// Commentary messages become reasoning entries, so their text streams as
+	// reasoning too. Deltas name their item by ID and output index.
+	commentaryIDs := make(map[string]bool)
+	commentaryIndexes := make(map[int64]bool)
 	for stream.Next() {
 		event := stream.Current()
 		var err error
 		switch event.Type {
+		case "response.output_item.added":
+			if item := event.Item; item.Type == "message" && item.Phase == responses.ResponseOutputMessagePhaseCommentary {
+				if item.ID != "" {
+					commentaryIDs[item.ID] = true
+				}
+				commentaryIndexes[event.OutputIndex] = true
+			}
 		case "response.output_text.delta":
-			err = emitChunk(emit, ChunkText, event.Delta)
+			kind := ChunkText
+			if commentaryIDs[event.ItemID] || (event.ItemID == "" && commentaryIndexes[event.OutputIndex]) {
+				kind = ChunkReasoning
+			}
+			err = emitChunk(emit, kind, event.Delta)
 		case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
 			err = emitChunk(emit, ChunkReasoning, event.Delta)
 		case "response.completed", "response.failed", "response.incomplete":
