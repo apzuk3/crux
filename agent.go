@@ -71,10 +71,9 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 	}
 
 	session := &Session{
-		id:         uuid.New(),
-		agent:      agent,
-		logs:       make([]Entry, 0),
-		httpClient: agent.httpClient,
+		id:    uuid.New(),
+		agent: agent,
+		logs:  make([]Entry, 0),
 	}
 
 	for _, opt := range opts {
@@ -147,6 +146,7 @@ func (s *Session) Logs() []Entry {
 }
 
 // Usage returns the tokens used by every model request in the session.
+// A fork starts at zero: history copied by Fork carries no usage.
 func (s *Session) Usage() Usage {
 	var total Usage
 	for _, entry := range s.logs {

@@ -91,7 +91,7 @@ func TestToolDispatchRecordsDuration(t *testing.T) {
 	}
 }
 
-func TestUsageAndDurationClonedOnFork(t *testing.T) {
+func TestForkKeepsDurationAndDropsUsage(t *testing.T) {
 	agent := &Agent{
 		provider: ProviderOpenAI,
 		model:    "gpt-4o",
@@ -129,16 +129,14 @@ func TestUsageAndDurationClonedOnFork(t *testing.T) {
 	if fEntry.Duration != 150*time.Millisecond {
 		t.Errorf("expected Duration 150ms, got %v", fEntry.Duration)
 	}
-	if fEntry.Usage == nil {
-		t.Fatal("expected non-nil Usage")
-	}
-	if fEntry.Usage.InputTokens != 100 || fEntry.Usage.OutputTokens != 50 || fEntry.Usage.CacheReadTokens != 20 || fEntry.Usage.CacheWriteTokens != 10 {
-		t.Errorf("unexpected Usage: %+v", fEntry.Usage)
+	if fEntry.Usage != nil {
+		t.Errorf("fork copied usage from its parent: %+v", fEntry.Usage)
 	}
 
-	// Ensure mutation of fork does not affect parent
-	fEntry.Usage.InputTokens = 999
+	// Ensure mutation of copied logs does not affect the session
+	parentLogs := session.Logs()
+	parentLogs[0].Usage.InputTokens = 999
 	if session.logs[0].Usage.InputTokens == 999 {
-		t.Errorf("mutating fork usage affected parent")
+		t.Errorf("mutating copied usage affected the session")
 	}
 }
