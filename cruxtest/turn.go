@@ -31,6 +31,10 @@ type Turn struct {
 	RawBody    []byte
 	Usage      *TokenUsage
 	empty      bool
+
+	omitCallIDs      bool
+	thoughtSignature string
+	blankText        bool
 }
 
 // ReturnText configures the turn to respond with a plain text assistant message.
@@ -87,6 +91,29 @@ func (t *Turn) ReturnError(statusCode int, body string) *Turn {
 func (t *Turn) ReturnRaw(statusCode int, body []byte) *Turn {
 	t.StatusCode = statusCode
 	t.RawBody = body
+	return t
+}
+
+// WithoutCallIDs makes Gemini function calls carry no id, as Gemini models
+// often send them. Other providers always need call ids and ignore it.
+func (t *Turn) WithoutCallIDs() *Turn {
+	t.omitCallIDs = true
+	return t
+}
+
+// WithThoughtSignature makes the Gemini response carry a thought signature:
+// on the first function call, or else on the text. A streamed text answer
+// sends it in a final chunk of its own with empty text, as Gemini does.
+// Other providers ignore it.
+func (t *Turn) WithThoughtSignature(signature string) *Turn {
+	t.thoughtSignature = signature
+	return t
+}
+
+// WithBlankText makes an Anthropic response with tool calls and no text start
+// with a "\n\n" text block, as Claude often does. Other providers ignore it.
+func (t *Turn) WithBlankText() *Turn {
+	t.blankText = true
 	return t
 }
 

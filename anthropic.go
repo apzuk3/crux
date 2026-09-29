@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -179,8 +180,15 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 		if continuations == maxContinuations {
 			return nil, errors.New("anthropic max paused-turn continuations reached")
 		}
-		// Replay all returned blocks unchanged, keeping the same tools and config.
-		params.Messages = append(params.Messages, response.ToParam())
+		// Replay the returned blocks unchanged, keeping the same tools and
+		// config, but without the empty text blocks the API rejects.
+		paused := response.ToParam()
+		paused.Content = slices.DeleteFunc(paused.Content, func(b anthropic.ContentBlockParamUnion) bool {
+			return b.OfText != nil && strings.TrimSpace(b.OfText.Text) == ""
+		})
+		if len(paused.Content) > 0 {
+			params.Messages = append(params.Messages, paused)
+		}
 	}
 }
 
@@ -326,6 +334,11 @@ func toAnthropicContentBlockParamUnion(e Entry) ([]anthropic.ContentBlockParamUn
 		var block anthropic.ContentBlockUnion
 		if err := json.Unmarshal(raw, &block); err != nil {
 			return nil, fmt.Errorf("decode Anthropic content block: %w", err)
+		}
+		if block.Type == "text" && strings.TrimSpace(block.Text) == "" {
+			// Claude often sends "\n\n" before a tool call, and a streamed text
+			// block may stay empty, but the API rejects such blocks on replay.
+			return nil, nil
 		}
 		return []anthropic.ContentBlockParamUnion{block.ToParam()}, nil
 	}

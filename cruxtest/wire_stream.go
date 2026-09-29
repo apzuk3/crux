@@ -71,6 +71,9 @@ func buildStreamResponse(provider crux.Provider, raw []byte) ([]byte, error) {
 			}
 			if text, ok := part["text"].(string); ok {
 				split(text, func(delta string) { emit(map[string]any{"text": delta}) })
+				if signature, ok := part["thoughtSignature"]; ok {
+					emit(map[string]any{"text": "", "thoughtSignature": signature})
+				}
 			} else {
 				emit(part)
 			}

@@ -261,38 +261,24 @@ func walkSchemas(node any, visit func(m map[string]any) error) error {
 		return err
 	}
 
-	if props, ok := m["properties"].(map[string]any); ok {
-		for _, v := range props {
-			if err := walkSchemas(v, visit); err != nil {
-				return err
-			}
-		}
-	}
-	for _, key := range []string{"items", "additionalProperties", "prefixItems", "not", "if", "then", "else"} {
+	// Keywords whose value is a schema, or a list of schemas.
+	for _, key := range []string{
+		"items", "additionalItems", "prefixItems", "contains", "unevaluatedItems",
+		"additionalProperties", "propertyNames", "unevaluatedProperties",
+		"not", "if", "then", "else", "anyOf", "allOf", "oneOf", "contentSchema",
+	} {
 		if sub, ok := m[key]; ok {
 			if err := walkSchemas(sub, visit); err != nil {
 				return err
 			}
 		}
 	}
-	if defs, ok := m["$defs"].(map[string]any); ok {
-		for _, v := range defs {
-			if err := walkSchemas(v, visit); err != nil {
-				return err
-			}
-		}
-	}
-	if defs, ok := m["definitions"].(map[string]any); ok {
-		for _, v := range defs {
-			if err := walkSchemas(v, visit); err != nil {
-				return err
-			}
-		}
-	}
-	for _, key := range []string{"anyOf", "allOf", "oneOf"} {
-		if list, ok := m[key].([]any); ok {
-			for _, item := range list {
-				if err := walkSchemas(item, visit); err != nil {
+	// Keywords whose value maps names to schemas. The draft-7 "dependencies"
+	// may also map to property lists, which hold no schemas to visit.
+	for _, key := range []string{"properties", "patternProperties", "dependentSchemas", "dependencies", "$defs", "definitions"} {
+		if named, ok := m[key].(map[string]any); ok {
+			for _, v := range named {
+				if err := walkSchemas(v, visit); err != nil {
 					return err
 				}
 			}
