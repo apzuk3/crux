@@ -248,3 +248,43 @@ func TestOutputValidationRejectsTrailingData(t *testing.T) {
 	require.NoError(t, validateOutput(validator, `{"a":1}`))
 	require.ErrorIs(t, validateOutput(validator, `{"a":1} and some prose`), ErrOutputValidation)
 }
+
+type recursiveNode struct {
+	Name     string          `json:"name"`
+	Children []recursiveNode `json:"children,omitempty"`
+}
+
+type defaultedInput struct {
+	Target string `json:"target"`
+	DryRun *bool  `json:"dry_run,omitempty"`
+}
+
+func (d *defaultedInput) UnmarshalJSON(data []byte) error {
+	type plain defaultedInput
+	return json.Unmarshal(data, (*plain)(d))
+}
+
+// Approval shows the raw arguments, so no key may reach a field under a
+// spelling the approval does not show.
+func TestToolArgumentCaseChecksCoverNullsAndRecursiveTypes(t *testing.T) {
+	reg := NewToolsRegistry()
+	var gotDefaulted defaultedInput
+	RegisterToolWithRegistry(reg, "deploy", "d", func(ctx context.Context, in defaultedInput) (string, *StateDelta, error) {
+		gotDefaulted = in
+		return "", nil, nil
+	})
+	RegisterToolWithRegistry(reg, "tree", "t", func(ctx context.Context, in recursiveNode) (string, *StateDelta, error) {
+		return "", nil, nil
+	})
+	require.Equal(t, "object", reg.tools["deploy"].schema["type"], "a struct with UnmarshalJSON is described by its fields")
+
+	_, _, err := reg.tools["deploy"].invoke(t.Context(), json.RawMessage(`{"target":"prod","dry_run":true,"DRY_RUN":null}`))
+	require.ErrorContains(t, err, `must be spelled "dry_run"`)
+
+	_, _, err = reg.tools["tree"].invoke(t.Context(), json.RawMessage(`{"name":"root","children":[{"name":"safe","NAME":"evil"}]}`))
+	require.ErrorContains(t, err, `must be spelled "children.0.name"`)
+
+	_, _, err = reg.tools["deploy"].invoke(t.Context(), json.RawMessage(`{"target":"prod","dry_run":true}`))
+	require.NoError(t, err)
+	require.True(t, *gotDefaulted.DryRun)
+}

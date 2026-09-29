@@ -114,7 +114,7 @@ func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, 
 				if schema["type"] != "string" && args[0] == '"' && json.Unmarshal(args, &malformed) == nil {
 					return "", nil, fmt.Errorf("arguments for %q are not valid JSON: %s", name, malformed)
 				}
-				if err := checkToolArgs(args, schema, validator); err != nil {
+				if err := checkToolArgs(args, reflect.TypeFor[In](), validator); err != nil {
 					return "", nil, fmt.Errorf("invalid arguments for %q: %w", name, err)
 				}
 				if err := json.Unmarshal(args, &input); err != nil {
@@ -279,6 +279,14 @@ func jsonSchemaOf[In any]() map[string]any {
 // optional when it is a pointer or tagged omitempty. A `description` tag is
 // passed on to the model.
 func jsonSchema(t reflect.Type) map[string]any {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	// An input struct with its own UnmarshalJSON (often to fill in defaults)
+	// still describes its arguments with its fields.
+	if t.Kind() == reflect.Struct && t != timeType {
+		return structSchema(t, map[reflect.Type]bool{t: true})
+	}
 	return schemaOf(t, make(map[reflect.Type]bool))
 }
 
@@ -339,6 +347,7 @@ func schemaOf(t reflect.Type, visiting map[reflect.Type]bool) map[string]any {
 }
 
 type schemaField struct {
+	typ      reflect.Type
 	name     string
 	depth    int
 	tagged   bool
@@ -425,6 +434,7 @@ func collectFields(t reflect.Type, depth int, required bool, visiting map[reflec
 		}
 
 		*out = append(*out, schemaField{
+			typ:      field.Type,
 			name:     name,
 			depth:    depth,
 			tagged:   tagged,
@@ -496,7 +506,7 @@ func compileToolSchema(schema map[string]any) (*sjs.Schema, error) {
 // arguments describes exactly what the tool receives. It then validates the
 // arguments against the input schema, treating null like a missing value as
 // encoding/json does.
-func checkToolArgs(args json.RawMessage, schema map[string]any, validator *sjs.Schema) error {
+func checkToolArgs(args json.RawMessage, input reflect.Type, validator *sjs.Schema) error {
 	dec := json.NewDecoder(bytes.NewReader(args))
 	dec.UseNumber()
 	doc, err := decodeStrictJSON(dec)
@@ -506,7 +516,7 @@ func checkToolArgs(args json.RawMessage, schema map[string]any, validator *sjs.S
 	if _, err := dec.Token(); err != io.EOF {
 		return errors.New("unexpected data after the arguments object")
 	}
-	doc, err = normalizeArgs(doc, schema, "")
+	doc, err = normalizeArgs(doc, input, "")
 	if err != nil {
 		return err
 	}
@@ -564,24 +574,39 @@ func decodeStrictJSON(dec *json.Decoder) (any, error) {
 }
 
 // normalizeArgs drops null object members and rejects keys that differ only
-// in case from a declared property.
-func normalizeArgs(value any, schema map[string]any, path string) (any, error) {
+// in case from a field of the Go type t, which encoding/json would decode into
+// that field anyway. It follows the Go type rather than the schema, because the
+// schema of a recursive type is cut off.
+func normalizeArgs(value any, t reflect.Type, path string) (any, error) {
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
 	switch v := value.(type) {
 	case map[string]any:
-		props, _ := schema["properties"].(map[string]any)
+		var fields map[string]reflect.Type
+		var elem reflect.Type
+		switch {
+		case t == nil:
+		case t.Kind() == reflect.Struct:
+			fields = jsonFields(t)
+		case t.Kind() == reflect.Map:
+			elem = t.Elem()
+		}
 		for key, item := range v {
-			if item == nil {
-				delete(v, key)
-				continue
-			}
-			sub, declared := props[key].(map[string]any)
-			if !declared {
-				for name := range props {
+			sub, declared := fields[key]
+			if !declared && fields != nil {
+				for name := range fields {
 					if strings.EqualFold(name, key) {
 						return nil, fmt.Errorf("argument %q must be spelled %q", path+key, path+name)
 					}
 				}
-				sub, _ = schema["additionalProperties"].(map[string]any)
+			}
+			if item == nil {
+				delete(v, key)
+				continue
+			}
+			if !declared {
+				sub = elem
 			}
 			normalized, err := normalizeArgs(item, sub, path+key+".")
 			if err != nil {
@@ -590,9 +615,12 @@ func normalizeArgs(value any, schema map[string]any, path string) (any, error) {
 			v[key] = normalized
 		}
 	case []any:
-		items, _ := schema["items"].(map[string]any)
+		var elem reflect.Type
+		if t != nil && (t.Kind() == reflect.Slice || t.Kind() == reflect.Array) {
+			elem = t.Elem()
+		}
 		for i, item := range v {
-			normalized, err := normalizeArgs(item, items, fmt.Sprintf("%s%d.", path, i))
+			normalized, err := normalizeArgs(item, elem, fmt.Sprintf("%s%d.", path, i))
 			if err != nil {
 				return nil, err
 			}
@@ -600,6 +628,30 @@ func normalizeArgs(value any, schema map[string]any, path string) (any, error) {
 		}
 	}
 	return value, nil
+}
+
+var jsonFieldsCache sync.Map // reflect.Type -> map[string]reflect.Type
+
+// jsonFields returns the JSON names encoding/json decodes into for struct t,
+// with the Go type of each field.
+func jsonFields(t reflect.Type) map[string]reflect.Type {
+	if cached, ok := jsonFieldsCache.Load(t); ok {
+		return cached.(map[string]reflect.Type)
+	}
+	var all []schemaField
+	collectFields(t, 0, true, map[reflect.Type]bool{t: true}, &all)
+	byName := make(map[string][]schemaField)
+	for _, f := range all {
+		byName[f.name] = append(byName[f.name], f)
+	}
+	fields := make(map[string]reflect.Type, len(byName))
+	for name, candidates := range byName {
+		if f, ok := dominantField(candidates); ok {
+			fields[name] = f.typ
+		}
+	}
+	jsonFieldsCache.Store(t, fields)
+	return fields
 }
 
 func validationMessages(err *sjs.ValidationError) []string {

@@ -328,8 +328,9 @@ func toGeminiContents(log []Entry) ([]*genai.Content, error) {
 }
 
 // geminiStandInSignature is the documented "skip_thought_signature_validator"
-// value. The field is bytes and is sent base64-encoded, so it holds the
-// decoded bytes: they encode back to the documented string.
+// value. The field is bytes sent as base64, so it holds that string decoded;
+// Go encodes it with the standard alphabet ('/' for '_'), which the API
+// decodes to the same bytes.
 var geminiStandInSignature, _ = base64.URLEncoding.DecodeString("skip_thought_signature_validator")
 
 // toGeminiParts renders an entry as content parts.
