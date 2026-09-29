@@ -129,6 +129,16 @@ func (m *Mock) RoundTrip(req *http.Request) (*http.Response, error) {
 	m.requests = append(m.requests, captured)
 	m.callCount++
 
+	provider := m.forcedProvider
+	if provider == "" {
+		provider = detectProvider(req)
+	}
+	if err := validateRequest(provider, bodyBytes); err != nil {
+		// The expected turn stays queued, so AssertAllConsumed fails too.
+		m.mu.Unlock()
+		return invalidRequestResponse(provider, req, err), nil
+	}
+
 	if len(m.turns) == 0 {
 		count := m.callCount
 		m.mu.Unlock()
@@ -138,12 +148,7 @@ func (m *Mock) RoundTrip(req *http.Request) (*http.Response, error) {
 	turn := m.turns[0]
 	m.turns = m.turns[1:]
 	callIndex := m.callCount
-	provider := m.forcedProvider
 	m.mu.Unlock()
-
-	if provider == "" {
-		provider = detectProvider(req)
-	}
 
 	var respBytes []byte
 	var err error

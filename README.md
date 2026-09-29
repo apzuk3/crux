@@ -68,7 +68,7 @@ func main() {
 
 | | |
 |---|---|
-| **Tool** | A Go function `func(ctx, In) (Out, error)` registered with `RegisterTool`. Tools live in a registry (the default one or your own `NewToolsRegistry`), not inside an agent, so any package can contribute tools. Registering a name twice panics. When the model calls several tools in one turn, they run concurrently. |
+| **Tool** | A Go function `func(ctx, In) (Out, error)` registered with `RegisterTool`. Tools live in a registry (the default one or your own `NewToolsRegistry`), not inside an agent, so any package can contribute tools. Registering a name twice panics. When the model calls several tools in one turn, they run concurrently (at most 8 at a time). |
 | **Agent** | An immutable blueprint: model, instructions, and the names of the tools it may use. It is safe to share across goroutines. |
 | **Session** | One conversation with an agent. It holds an append-only log of entries (user input, assistant text, tool calls and results). It must not be used from multiple goroutines at once. |
 | **Store** | Where a session's log is persisted. The default is in memory. |
@@ -145,7 +145,7 @@ agent := crux.Must(crux.New("coder", crux.ChatModelGPT5_4, crux.WithToolsets("fi
 | `list_directory` | list a directory | no |
 | `directory_tree` | recursive tree, optional `max_depth` | no |
 | `glob` | find files by pattern, e.g. `**/*.go` | no |
-| `search_files_content` | text or regex search across files | no |
+| `search_files_content` | text or regex search across files (queries up to 1 KB; a regex reads the first 32 KB of each line) | no |
 | `write_file` | create or overwrite a file | yes |
 | `edit_file` | replace exact, unique text in a file | yes |
 | `create_directory` | create directories | yes |

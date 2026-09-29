@@ -24,11 +24,11 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
 - **Toolsets** group tools. A `Toolset` registers its tools in `Register(registry)` and labels each one with the `WithToolset(name)` tool option; `AddToolset`/`AddToolsetWithRegistry` call `Register`. Agents select a whole set with `WithToolsets`/`WithToolsetsRegistry`, which add to the tool list (unlike `WithTools`, which replaces it).
 - **Agent** (`agent.go`): an immutable, stateless blueprint (model, instructions, tool names, limits), safe for concurrent use. Its ID is derived from `CanonicalData()` unless `WithAgentID` is given.
 - **Session** (`agent.go`): one conversation, stored as an append-only log of `Entry` values (`types.go`). Not safe for concurrent use. `Run`/`RunInto`/`Stream` drive the loop:
-  1. run any pending tool calls (the calls from one model turn run concurrently; results keep the model's order);
+  1. run any pending tool calls (the calls from one model turn run concurrently, at most 8 at a time; results keep the model's order);
   2. call the provider (`step`);
   3. append what the model produced;
-  4. stop on approvals, refusals or a final answer; otherwise repeat, up to `maxTurns`.
-- **Tool failures never stop a run.** Tool errors, and tool panics (recovered in `invokeTool`), are sent to the model as `ToolResult.Error`. Arguments are validated against the tool's input schema first; repeated keys and keys that match a field only case-insensitively are rejected, so an approval shown from the raw arguments matches what the tool receives.
+  4. stop on approvals, refusals or a final answer; otherwise repeat, up to `maxTurns`. Output repair requests (`WithMaxRepairs`) are extra and don't count as turns.
+- **Tool failures never stop a run.** Tool errors, and tool panics (recovered in `invokeTool`), are sent to the model as `ToolResult.Error`. Arguments are validated against the tool's input schema first; repeated keys, keys that match a field only case-insensitively and keys of a struct input that match no field are rejected (maps and nested types with their own decoder accept any key), so an approval shown from the raw arguments matches what the tool receives.
 - **Approvals:** tools registered with `WithApprovalNeeded(true)` make `Run` return `ErrApprovalNeeded`. The caller then uses `Approve`/`Reject` and `Resume`.
 - **Stores** (`store.go`, `store_gorm.go`): `Store.Append(ctx, *Session, entries...)` and `Store.Get(ctx, id)`.
   - `MemoryStore` is the default.
@@ -41,7 +41,7 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
   - `NewSession` reads it, records the parent's ID, and reuses the parent's store.
   - `GORMStore` saves the link in `crux_sessions.parent_id`.
   - There is no public API for this, and none should be added without discussion.
-- **Subagents** (`WithSubAgent`): exposed to the parent as a tool named `agent_<name>` that takes `{"task": string}`. Each call runs a fresh child session, and its output is the tool result.
+- **Subagents** (`WithSubAgent`): exposed to the parent as a tool named `agent_<name>` that takes `{"task": string}`, validated as strictly as other tool arguments. Each call runs a fresh child session, and its output is the tool result.
 - **Fork** (`fork.go`): copies history into a new session, optionally switching model or provider. Provider-specific data (`Opaque`) is dropped when the provider changes.
 - **Errors** (`errors.go`): sentinel errors for `errors.Is` checks: `ErrApprovalNeeded`, `ErrMaxTurns`, `ErrRefused`, `ErrOutputValidation`, `ErrSessionNotFound`, `ErrSessionConflict`, `ErrToolNotFound`.
 - **`Kind` values are persisted.** Never renumber them. The value after `KindStateDelta` is a reserved blank (`_`), kept for future compaction.

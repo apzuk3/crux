@@ -36,7 +36,7 @@ func init() {
 	providerMu.Lock()
 	defer providerMu.Unlock()
 
-	providers[ProviderGoogle] = []Model{
+	providers[ProviderGoogle] = []model{
 		{Name: Gemini3_8Flash}, {Name: Gemini3_7Flash},
 		{Name: Gemini3_6Flash}, {Name: Gemini3_5Flash},
 		{Name: Gemini3_5FlashLite}, {Name: Gemini3_1FlashLite},

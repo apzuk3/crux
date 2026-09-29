@@ -128,7 +128,7 @@ func TestForkUserOverrides(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, "new instructions", forked.agent.instructions)
-	require.Equal(t, int32(20), forked.agent.maxTurns)
+	require.Equal(t, 20, forked.agent.maxTurns)
 	require.Equal(t, "https://override.internal", forked.agent.baseURL)
 	require.Equal(t, "override-key", forked.agent.apiKey)
 }
@@ -160,4 +160,58 @@ func TestForkFromOffsetAndSanitization(t *testing.T) {
 	require.Len(t, forked.logs, 2)
 	require.Equal(t, KindUser, forked.logs[0].Kind)
 	require.Equal(t, KindAssistant, forked.logs[1].Kind)
+}
+
+func TestForkKeepsExplicitSameProvider(t *testing.T) {
+	agent := Must(New("local", "llama3.2", WithProvider(ProviderOllama), WithBaseURL("http://gpu-box:11434/v1")))
+	session, err := NewSession(t.Context(), agent)
+	require.NoError(t, err)
+
+	forked, err := session.Fork(t.Context(), WithModel(ClaudeHaiku4_5), WithProvider(ProviderOllama))
+	require.NoError(t, err)
+	require.Equal(t, ProviderOllama, forked.agent.provider)
+	require.Equal(t, "http://gpu-box:11434/v1", forked.agent.baseURL)
+
+	inferred, err := session.Fork(t.Context(), WithModel(ClaudeHaiku4_5), WithAPIKey("k"))
+	require.NoError(t, err)
+	require.Equal(t, ProviderAnthropic, inferred.agent.provider)
+	require.Empty(t, inferred.agent.baseURL)
+}
+
+func TestForkDropsUsage(t *testing.T) {
+	agent := Must(New("usage", ChatModelGPT4_1Mini, WithAPIKey("k")))
+	session, err := NewSession(t.Context(), agent, WithSessionLogs([]Entry{
+		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}},
+		{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: "hello"}},
+			Usage: &Usage{InputTokens: 10, OutputTokens: 5}},
+	}))
+	require.NoError(t, err)
+
+	forked, err := session.Fork(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, Usage{}, forked.Usage())
+	require.Len(t, forked.logs, 2)
+	require.Equal(t, 10, session.Usage().InputTokens)
+}
+
+func TestForkAcceptsRepeatedOpenCallID(t *testing.T) {
+	agent := Must(New("dup", ChatModelGPT4_1Mini, WithAPIKey("k")))
+	call := &ToolCall{ID: "call_1", Name: "noop", Args: []byte(`{}`)}
+	logs := []Entry{
+		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "go"}}},
+		{Kind: KindToolCall, ToolCall: call},
+		{Kind: KindToolCall, ToolCall: call},
+		{Kind: KindToolResult, ToolResult: &ToolResult{CallID: "call_1", Output: "ok"}},
+		{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: "done"}}},
+	}
+	session, err := NewSession(t.Context(), agent, WithSessionLogs(logs))
+	require.NoError(t, err)
+	require.False(t, session.hasUnexecutedToolCalls())
+
+	forked, err := session.Fork(t.Context())
+	require.NoError(t, err)
+	require.Len(t, forked.logs, len(logs))
+
+	_, err = session.ForkFrom(t.Context(), 3)
+	require.ErrorContains(t, err, `tool call "call_1" has no result`)
 }

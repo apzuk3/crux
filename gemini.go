@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,8 +81,24 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		if err != nil {
 			return nil, err
 		}
-		config.ResponseMIMEType = "application/json"
-		config.ResponseJsonSchema = schema
+		// Gemini before 3 rejects structured output combined with tools, so
+		// the schema goes into the instructions instead; crux validates the
+		// answer either way.
+		// https://ai.google.dev/gemini-api/docs/structured-output
+		if len(config.Tools) == 0 || geminiStructuredOutputWithTools(a.model) {
+			config.ResponseMIMEType = "application/json"
+			config.ResponseJsonSchema = schema
+		} else {
+			raw, err := json.Marshal(schema)
+			if err != nil {
+				return nil, fmt.Errorf("marshal output schema: %w", err)
+			}
+			if config.SystemInstruction == nil {
+				config.SystemInstruction = &genai.Content{}
+			}
+			config.SystemInstruction.Parts = append(config.SystemInstruction.Parts,
+				genai.NewPartFromText("Your final answer must be only JSON matching this JSON schema: "+string(raw)))
+		}
 	}
 	// The SDK constructor can fail, so initialization errors flow through Run.
 	client, err := a.newGeminiClient(ctx, httpClient)
@@ -121,13 +138,10 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 	now := time.Now().UTC()
 	var parts []*genai.Part
 	if candidate.Content != nil {
-		parts = candidate.Content.Parts
+		parts = foldGeminiSignatures(candidate.Content.Parts)
 	}
 	produced := make([]Entry, 0, len(parts)+1)
 	for i, part := range parts {
-		if geminiPartEmpty(part) {
-			continue
-		}
 		entry, err := fromGeminiPart(part)
 		if err != nil {
 			return nil, err
@@ -174,6 +188,21 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		}
 	}
 	return produced, nil
+}
+
+// geminiStructuredOutputWithTools reports whether the model accepts a response
+// schema together with tools, which Gemini supports from version 3.
+func geminiStructuredOutputWithTools(model string) bool {
+	version, ok := strings.CutPrefix(strings.TrimPrefix(model, "models/"), "gemini-")
+	if !ok {
+		return false
+	}
+	end := strings.IndexFunc(version, func(r rune) bool { return r < '0' || r > '9' })
+	if end == -1 {
+		end = len(version)
+	}
+	major, err := strconv.Atoi(version[:end])
+	return err == nil && major >= 3
 }
 
 func streamGemini(ctx context.Context, client *genai.Client, model string, contents []*genai.Content, config *genai.GenerateContentConfig, emit chunkSink) (*genai.GenerateContentResponse, error) {
@@ -246,6 +275,25 @@ func streamGemini(ctx context.Context, client *genai.Client, model string, conte
 	return response, nil
 }
 
+// foldGeminiSignatures drops empty parts and moves the signature of a part
+// that carries no data onto the part before it. The last chunk of a streamed
+// answer is often such a part ({"text": "", "thoughtSignature": ...}), and
+// Gemini rejects a replayed part without data.
+func foldGeminiSignatures(parts []*genai.Part) []*genai.Part {
+	folded := make([]*genai.Part, 0, len(parts))
+	for _, part := range parts {
+		if geminiPartEmpty(part) {
+			continue
+		}
+		if n := len(folded); n > 0 && geminiSignatureOnly(part) && len(folded[n-1].ThoughtSignature) == 0 {
+			folded[n-1].ThoughtSignature = part.ThoughtSignature
+			continue
+		}
+		folded = append(folded, part)
+	}
+	return folded
+}
+
 // canMergeGeminiText reports whether next continues the text of prev: both
 // carry only text of the same kind, and prev is not yet signed.
 func canMergeGeminiText(prev, next *genai.Part) bool {
@@ -312,18 +360,33 @@ func fromGeminiPart(part *genai.Part) (Entry, error) {
 
 // geminiPartEmpty reports whether a part carries nothing at all, like the
 // empty text parts Gemini sometimes sends alongside real content (often the
-// last streamed chunk, which only carries the finish reason and usage).
+// last streamed chunk, which only carries the finish reason and usage). A bare
+// thought flag carries nothing either.
 // https://ai.google.dev/api/caching#Part
 func geminiPartEmpty(part *genai.Part) bool {
 	if part == nil {
 		return false
 	}
-	raw, err := json.Marshal(part)
+	rest := *part
+	rest.Thought = false
+	raw, err := json.Marshal(&rest)
 	if err != nil {
 		return false
 	}
 	empty, _ := json.Marshal(&genai.Part{})
 	return bytes.Equal(raw, empty)
+}
+
+// geminiSignatureOnly reports whether a part carries a thought signature but
+// no data. Gemini requires every part to carry data, so such a signature must
+// travel on a neighbouring part.
+func geminiSignatureOnly(part *genai.Part) bool {
+	if part == nil || len(part.ThoughtSignature) == 0 {
+		return false
+	}
+	rest := *part
+	rest.ThoughtSignature = nil
+	return geminiPartEmpty(&rest)
 }
 
 // toGeminiContents groups consecutive parts by role.
@@ -342,6 +405,16 @@ func toGeminiContents(log []Entry) ([]*genai.Content, error) {
 			return nil, err
 		}
 		if len(parts) == 0 {
+			continue
+		}
+		if len(parts) == 1 && geminiSignatureOnly(parts[0]) {
+			// Sessions recorded before signatures were folded into the part
+			// they sign may hold one on its own; attach it to that part.
+			if n := len(contents); n > 0 && contents[n-1].Role == "model" {
+				if prev := contents[n-1].Parts[len(contents[n-1].Parts)-1]; len(prev.ThoughtSignature) == 0 {
+					prev.ThoughtSignature = parts[0].ThoughtSignature
+				}
+			}
 			continue
 		}
 		if e.Kind == KindToolCall && e.ToolCall != nil {

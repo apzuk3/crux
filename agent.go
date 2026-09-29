@@ -36,7 +36,7 @@ type Agent struct {
 	outputSchema  *jsonschema.Schema
 
 	// Execution Policies & Limits
-	maxTurns    int32
+	maxTurns    int
 	maxRepairs  int
 	maxTokens   int      // 0 uses the provider default
 	temperature *float64 // nil uses the provider default
@@ -71,10 +71,9 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 	}
 
 	session := &Session{
-		id:         uuid.New(),
-		agent:      agent,
-		logs:       make([]Entry, 0),
-		httpClient: agent.httpClient,
+		id:    uuid.New(),
+		agent: agent,
+		logs:  make([]Entry, 0),
 	}
 
 	for _, opt := range opts {
@@ -147,6 +146,7 @@ func (s *Session) Logs() []Entry {
 }
 
 // Usage returns the tokens used by every model request in the session.
+// A fork starts at zero: history copied by Fork carries no usage.
 func (s *Session) Usage() Usage {
 	var total Usage
 	for _, entry := range s.logs {
@@ -396,7 +396,7 @@ func (a *Agent) BaseURL() string {
 	return a.baseURL
 }
 
-func (a *Agent) MaxTurns() int32 {
+func (a *Agent) MaxTurns() int {
 	return a.maxTurns
 }
 
@@ -439,14 +439,24 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 		return "", fmt.Errorf("invalid output schema: %w", err)
 	}
 
+	repairsLeft := s.agent.maxRepairs
 	if input == nil {
 		if text, ok := s.FinalOutput(); ok {
-			if validator != nil {
-				if err := validateOutput(validator, text); err != nil {
-					return "", err
-				}
+			if validator == nil {
+				return text, nil
 			}
-			return text, nil
+			valErr := validateOutput(validator, text)
+			if valErr == nil {
+				return text, nil
+			}
+			if repairsLeft == 0 {
+				return "", valErr
+			}
+			// A stored answer that fails validation is repaired like a new one.
+			repairsLeft--
+			if err := s.requestRepair(ctx, valErr); err != nil {
+				return "", err
+			}
 		}
 	}
 
@@ -470,9 +480,9 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 		}
 	}
 
-	repairsLeft := s.agent.maxRepairs
 	// ---> Notify start
-	for turn := 0; turn < int(s.agent.maxTurns); turn++ {
+	// Repair requests do not count against maxTurns.
+	for turn := 0; turn < s.agent.maxTurns+s.agent.maxRepairs-repairsLeft; turn++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -526,14 +536,9 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 		if text, ok := s.FinalOutput(); ok {
 			if validator != nil {
 				if valErr := validateOutput(validator, text); valErr != nil {
-					if repairsLeft > 0 && turn+1 < int(s.agent.maxTurns) {
+					if repairsLeft > 0 {
 						repairsLeft--
-						repairMsg := fmt.Sprintf("Return corrected JSON. Output validation failed: %v", valErr)
-						entry, err := NewUserEntry(repairMsg)
-						if err != nil {
-							return "", err
-						}
-						if err := s.appendLogs(ctx, entry); err != nil {
+						if err := s.requestRepair(ctx, valErr); err != nil {
 							return "", err
 						}
 						continue
@@ -547,6 +552,15 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 	}
 
 	return "", fmt.Errorf("%w (%d)", ErrMaxTurns, s.agent.maxTurns)
+}
+
+// requestRepair asks the model to correct an answer that failed validation.
+func (s *Session) requestRepair(ctx context.Context, valErr error) error {
+	entry, err := NewUserEntry(fmt.Sprintf("Return corrected JSON. Output validation failed: %v", valErr))
+	if err != nil {
+		return err
+	}
+	return s.appendLogs(ctx, entry)
 }
 
 func (s *Session) step(ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error) {
@@ -719,11 +733,15 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 		return nil
 	}
 
-	// Calls from one model turn run concurrently and see the same state; their
-	// results are recorded in the order the model requested them.
+	// Calls from one model turn run concurrently, at most
+	// maxConcurrentToolCalls at a time, and see the same state; their results
+	// are recorded in the order the model requested them.
+	const maxConcurrentToolCalls = 8
 	state := s.StateSnapshot()
 	results := make([][]Entry, len(unexecuted))
+	slots := make(chan struct{}, maxConcurrentToolCalls)
 	var wg sync.WaitGroup
+calls:
 	for i, open := range unexecuted {
 		if ctx.Err() != nil {
 			break
@@ -743,7 +761,13 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 			continue
 		}
 
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			break calls
+		}
 		wg.Go(func() {
+			defer func() { <-slots }()
 			results[i], _ = s.dispatch(ctx, call, state)
 		})
 	}

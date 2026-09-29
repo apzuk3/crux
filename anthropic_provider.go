@@ -26,7 +26,7 @@ const (
 func init() {
 	providerMu.Lock()
 	defer providerMu.Unlock()
-	providers[ProviderAnthropic] = []Model{
+	providers[ProviderAnthropic] = []model{
 		{Name: ClaudeFable5_1}, {Name: ClaudeMythos5_1},
 		{Name: ClaudeSonnet5}, {Name: ClaudeFable5},
 		{Name: ClaudeMythos5}, {Name: ClaudeOpus5},

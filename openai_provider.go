@@ -95,7 +95,7 @@ func init() {
 	providerMu.Lock()
 	defer providerMu.Unlock()
 
-	providers[ProviderOpenAI] = []Model{
+	providers[ProviderOpenAI] = []model{
 		{Name: ChatModelGPT6Astra},
 		{Name: ChatModelGPT5_6Sol},
 		{Name: ChatModelGPT5_6Terra},

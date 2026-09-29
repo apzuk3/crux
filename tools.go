@@ -60,6 +60,9 @@ type ToolsRegistry struct {
 	tools map[string]Tool
 }
 
+// NewToolsRegistry returns an empty registry, for tools kept apart from the
+// default one. Register tools in it with RegisterToolWithRegistry and give it
+// to agents with WithToolsRegistry.
 func NewToolsRegistry() ToolsRegistry {
 	return ToolsRegistry{
 		mu:    &sync.Mutex{},
@@ -69,6 +72,9 @@ func NewToolsRegistry() ToolsRegistry {
 
 var defaultToolsRegistry = NewToolsRegistry()
 
+// RegisterTool registers fn as a tool in the default registry, so agents can
+// select it by name with WithTools. Its arguments are described and validated
+// by In; see RegisterToolWithRegistry for when it panics.
 func RegisterTool[In, Out any](name string, description string, fn func(ctx context.Context, input In) (Out, error), opts ...ToolOption) {
 	RegisterToolWithRegistry(defaultToolsRegistry, name, description, func(ctx context.Context, input In) (Out, *StateDelta, error) {
 		output, err := fn(ctx, input)
@@ -77,6 +83,8 @@ func RegisterTool[In, Out any](name string, description string, fn func(ctx cont
 	}, opts...)
 }
 
+// RegisterToolStateMutate is like RegisterTool, but fn also returns a
+// StateDelta that is applied to the session state after the call.
 func RegisterToolStateMutate[In, Out any](name string, description string, fn func(ctx context.Context, input In) (Out, *StateDelta, error), opts ...ToolOption) {
 	RegisterToolWithRegistry(defaultToolsRegistry, name, description, fn, opts...)
 }
@@ -111,21 +119,9 @@ func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, 
 		schema:      schema,
 		kind:        toolKindTool,
 		invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
-			var input In
-			if len(bytes.TrimSpace(args)) == 0 {
-				args = json.RawMessage(`{}`) // still checked for required arguments
-			}
-			{
-				var malformed string
-				if schema["type"] != "string" && args[0] == '"' && json.Unmarshal(args, &malformed) == nil {
-					return "", nil, fmt.Errorf("arguments for %q are not valid JSON: %s", name, malformed)
-				}
-				if err := checkToolArgs(args, reflect.TypeFor[In](), validator); err != nil {
-					return "", nil, fmt.Errorf("invalid arguments for %q: %w", name, err)
-				}
-				if err := json.Unmarshal(args, &input); err != nil {
-					return "", nil, fmt.Errorf("decode arguments for %q: %w", name, err)
-				}
+			input, err := decodeToolArgs[In](name, args, validator)
+			if err != nil {
+				return "", nil, err
 			}
 
 			output, delta, err := fn(ctx, input)
@@ -150,6 +146,35 @@ func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, 
 	}
 	registry.tools[name] = tool
 }
+
+// decodeToolArgs checks args with checkToolArgs and decodes them into In.
+// Empty arguments are read as an empty object.
+func decodeToolArgs[In any](name string, args json.RawMessage, validator *sjs.Schema) (In, error) {
+	var input In
+	if len(bytes.TrimSpace(args)) == 0 {
+		args = json.RawMessage(`{}`) // still checked for required arguments
+	}
+	var malformed string
+	if args[0] == '"' && json.Unmarshal(args, &malformed) == nil {
+		return input, fmt.Errorf("arguments for %q are not valid JSON: %s", name, malformed)
+	}
+	if err := checkToolArgs(args, reflect.TypeFor[In](), validator); err != nil {
+		return input, fmt.Errorf("invalid arguments for %q: %w", name, err)
+	}
+	if err := json.Unmarshal(args, &input); err != nil {
+		return input, fmt.Errorf("decode arguments for %q: %w", name, err)
+	}
+	return input, nil
+}
+
+// subAgentArgsValidator validates the arguments of a WithSubAgent tool.
+var subAgentArgsValidator = sync.OnceValue(func() *sjs.Schema {
+	validator, err := compileToolSchema(subAgentInputSchema)
+	if err != nil {
+		panic(err)
+	}
+	return validator
+})
 
 func (r *ToolsRegistry) mustBeInitialized() {
 	if r.mu == nil {
@@ -533,9 +558,12 @@ func compileToolSchema(schema map[string]any) (*sjs.Schema, error) {
 }
 
 // checkToolArgs rejects arguments that would decode differently from how they
-// read: repeated keys (the last one wins in encoding/json) and keys that only
-// match a field when case is ignored. So an approval shown from the raw
-// arguments describes exactly what the tool receives. It then validates the
+// read: repeated keys (the last one wins in encoding/json), keys that only
+// match a field when case is ignored, and keys of a struct that match no field
+// at all (encoding/json ignores them). Every key of a struct argument therefore
+// names the field it fills, so an approval shown from the raw arguments
+// describes exactly what the tool receives. Maps, and nested types with their
+// own UnmarshalJSON or UnmarshalText, accept any key. It then validates the
 // arguments against the input schema, treating null like a missing value as
 // encoding/json does.
 func checkToolArgs(args json.RawMessage, input reflect.Type, validator *sjs.Schema) error {
@@ -605,9 +633,10 @@ func decodeStrictJSON(dec *json.Decoder) (any, error) {
 	return nil, fmt.Errorf("unexpected %v", delim)
 }
 
-// normalizeArgs drops null object members and rejects keys that differ only
-// in case from a field of the Go type t, which encoding/json would decode into
-// that field anyway. It follows the Go type rather than the schema, because the
+// normalizeArgs drops null object members and rejects keys of a struct that
+// match no field of the Go type t, including keys that differ only in case
+// from a field, which encoding/json would decode into that field anyway. It
+// follows the Go type rather than the schema, because the
 // schema of a recursive type is cut off.
 func normalizeArgs(value any, t reflect.Type, path string) (any, error) {
 	for t != nil && t.Kind() == reflect.Pointer {
@@ -637,6 +666,7 @@ func normalizeArgs(value any, t reflect.Type, path string) (any, error) {
 						return nil, fmt.Errorf("argument %q must be spelled %q", path+key, path+name)
 					}
 				}
+				return nil, fmt.Errorf("unknown argument %q", path+key)
 			}
 			if item == nil {
 				delete(v, key)

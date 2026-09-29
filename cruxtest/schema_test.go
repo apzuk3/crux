@@ -71,14 +71,14 @@ func TestStructuredOutputRepair(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		retries   int
-		turns     int32
+		turns     int
 		responses []string
 		wantError bool
 	}{
 		{"disabled", 0, 10, []string{`{}`}, true},
 		{"corrected", 1, 10, []string{`{}`, `{"status":"ok","score":1,"note":null}`}, false},
 		{"exhausted", 1, 10, []string{`{}`, `{}`}, true},
-		{"turn limit", 3, 1, []string{`{}`}, true},
+		{"not counted as turns", 1, 1, []string{`{}`, `{"status":"ok","score":1,"note":null}`}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mock := cruxtest.NewMock()
@@ -261,4 +261,25 @@ func TestRawOutputSchemaAcceptsNullForOptional(t *testing.T) {
 	mock.Expect().ReturnText(`{"status":null}`)
 	_, err = sess.Run(context.Background(), "status again")
 	require.ErrorIs(t, err, crux.ErrOutputValidation, "required fields must stay non-null")
+}
+
+func TestResumeRepairsStoredInvalidOutput(t *testing.T) {
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnText(`{}`)
+	mock.Expect().ReturnText(`{"status":"ok","score":1,"note":null}`)
+
+	strict := newMockAgent(t, mock, crux.ChatModelGPT5_6Sol, crux.WithOutputSchemaFrom[structuredAnswer]())
+	session := crux.MustSession(crux.NewSession(t.Context(), strict))
+	_, err := session.Run(t.Context(), "extract")
+	require.ErrorIs(t, err, crux.ErrOutputValidation)
+
+	repairing := newMockAgent(t, mock, crux.ChatModelGPT5_6Sol,
+		crux.WithOutputSchemaFrom[structuredAnswer](), crux.WithMaxRepairs(1), crux.WithMaxTurns(1))
+	resumed := crux.MustSession(crux.NewSession(t.Context(), repairing,
+		crux.WithSessionID(session.ID()), crux.WithStore(session.Store())))
+	out, err := resumed.Resume(t.Context())
+	require.NoError(t, err)
+	require.JSONEq(t, `{"status":"ok","score":1,"note":null}`, out)
+	require.Contains(t, mock.Requests()[1].BodyString(), "Return corrected JSON")
+	mock.AssertAllConsumed(t)
 }

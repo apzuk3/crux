@@ -206,7 +206,7 @@ func init() {
 	providerMu.Lock()
 	defer providerMu.Unlock()
 
-	providers[ProviderOpenrouter] = []Model{
+	providers[ProviderOpenrouter] = []model{
 		{Name: OpenRouterChatModelGPT6Astra},
 		{Name: OpenRouterChatModelGPT5_6Sol},
 		{Name: OpenRouterChatModelGPT5_6Terra},

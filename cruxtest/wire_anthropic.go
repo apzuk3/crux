@@ -53,11 +53,15 @@ func buildAnthropicResponse(turn *Turn, callIndex int) ([]byte, error) {
 				"input": argsMap,
 			})
 		}
-		if turn.Text != "" {
+		text := turn.Text
+		if text == "" && turn.blankText {
+			text = "\n\n"
+		}
+		if text != "" {
 			content = append([]any{
 				map[string]any{
 					"type": "text",
-					"text": turn.Text,
+					"text": text,
 				},
 			}, content...)
 		}

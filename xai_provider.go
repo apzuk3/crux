@@ -56,7 +56,7 @@ func init() {
 	providerMu.Lock()
 	defer providerMu.Unlock()
 
-	providers[ProviderXAI] = []Model{
+	providers[ProviderXAI] = []model{
 		{Name: XAIGrok4_6},
 		{Name: XAIGrok4_5},
 		{Name: XAIGrok4_5Latest},

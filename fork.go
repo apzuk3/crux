@@ -24,6 +24,7 @@ func (s *Session) Fork(ctx context.Context, opts ...AgentOption) (*Session, erro
 // follow StateSnapshot's copying rules. Bound tools are inherited unless tool
 // options are supplied, which resolve a fresh selection from the registry.
 // The tools registry and output schema remain shared unless overridden.
+// Token usage is not copied: the fork's Usage counts only its own requests.
 // Fork must not run concurrently with writes to the session.
 func (s *Session) ForkFrom(ctx context.Context, from int, opts ...AgentOption) (*Session, error) {
 	if from < 0 || from > len(s.logs) {
@@ -39,6 +40,9 @@ func (s *Session) ForkFrom(ctx context.Context, from int, opts ...AgentOption) (
 	}
 
 	forkedLogs := cloneEntries(s.logs[:from])
+	for i := range forkedLogs {
+		forkedLogs[i].Usage = nil
+	}
 	if clonedAgent.provider != s.agent.provider {
 		for i := range forkedLogs {
 			forkedLogs[i].Opaque = nil
@@ -48,11 +52,12 @@ func (s *Session) ForkFrom(ctx context.Context, from int, opts ...AgentOption) (
 		})
 	}
 
-	return NewSession(ctx, clonedAgent,
-		WithSessionLogs(forkedLogs),
-		WithSessionHTTPClient(s.httpClient),
-		WithStore(s.store),
-	)
+	sessionOpts := []SessionOption{WithSessionLogs(forkedLogs), WithStore(s.store)}
+	// A session-level client is kept unless the fork chose its own client.
+	if s.httpClient != nil && clonedAgent.httpClient == s.agent.httpClient {
+		sessionOpts = append(sessionOpts, WithSessionHTTPClient(s.httpClient))
+	}
+	return NewSession(ctx, clonedAgent, sessionOpts...)
 }
 
 func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {
@@ -61,7 +66,7 @@ func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {
 	allOpts = append(allOpts, func(fork *Agent) error {
 		fork.maxTurns = a.maxTurns
 		fork.instructions = a.instructions
-		fork.provider = a.provider
+		fork.provider = "" // set after opts, so an explicit WithProvider is detectable
 		fork.baseURL = a.baseURL
 		fork.httpClient = a.httpClient
 		fork.outputSchema = a.outputSchema
@@ -77,9 +82,12 @@ func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {
 	allOpts = append(allOpts, opts...)
 
 	allOpts = append(allOpts, func(fork *Agent) error {
-		if fork.provider == a.provider && fork.model != a.model {
-			if inferred := inferProvider(fork.model); inferred != "" {
-				fork.provider = inferred
+		if fork.provider == "" {
+			fork.provider = a.provider
+			if fork.model != a.model {
+				if inferred := inferProvider(fork.model); inferred != "" {
+					fork.provider = inferred
+				}
 			}
 		}
 
@@ -125,11 +133,8 @@ func validateForkHistory(entries []Entry) error {
 			if entry.ToolCall == nil || entry.ToolCall.ID == "" {
 				return fmt.Errorf("tool call has no ID")
 			}
-			id := entry.ToolCall.ID
-			if pending[id] {
-				return fmt.Errorf("duplicate pending tool call %q", id)
-			}
-			pending[id] = true
+			// A call repeated while still open is answered once, as in the run loop.
+			pending[entry.ToolCall.ID] = true
 		case KindToolResult:
 			if entry.ToolResult == nil || !pending[entry.ToolResult.CallID] {
 				return fmt.Errorf("tool result has no matching pending call")

@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"regexp/syntax"
 	"slices"
 	"strings"
 	"sync"
@@ -32,12 +33,15 @@ const (
 	fsMaxGlobSegments    = 32
 	fsMaxGlobLength      = 1024
 	fsCtxCheckIterations = 256
+	fsMaxQueryLength     = 1024 // search_files_content query cap
+	fsMaxRegexInsts      = 1000 // compiled regex program size cap
 )
 
 // Work budgets per call; variables so tests can lower them.
 var (
 	fsMaxWalkEntries       = 20000     // entries one call may visit
 	fsMaxSearchBytes int64 = 100 << 20 // bytes search_files_content may read
+	fsMaxRegexLine         = 32 << 10  // bytes of one line a regex search reads
 )
 
 const filesystemToolsetName = "filesystem"
@@ -100,7 +104,7 @@ func (f *filesystemToolset) Register(registry ToolsRegistry) error {
 	registerFSTool(registry, "glob", "Find files whose path matches a glob pattern such as **/*.go or src/*.ts. ** matches any number of directories.", t.glob)
 	registerFSTool(registry, "search_files_content", "Search file contents for text or a regular expression. Returns matches as path:line:column: text.", t.searchFilesContent)
 	registerFSTool(registry, "write_file", "Create a file, or completely overwrite an existing one. Missing parent directories are created.", t.writeFile, approval)
-	registerFSTool(registry, "edit_file", "Edit a text file by replacing exact text. Each old_text must appear exactly once in the file; include enough surrounding text to make it unique. Edits are applied in order and either all succeed or none are written.", t.editFile, approval)
+	registerFSTool(registry, "edit_file", "Edit a text file by replacing exact text. Each old_text must appear exactly once in the file; include enough surrounding text to make it unique. Edits are applied in order and either all succeed or none are written. In a file with CRLF line endings, an old_text that is only found once its \\n line endings become \\r\\n is matched that way, and the \\n line endings in its new_text are then written as \\r\\n too.", t.editFile, approval)
 	registerFSTool(registry, "create_directory", "Create one or more directories, including missing parents.", t.createDirectory, approval)
 	registerFSTool(registry, "remove_directory", "Remove one or more empty directories.", t.removeDirectory, approval)
 
@@ -629,6 +633,9 @@ func (t *fsTools) searchFilesContent(ctx context.Context, in searchFilesContentI
 	if in.Query == "" {
 		return "", errors.New("query must not be empty")
 	}
+	if len(in.Query) > fsMaxQueryLength {
+		return "", fmt.Errorf("query is longer than %d bytes", fsMaxQueryLength)
+	}
 	include := strings.TrimPrefix(filepath.ToSlash(in.Include), "./")
 	if include != "" {
 		var err error
@@ -648,12 +655,23 @@ func (t *fsTools) searchFilesContent(ctx context.Context, in searchFilesContentI
 		i := strings.Index(line, in.Query)
 		return i, i + len(in.Query), i >= 0
 	}
+	longLines := false
 	if in.IsRegex {
-		re, err := regexp.Compile(in.Query)
+		re, err := compileSearchRegex(in.Query)
 		if err != nil {
-			return "", fmt.Errorf("invalid regular expression: %w", err)
+			return "", err
 		}
 		match = func(line string) (int, int, bool) {
+			// Regex work grows with line length times program size, so
+			// only the start of a very long line is searched.
+			if len(line) > fsMaxRegexLine {
+				end := fsMaxRegexLine
+				for end > 0 && !utf8.RuneStart(line[end]) {
+					end--
+				}
+				line = line[:end]
+				longLines = true
+			}
 			loc := re.FindStringIndex(line)
 			if loc == nil {
 				return 0, 0, false
@@ -711,10 +729,12 @@ func (t *fsTools) searchFilesContent(ctx context.Context, in searchFilesContentI
 			return nil
 		}
 
-		lineNum := 0
+		lineNum, sinceCheck := 0, 0
 		for line := range strings.SplitSeq(string(content), "\n") {
 			lineNum++
-			if lineNum%fsCtxCheckIterations == 0 {
+			sinceCheck += len(line)
+			if lineNum%fsCtxCheckIterations == 0 || sinceCheck >= fsMaxRegexLine {
+				sinceCheck = 0
 				if err := ctx.Err(); err != nil {
 					return err
 				}
@@ -743,6 +763,10 @@ func (t *fsTools) searchFilesContent(ctx context.Context, in searchFilesContentI
 	if stopped == "" && exhausted {
 		stopped = walkBudgetNote()
 	}
+	if longLines {
+		note := fmt.Sprintf("[Lines longer than %d KB were searched only in their first %d KB.]", fsMaxRegexLine>>10, fsMaxRegexLine>>10)
+		stopped = strings.TrimPrefix(stopped+"\n"+note, "\n")
+	}
 	if matches == 0 {
 		if stopped != "" {
 			return "No results found\n" + stopped, nil
@@ -753,6 +777,27 @@ func (t *fsTools) searchFilesContent(ctx context.Context, in searchFilesContentI
 		out.WriteString("\n" + stopped)
 	}
 	return out.String(), nil
+}
+
+// compileSearchRegex compiles a search_files_content query, rejecting one
+// whose program is so large that matching it would take too long.
+func compileSearchRegex(query string) (*regexp.Regexp, error) {
+	parsed, err := syntax.Parse(query, syntax.Perl)
+	if err != nil {
+		return nil, fmt.Errorf("invalid regular expression: %w", err)
+	}
+	prog, err := syntax.Compile(parsed.Simplify())
+	if err != nil {
+		return nil, fmt.Errorf("invalid regular expression: %w", err)
+	}
+	if len(prog.Inst) > fsMaxRegexInsts {
+		return nil, errors.New("regular expression is too complex; use a simpler one with fewer or smaller repetitions")
+	}
+	re, err := regexp.Compile(query)
+	if err != nil {
+		return nil, fmt.Errorf("invalid regular expression: %w", err)
+	}
+	return re, nil
 }
 
 type writeFileInput struct {

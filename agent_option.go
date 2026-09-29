@@ -185,7 +185,8 @@ func WithModel(model string) AgentOption {
 }
 
 // WithMaxTurns limits how many model requests one Run may make. The default is 10.
-func WithMaxTurns(turns int32) AgentOption {
+// Requests that repair invalid output (WithMaxRepairs) are not counted.
+func WithMaxTurns(turns int) AgentOption {
 	return func(a *Agent) error {
 		if turns < 1 {
 			return fmt.Errorf("max turns must be at least 1, got %d", turns)
@@ -241,6 +242,8 @@ func WithTemperature(temperature float64) AgentOption {
 
 // WithMaxRepairs sets the number of attempts the agent will make
 // to ask the model to repair its response if output validation fails.
+// Each Run or Resume has this many repairs, on top of WithMaxTurns; Resume
+// also repairs a stored final answer that fails validation.
 func WithMaxRepairs(repairs int) AgentOption {
 	return func(a *Agent) error {
 		if repairs < 0 {
@@ -356,8 +359,11 @@ func WithSubAgent(subAgent *Agent, description string) AgentOption {
 			schema:      subAgentInputSchema,
 			kind:        toolKindSubagent,
 			invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
-				var input subAgentInput
-				if err := json.Unmarshal(args, &input); err != nil || strings.TrimSpace(input.Task) == "" {
+				input, err := decodeToolArgs[subAgentInput](name, args, subAgentArgsValidator())
+				if err != nil {
+					return "", nil, err
+				}
+				if strings.TrimSpace(input.Task) == "" {
 					return "", nil, fmt.Errorf("subagent %q needs a non-empty task", subAgent.name)
 				}
 
