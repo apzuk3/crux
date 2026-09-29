@@ -128,7 +128,7 @@ func TestForkUserOverrides(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, "new instructions", forked.agent.instructions)
-	require.Equal(t, int32(20), forked.agent.maxTurns)
+	require.Equal(t, 20, forked.agent.maxTurns)
 	require.Equal(t, "https://override.internal", forked.agent.baseURL)
 	require.Equal(t, "override-key", forked.agent.apiKey)
 }

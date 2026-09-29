@@ -36,7 +36,7 @@ type Agent struct {
 	outputSchema  *jsonschema.Schema
 
 	// Execution Policies & Limits
-	maxTurns    int32
+	maxTurns    int
 	maxRepairs  int
 	maxTokens   int      // 0 uses the provider default
 	temperature *float64 // nil uses the provider default
@@ -396,7 +396,7 @@ func (a *Agent) BaseURL() string {
 	return a.baseURL
 }
 
-func (a *Agent) MaxTurns() int32 {
+func (a *Agent) MaxTurns() int {
 	return a.maxTurns
 }
 
@@ -472,7 +472,7 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 
 	repairsLeft := s.agent.maxRepairs
 	// ---> Notify start
-	for turn := 0; turn < int(s.agent.maxTurns); turn++ {
+	for turn := 0; turn < s.agent.maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -526,7 +526,7 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 		if text, ok := s.FinalOutput(); ok {
 			if validator != nil {
 				if valErr := validateOutput(validator, text); valErr != nil {
-					if repairsLeft > 0 && turn+1 < int(s.agent.maxTurns) {
+					if repairsLeft > 0 && turn+1 < s.agent.maxTurns {
 						repairsLeft--
 						repairMsg := fmt.Sprintf("Return corrected JSON. Output validation failed: %v", valErr)
 						entry, err := NewUserEntry(repairMsg)

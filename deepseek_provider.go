@@ -9,7 +9,7 @@ const (
 func init() {
 	providerMu.Lock()
 	defer providerMu.Unlock()
-	providers[ProviderDeepSeek] = []Model{
+	providers[ProviderDeepSeek] = []model{
 		{Name: DeepSeekFlash},
 	}
 }

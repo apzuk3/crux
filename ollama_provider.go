@@ -244,7 +244,7 @@ const (
 func init() {
 	providerMu.Lock()
 	defer providerMu.Unlock()
-	providers[ProviderOllama] = []Model{
+	providers[ProviderOllama] = []model{
 		{Name: OllamaAlfred},
 		{Name: OllamaAtheneV2},
 		{Name: OllamaAya},

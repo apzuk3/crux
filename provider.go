@@ -19,12 +19,13 @@ const (
 	ProviderOllama     Provider = "ollama"
 )
 
-type Model struct {
+// model is a known model name, used to infer a provider.
+type model struct {
 	Name string
 }
 
 var (
-	providers = map[Provider][]Model{}
+	providers = map[Provider][]model{}
 
 	providerMu *sync.RWMutex = &sync.RWMutex{}
 )
@@ -34,8 +35,8 @@ func inferProvider(modelName string) Provider {
 	defer providerMu.RUnlock()
 	var matched Provider
 	for provider, models := range providers {
-		for _, model := range models {
-			if model.Name == modelName {
+		for _, m := range models {
+			if m.Name == modelName {
 				if matched != "" && matched != provider {
 					return "" // Ambiguous IDs require WithProvider.
 				}

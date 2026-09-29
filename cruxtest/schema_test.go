@@ -71,7 +71,7 @@ func TestStructuredOutputRepair(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		retries   int
-		turns     int32
+		turns     int
 		responses []string
 		wantError bool
 	}{

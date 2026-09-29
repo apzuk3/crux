@@ -185,7 +185,7 @@ func WithModel(model string) AgentOption {
 }
 
 // WithMaxTurns limits how many model requests one Run may make. The default is 10.
-func WithMaxTurns(turns int32) AgentOption {
+func WithMaxTurns(turns int) AgentOption {
 	return func(a *Agent) error {
 		if turns < 1 {
 			return fmt.Errorf("max turns must be at least 1, got %d", turns)
