@@ -772,6 +772,9 @@ func (t *fsTools) writeFile(ctx context.Context, in writeFileInput) (string, err
 	}
 	defer root.Close()
 
+	if err := refuseSymlinkParents(root, rel); err != nil {
+		return "", err
+	}
 	if dir := filepath.Dir(rel); dir != "." {
 		if err := root.MkdirAll(dir, 0o755); err != nil {
 			return "", fsError(in.Path, err)
@@ -809,6 +812,9 @@ func (t *fsTools) editFile(ctx context.Context, in editFileInput) (string, error
 	}
 	defer root.Close()
 
+	if err := refuseSymlinkParents(root, rel); err != nil {
+		return "", err
+	}
 	data, err := readForEdit(root, rel)
 	if err != nil {
 		return "", fsError(in.Path, err)
@@ -905,6 +911,31 @@ func replaceFile(root *os.Root, rel string, data []byte) error {
 	return nil
 }
 
+// refuseSymlinkParents fails when a directory on the way to rel is a symbolic
+// link, since a change there would land somewhere the approval did not name.
+// Missing directories are fine; they are created as real directories.
+func refuseSymlinkParents(root *os.Root, rel string) error {
+	dir := filepath.Dir(rel)
+	if dir == "." {
+		return nil
+	}
+	var prefix string
+	for _, part := range strings.Split(filepath.ToSlash(dir), "/") {
+		prefix = filepath.Join(prefix, part)
+		info, err := root.Lstat(prefix)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symbolic link; use the path it points to instead", filepath.ToSlash(prefix))
+		}
+	}
+	return nil
+}
+
 // errSymlinkWrite names the link's target when it is a relative path, so the
 // model can write the target itself. An absolute target is not shown, because
 // it would reveal host paths.
@@ -936,6 +967,9 @@ func (t *fsTools) createDirectory(ctx context.Context, in directoriesInput) (str
 		if err != nil {
 			return "", err
 		}
+		if err := refuseSymlinkParents(root, filepath.Join(rel, "x")); err != nil {
+			return "", err
+		}
 		if err := root.MkdirAll(rel, 0o755); err != nil {
 			return "", fsError(name, err)
 		}
@@ -961,6 +995,9 @@ func (t *fsTools) removeDirectory(ctx context.Context, in directoriesInput) (str
 		}
 		if rel == "." {
 			return "", errors.New("cannot remove the root directory")
+		}
+		if err := refuseSymlinkParents(root, rel); err != nil {
+			return "", err
 		}
 		info, err := root.Lstat(rel)
 		if err != nil {

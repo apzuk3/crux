@@ -10,6 +10,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"github.com/google/uuid"
+	"github.com/invopop/jsonschema"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
@@ -222,4 +223,28 @@ func TestReplaySkipsEmptyText(t *testing.T) {
 	call := contents[1].Parts[0]
 	require.NotNil(t, call.FunctionCall)
 	require.NotEmpty(t, call.ThoughtSignature, "unsigned calls need Gemini 3's stand-in signature")
+}
+
+func TestEmptyToolArgumentsAreValidated(t *testing.T) {
+	type input struct {
+		Path string `json:"path"`
+	}
+	reg := NewToolsRegistry()
+	ran := false
+	RegisterToolWithRegistry(reg, "needs_path", "n", func(ctx context.Context, in input) (string, *StateDelta, error) {
+		ran = true
+		return "", nil, nil
+	})
+	for _, args := range []string{"", "  "} {
+		_, _, err := reg.tools["needs_path"].invoke(t.Context(), json.RawMessage(args))
+		require.ErrorContains(t, err, "path")
+	}
+	require.False(t, ran)
+}
+
+func TestOutputValidationRejectsTrailingData(t *testing.T) {
+	validator, err := compileValidator(&jsonschema.Schema{Type: "object"})
+	require.NoError(t, err)
+	require.NoError(t, validateOutput(validator, `{"a":1}`))
+	require.ErrorIs(t, validateOutput(validator, `{"a":1} and some prose`), ErrOutputValidation)
 }

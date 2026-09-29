@@ -812,3 +812,23 @@ func TestFilesystemConcurrentEditsAreNotLost(t *testing.T) {
 		}
 	}
 }
+
+func TestFilesystemRefusesWritesThroughSymlinkedDirectories(t *testing.T) {
+	registry, root := newFilesystemRegistry(t, map[string]string{"real/b.txt": "old"})
+	if err := os.Symlink("real", filepath.Join(root, "alias")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("cannot create symlinks: %v", err)
+		}
+		t.Fatal(err)
+	}
+	wantFSError(t, registry, "write_file", writeFileInput{Path: "alias/b.txt", Content: "changed"}, "alias is a symbolic link")
+	wantFSError(t, registry, "edit_file", editFileInput{Path: "alias/b.txt", Edits: []fileEdit{{OldText: "old", NewText: "changed"}}}, "alias is a symbolic link")
+	wantFSError(t, registry, "create_directory", directoriesInput{Paths: []string{"alias/sub"}}, "alias is a symbolic link")
+	if data, _ := os.ReadFile(filepath.Join(root, "real", "b.txt")); string(data) != "old" {
+		t.Fatalf("real/b.txt = %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(root, "real", "sub")); !os.IsNotExist(err) {
+		t.Fatal("create_directory went through the link")
+	}
+	mustFSTool(t, registry, "write_file", writeFileInput{Path: "new/dir/c.txt", Content: "c"})
+}

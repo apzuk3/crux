@@ -3,6 +3,7 @@ package crux
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -326,6 +327,11 @@ func toGeminiContents(log []Entry) ([]*genai.Content, error) {
 	return contents, nil
 }
 
+// geminiStandInSignature is the documented "skip_thought_signature_validator"
+// value. The field is bytes and is sent base64-encoded, so it holds the
+// decoded bytes: they encode back to the documented string.
+var geminiStandInSignature, _ = base64.URLEncoding.DecodeString("skip_thought_signature_validator")
+
 // toGeminiParts renders an entry as content parts.
 func toGeminiParts(e Entry, calls map[string]*genai.FunctionCall) ([]*genai.Part, error) {
 	if raw := e.Opaque[geminiPartOpaqueKey]; len(raw) > 0 && e.Kind != KindUser && e.Kind != KindToolResult {
@@ -365,7 +371,7 @@ func toGeminiParts(e Entry, calls map[string]*genai.FunctionCall) ([]*genai.Part
 		// https://ai.google.dev/gemini-api/docs/thought-signatures
 		parts = []*genai.Part{{
 			FunctionCall:     &genai.FunctionCall{ID: call.ID, Name: call.Name, Args: args},
-			ThoughtSignature: []byte("skip_thought_signature_validator"),
+			ThoughtSignature: geminiStandInSignature,
 		}}
 	case KindToolResult:
 		if e.ToolResult == nil {

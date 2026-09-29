@@ -106,7 +106,10 @@ func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, 
 		kind:        toolKindTool,
 		invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
 			var input In
-			if len(args) > 0 {
+			if len(bytes.TrimSpace(args)) == 0 {
+				args = json.RawMessage(`{}`) // still checked for required arguments
+			}
+			{
 				var malformed string
 				if schema["type"] != "string" && args[0] == '"' && json.Unmarshal(args, &malformed) == nil {
 					return "", nil, fmt.Errorf("arguments for %q are not valid JSON: %s", name, malformed)
