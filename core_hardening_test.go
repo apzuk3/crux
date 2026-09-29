@@ -288,3 +288,33 @@ func TestToolArgumentCaseChecksCoverNullsAndRecursiveTypes(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, *gotDefaulted.DryRun)
 }
+
+type promotedBase struct {
+	Mode string `json:"mode"`
+}
+
+func (b *promotedBase) UnmarshalJSON(data []byte) error {
+	type plain promotedBase
+	return json.Unmarshal(data, (*plain)(b))
+}
+
+func TestToolInputsThatDecodeDifferentlyFromTheirFields(t *testing.T) {
+	type promoted struct {
+		promotedBase
+		DryRun bool `json:"dry_run"`
+	}
+	reg := NewToolsRegistry()
+	// Only the embedded field would be decoded, so the fields cannot describe it.
+	require.Panics(t, func() {
+		RegisterToolWithRegistry(reg, "promoted", "p", func(ctx context.Context, in promoted) (string, *StateDelta, error) { return "", nil, nil })
+	})
+
+	type fixed struct {
+		Paths [1]string `json:"paths"`
+	}
+	RegisterToolWithRegistry(reg, "fixed", "f", func(ctx context.Context, in fixed) (string, *StateDelta, error) { return "", nil, nil })
+	_, _, err := reg.tools["fixed"].invoke(t.Context(), json.RawMessage(`{"paths":["a","b"]}`))
+	require.Error(t, err)
+	_, _, err = reg.tools["fixed"].invoke(t.Context(), json.RawMessage(`{"paths":["a"]}`))
+	require.NoError(t, err)
+}

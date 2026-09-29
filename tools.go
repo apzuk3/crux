@@ -284,10 +284,35 @@ func jsonSchema(t reflect.Type) map[string]any {
 	}
 	// An input struct with its own UnmarshalJSON (often to fill in defaults)
 	// still describes its arguments with its fields.
-	if t.Kind() == reflect.Struct && t != timeType {
+	if t.Kind() == reflect.Struct && t != timeType && !promotesUnmarshaler(t) {
 		return structSchema(t, map[reflect.Type]bool{t: true})
 	}
 	return schemaOf(t, make(map[reflect.Type]bool))
+}
+
+// promotesUnmarshaler reports whether struct t gets UnmarshalJSON or
+// UnmarshalText from an embedded field. Decoding then fills only that field,
+// so t's own fields do not describe its arguments.
+func promotesUnmarshaler(t reflect.Type) bool {
+	for i := range t.NumField() {
+		field := t.Field(i)
+		if !field.Anonymous {
+			continue
+		}
+		for _, iface := range []reflect.Type{jsonUnmarshalerType, textUnmarshalerType} {
+			if field.Type.Implements(iface) || reflect.PointerTo(field.Type).Implements(iface) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// decodesItself reports whether values of t are decoded by their own
+// UnmarshalJSON or UnmarshalText rather than field by field.
+func decodesItself(t reflect.Type) bool {
+	p := reflect.PointerTo(t)
+	return p.Implements(jsonUnmarshalerType) || p.Implements(textUnmarshalerType)
 }
 
 var (
@@ -331,7 +356,8 @@ func schemaOf(t reflect.Type, visiting map[reflect.Type]bool) map[string]any {
 		}
 		return map[string]any{"type": "array", "items": schemaOf(t.Elem(), visiting)}
 	case reflect.Array:
-		return map[string]any{"type": "array", "items": schemaOf(t.Elem(), visiting)}
+		// encoding/json drops extra elements and zero-fills missing ones.
+		return map[string]any{"type": "array", "items": schemaOf(t.Elem(), visiting), "minItems": t.Len(), "maxItems": t.Len()}
 	case reflect.Map:
 		return map[string]any{"type": "object", "additionalProperties": schemaOf(t.Elem(), visiting)}
 	case reflect.Struct:
@@ -587,7 +613,9 @@ func normalizeArgs(value any, t reflect.Type, path string) (any, error) {
 		var elem reflect.Type
 		switch {
 		case t == nil:
-		case t.Kind() == reflect.Struct:
+		case t.Kind() == reflect.Struct && (path == "" || !decodesItself(t)):
+			// A nested type with its own decoder may read any keys; the
+			// top-level input's own UnmarshalJSON is checked by its fields.
 			fields = jsonFields(t)
 		case t.Kind() == reflect.Map:
 			elem = t.Elem()
