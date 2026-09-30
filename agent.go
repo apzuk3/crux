@@ -274,29 +274,20 @@ func New(name, model string, opts ...AgentOption) (*Agent, error) {
 		return nil, fmt.Errorf("cannot infer provider from model %q, please pass through crux.WithProvider", agent.model)
 	}
 
-	if agent.provider == ProviderAnthropic && agent.temperature != nil && agent.reasoning != "" && agent.reasoning != ReasoningOff {
-		return nil, errors.New("anthropic does not accept a temperature while the model reasons; remove WithTemperature or use WithReasoning(ReasoningOff)")
+	spec, ok := providerSpecs[agent.provider]
+	if !ok {
+		return nil, fmt.Errorf("unsupported provider %q", agent.provider)
 	}
-
 	if agent.apiKey == "" {
-		agent.apiKey = discoverAPIKey(agent.provider)
+		agent.apiKey = firstEnv(spec.envVars)
 	}
-
 	if agent.baseURL == "" {
-		switch agent.provider {
-		case ProviderOpenrouter:
-			agent.baseURL = "https://openrouter.ai/api/v1"
-		case ProviderXAI:
-			agent.baseURL = "https://api.x.ai/v1"
-		case ProviderDeepSeek:
-			agent.baseURL = "https://api.deepseek.com"
-		case ProviderOllama:
-			agent.baseURL = "http://localhost:11434/v1"
-		}
+		agent.baseURL = spec.baseURL
 	}
-
-	if agent.provider == ProviderOllama && agent.apiKey == "" {
-		agent.apiKey = "ollama" // Local Ollama ignores authentication.
+	if spec.prepare != nil {
+		if err := spec.prepare(agent); err != nil {
+			return nil, err
+		}
 	}
 
 	if agent.id == uuid.Nil {
@@ -644,25 +635,11 @@ func (a *Agent) step(ctx context.Context, log []Entry, httpClient *http.Client, 
 }
 
 func (a *Agent) providerStep(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
-	client := a.effectiveHTTPClient(httpClient)
-	switch a.provider {
-	case ProviderAnthropic:
-		return a.anthropicStep(ctx, log, client, emit)
-	case ProviderOpenAI:
-		return a.openAIstep(ctx, log, client, emit)
-	case ProviderOpenrouter:
-		return a.openrouterStep(ctx, log, client, emit)
-	case ProviderGoogle:
-		return a.geminiStep(ctx, log, client, emit)
-	case ProviderXAI:
-		return a.xaiStep(ctx, log, client, emit)
-	case ProviderDeepSeek:
-		return a.deepseekStep(ctx, log, client, emit)
-	case ProviderOllama:
-		return a.ollamaStep(ctx, log, client, emit)
-	default:
+	spec, ok := providerSpecs[a.provider]
+	if !ok {
 		return nil, fmt.Errorf("unsupported provider %q", a.provider)
 	}
+	return spec.step(a, ctx, log, a.effectiveHTTPClient(httpClient), emit)
 }
 
 // FinalOutput returns the final assistant text if the latest turn completed

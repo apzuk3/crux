@@ -51,11 +51,11 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
 
 There are only three wire implementations. Every provider maps onto one of them:
 
-- `openai.go`: the OpenAI Responses API. It also serves xAI, DeepSeek, OpenRouter and Ollama (see `xai.go`, `deepseek.go`, `openrouter.go`, `ollama.go`).
+- `openai.go`: the OpenAI Responses API. It also serves xAI, DeepSeek, OpenRouter and Ollama.
 - `anthropic.go`: Anthropic Messages. `max_tokens` is required and defaults to `defaultAnthropicMaxTokens` (16384). Every request sets prompt-cache breakpoints (`setAnthropicCacheBreakpoints`); the API allows at most 4.
 - `gemini.go`: Google GenAI.
 
-`*_provider.go` files hold the model constants and register known models, so `New` can infer the provider from the model name (`provider.go`). API keys come from environment variables (`discoverAPIKey`) unless `WithAPIKey` is given. A new agent option that affects requests (like `WithMaxTokens`/`WithTemperature`/`WithReasoning`) must be wired into all three wire files, added to `CanonicalData()`, and copied in `Agent.clone` (`fork.go`).
+Each `*_provider.go` file holds the model constants and registers the provider in `init` with `registerProvider` (`provider.go`). Its `providerSpec` lists the known models (so `New` can infer the provider from the model name), the API key environment variables (used unless `WithAPIKey` is given), the default base URL, the wire `step`, the output-schema adapter and an optional `prepare` hook that `New` runs for provider-specific rules and defaults. Adding a provider means adding one such file; don't add `switch` statements on the provider elsewhere. A new agent option that affects requests (like `WithMaxTokens`/`WithTemperature`/`WithReasoning`) must be wired into all three wire files, added to `CanonicalData()`, and copied in `Agent.clone` (`fork.go`).
 
 ## Conventions
 

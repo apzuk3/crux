@@ -43,16 +43,11 @@ func wireSchemaFor(schema *jsonschema.Schema, provider Provider) (map[string]any
 
 	cleanBaseSchema(m)
 
-	switch provider {
-	case ProviderOpenAI, ProviderXAI, ProviderDeepSeek, ProviderOpenrouter, ProviderOllama:
-		return adaptOpenAI(m, provider)
-	case ProviderAnthropic:
-		return adaptAnthropic(m)
-	case ProviderGoogle:
-		return adaptPermissive(m)
-	default:
+	spec, ok := providerSpecs[provider]
+	if !ok {
 		return m, nil
 	}
+	return spec.schema(m, provider)
 }
 
 func cleanBaseSchema(m map[string]any) {
@@ -142,7 +137,7 @@ func adaptOpenAI(root map[string]any, provider Provider) (map[string]any, error)
 //     supported as schema keywords ("JSON Schema limitations" in the page
 //     above), so they move into the description of the schema that had them.
 //     Output validation still enforces them.
-func adaptAnthropic(root map[string]any) (map[string]any, error) {
+func adaptAnthropic(root map[string]any, _ Provider) (map[string]any, error) {
 	err := walkSchemas(root, func(m map[string]any) error {
 		moveToDescription(m, anthropicUnsupportedKeywords)
 		if minItems, ok := m["minItems"]; ok && !isZeroOrOne(minItems) {
@@ -213,7 +208,7 @@ func isZeroOrOne(value any) bool {
 // Requirements:
 //   - Supports dynamic map schemas via "additionalProperties".
 //   - For objects without specified additionalProperties, locks them with false.
-func adaptPermissive(root map[string]any) (map[string]any, error) {
+func adaptPermissive(root map[string]any, _ Provider) (map[string]any, error) {
 	err := walkSchemas(root, func(m map[string]any) error {
 		isObject := m["type"] == "object" || m["properties"] != nil
 		if !isObject {

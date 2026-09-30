@@ -33,24 +33,26 @@ const (
 )
 
 func init() {
-	providerMu.Lock()
-	defer providerMu.Unlock()
-
-	providers[ProviderGoogle] = []model{
-		{Name: Gemini3_8Flash}, {Name: Gemini3_7Flash},
-		{Name: Gemini3_6Flash}, {Name: Gemini3_5Flash},
-		{Name: Gemini3_5FlashLite}, {Name: Gemini3_1FlashLite},
-		{Name: Gemini3_1FlashImage}, {Name: Gemini3_1FlashLiteImage},
-		{Name: Gemini3ProImage}, {Name: Gemini3_1ProPreview},
-		{Name: Gemini3FlashPreview}, {Name: Gemini3_5LiveTranslatePreview},
-		{Name: Gemini3_1FlashLivePreview}, {Name: Gemini3_1FlashTTSPreview},
-		{Name: GeminiOmni1_1Flash}, {Name: Gemini3_5Transcribe},
-		{Name: Gemini3_5TranscribeLive},
-		{Name: Gemini2_5Pro}, {Name: Gemini2_5Flash}, {Name: Gemini2_5FlashLite},
-		{Name: Gemini2_5FlashImage}, {Name: Gemini2_5FlashNativeAudioPreview12_2025},
-		{Name: Gemini2_5FlashPreviewTTS}, {Name: Gemini2_5ProPreviewTTS},
-		{Name: Gemini2_5ComputerUsePreview10_2025},
-		{Name: GeminiEmbedding2Preview}, {Name: GeminiEmbedding001},
-		{Name: GeminiRoboticsER2Preview}, {Name: GeminiRoboticsER1_6Preview},
-	}
+	registerProvider(ProviderGoogle, providerSpec{
+		models: []model{
+			{Name: Gemini3_8Flash}, {Name: Gemini3_7Flash},
+			{Name: Gemini3_6Flash}, {Name: Gemini3_5Flash},
+			{Name: Gemini3_5FlashLite}, {Name: Gemini3_1FlashLite},
+			{Name: Gemini3_1FlashImage}, {Name: Gemini3_1FlashLiteImage},
+			{Name: Gemini3ProImage}, {Name: Gemini3_1ProPreview},
+			{Name: Gemini3FlashPreview}, {Name: Gemini3_5LiveTranslatePreview},
+			{Name: Gemini3_1FlashLivePreview}, {Name: Gemini3_1FlashTTSPreview},
+			{Name: GeminiOmni1_1Flash}, {Name: Gemini3_5Transcribe},
+			{Name: Gemini3_5TranscribeLive},
+			{Name: Gemini2_5Pro}, {Name: Gemini2_5Flash}, {Name: Gemini2_5FlashLite},
+			{Name: Gemini2_5FlashImage}, {Name: Gemini2_5FlashNativeAudioPreview12_2025},
+			{Name: Gemini2_5FlashPreviewTTS}, {Name: Gemini2_5ProPreviewTTS},
+			{Name: Gemini2_5ComputerUsePreview10_2025},
+			{Name: GeminiEmbedding2Preview}, {Name: GeminiEmbedding001},
+			{Name: GeminiRoboticsER2Preview}, {Name: GeminiRoboticsER1_6Preview},
+		},
+		envVars: []string{"GOOGLE_API_KEY", "GOOGLE_APIKEY", "GOOGLE_KEY", "GEMINI_API_KEY", "GEMINI_APIKEY", "GEMINI_KEY"},
+		step:    (*Agent).geminiStep,
+		schema:  adaptPermissive,
+	})
 }

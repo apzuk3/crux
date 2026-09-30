@@ -78,6 +78,44 @@ func TestInferProviderForRegisteredModels(t *testing.T) {
 	}
 }
 
+func TestEveryProviderIsRegistered(t *testing.T) {
+	all := []Provider{ProviderOpenAI, ProviderAnthropic, ProviderGoogle, ProviderOpenrouter, ProviderDeepSeek, ProviderXAI, ProviderOllama}
+	if len(providerSpecs) != len(all) {
+		t.Errorf("%d providers registered, want %d", len(providerSpecs), len(all))
+	}
+	for _, provider := range all {
+		spec, ok := providerSpecs[provider]
+		if !ok {
+			t.Errorf("provider %q is not registered", provider)
+			continue
+		}
+		if len(spec.models) == 0 || len(spec.envVars) == 0 {
+			t.Errorf("provider %q has no models or no API key variables", provider)
+		}
+	}
+}
+
+func TestNewAppliesProviderSpec(t *testing.T) {
+	t.Setenv("XAI_API_KEY", "")
+	t.Setenv("XAI_APIKEY", "xai-key")
+	agent, err := New("a", XAIGrok4_6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.apiKey != "xai-key" || agent.baseURL != "https://api.x.ai/v1" {
+		t.Errorf("apiKey, baseURL = %q, %q", agent.apiKey, agent.baseURL)
+	}
+
+	if _, err := New("a", "m", WithProvider("nope")); err == nil || !strings.Contains(err.Error(), `unsupported provider "nope"`) {
+		t.Errorf("unknown provider: err = %v", err)
+	}
+	for _, provider := range []Provider{ProviderDeepSeek, ProviderOpenrouter} {
+		if _, err := New("a", "m", WithProvider(provider), WithWebSearch()); err == nil || !strings.Contains(err.Error(), "web search is not supported") {
+			t.Errorf("%s search: err = %v", provider, err)
+		}
+	}
+}
+
 // Providers whose SDK would otherwise use a client without any timeout give up
 // on a server that never answers instead of hanging the run forever.
 func TestDefaultHTTPClientTimesOutWithoutResponseHeaders(t *testing.T) {

@@ -269,12 +269,8 @@ func TestOllamaWebSearchNeedsRealKey(t *testing.T) {
 		t.Setenv(key, "")
 	}
 	mock := cruxtest.NewMock()
-	agent, err := crux.New("ollama", "llama3", crux.WithProvider(crux.ProviderOllama), crux.WithHTTPClient(mock.Client()), crux.WithWebSearch())
-	require.NoError(t, err)
-	s := crux.MustSession(crux.NewSession(t.Context(), agent))
-	_, err = s.Run(t.Context(), "search")
+	_, err := crux.New("ollama", "llama3", crux.WithProvider(crux.ProviderOllama), crux.WithHTTPClient(mock.Client()), crux.WithWebSearch())
 	require.ErrorContains(t, err, "Ollama API key is required")
-	require.Equal(t, 0, mock.Calls())
 }
 
 type listItem struct {
