@@ -72,16 +72,16 @@ func TestFilesystemRegister(t *testing.T) {
 	registry, _ := newFilesystemRegistry(t, nil)
 
 	approval := map[string]bool{
-		"read_file":            false,
-		"read_multiple_files":  false,
-		"list_directory":       false,
-		"directory_tree":       false,
-		"glob":                 false,
-		"search_files_content": false,
-		"write_file":           true,
-		"edit_file":            true,
-		"create_directory":     true,
-		"remove_directory":     true,
+		FsReadFile:           false,
+		FsReadMultipleFiles:  false,
+		FsListDirectory:      false,
+		FsDirectoryTree:      false,
+		FsGlob:               false,
+		FsSearchFilesContent: false,
+		FsWriteFile:          true,
+		FsEditFile:           true,
+		FsCreateDirectory:    true,
+		FsRemoveDirectory:    true,
 	}
 	if len(registry.tools) != len(approval) {
 		t.Fatalf("registered %d tools, want %d", len(registry.tools), len(approval))
@@ -94,8 +94,8 @@ func TestFilesystemRegister(t *testing.T) {
 		if tool.approvalNeeded != want {
 			t.Errorf("%s approvalNeeded = %v, want %v", name, tool.approvalNeeded, want)
 		}
-		if tool.toolset != "filesystem" {
-			t.Errorf("%s toolset = %q, want filesystem", name, tool.toolset)
+		if tool.toolset != ToolsetFilesystem {
+			t.Errorf("%s toolset = %q, want %s", name, tool.toolset, ToolsetFilesystem)
 		}
 	}
 

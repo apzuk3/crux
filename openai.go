@@ -14,6 +14,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 const openAIOutputItemOpaqueKey = "openai.response.output_item"
@@ -102,6 +103,16 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 	}
 	if a.temperature != nil {
 		params.Temperature = openai.Float(*a.temperature)
+	}
+	if a.reasoning != "" {
+		// https://platform.openai.com/docs/guides/reasoning
+		params.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffort(a.reasoning)}
+		if a.reasoning == ReasoningOff {
+			params.Reasoning.Effort = shared.ReasoningEffortNone
+		} else if a.provider == ProviderOpenAI {
+			// Without a summary, OpenAI returns no readable reasoning.
+			params.Reasoning.Summary = shared.ReasoningSummaryAuto
+		}
 	}
 	if a.searchOptions != nil {
 		tool := responses.ToolParamOfWebSearch(responses.WebSearchToolTypeWebSearch)

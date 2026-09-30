@@ -21,6 +21,7 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
 - **Tools are decoupled from agents, on purpose.** Tools are registered in a registry: the default one via `RegisterTool`, or a custom `NewToolsRegistry()` passed with `WithToolsRegistry`. Any package in an application can contribute tools independently of where agents are defined, and each agent references the tools it may use **by name** (`WithTools([]string{...})`). This keeps large LLM apps from turning into a tangle. **Do not replace this with tools defined inline on agents.** Tool names must match `^[a-zA-Z0-9_-]{1,64}$`; an invalid or already registered name panics (`AddToolset*` returns it as an error), and `New` rejects an agent with two tools of the same name. Improvements that were discussed and not yet decided:
   - `RegisterTool` could return a reference value that agents can pass instead of a string;
   - a simpler custom-registry option, `WithRegistry(reg)`.
+- **Runtime schemas:** `WithInputSchema(schema)` replaces the schema generated from the input type, for tools whose arguments are only known at run time (such as MCP tools). The input type may then be `json.RawMessage`.
 - **Toolsets** group tools. A `Toolset` registers its tools in `Register(registry)` and labels each one with the `WithToolset(name)` tool option; `AddToolset`/`AddToolsetWithRegistry` call `Register`. Agents select a whole set with `WithToolsets`/`WithToolsetsRegistry`, which add to the tool list (unlike `WithTools`, which replaces it).
 - **Agent** (`agent.go`): an immutable, stateless blueprint (model, instructions, tool names, limits), safe for concurrent use. Its ID is derived from `CanonicalData()` unless `WithAgentID` is given.
 - **Session** (`agent.go`): one conversation, stored as an append-only log of `Entry` values (`types.go`). Not safe for concurrent use. `Run`/`RunInto`/`Stream` drive the loop:
@@ -29,7 +30,7 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
   3. append what the model produced;
   4. stop on approvals, refusals or a final answer; otherwise repeat, up to `maxTurns`. Output repair requests (`WithMaxRepairs`) are extra and don't count as turns.
 - **Tool failures never stop a run.** Tool errors, and tool panics (recovered in `invokeTool`), are sent to the model as `ToolResult.Error`. Arguments are validated against the tool's input schema first; repeated keys, keys that match a field only case-insensitively and keys of a struct input that match no field are rejected (maps and nested types with their own decoder accept any key), so an approval shown from the raw arguments matches what the tool receives.
-- **Approvals:** tools registered with `WithApprovalNeeded(true)` make `Run` return `ErrApprovalNeeded`. The caller then uses `Approve`/`Reject` and `Resume`.
+- **Approvals:** tools registered with `WithApprovalNeeded(true)` make `Run` return `ErrApprovalNeeded`. The caller then uses `Approve`/`Reject` and `Resume`. Approvals needed inside a subagent surface on the parent: `PendingApprovals` includes them (`ToolCall.Agent` names the agent that made each call), and `Approve`/`Reject` record the decision in the subagent's session.
 - **Stores** (`store.go`, `store_gorm.go`): `Store.Append(ctx, *Session, entries...)` and `Store.Get(ctx, id)`.
   - `MemoryStore` is the default.
   - `GORMStore` (`NewGORMStore(db)`) persists to the `crux_agents`, `crux_sessions` and `crux_session_logs` tables.
@@ -41,7 +42,7 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
   - `NewSession` reads it, records the parent's ID, and reuses the parent's store.
   - `GORMStore` saves the link in `crux_sessions.parent_id`.
   - There is no public API for this, and none should be added without discussion.
-- **Subagents** (`WithSubAgent`): exposed to the parent as a tool named `agent_<name>` that takes `{"task": string}`, validated as strictly as other tool arguments. Each call runs a fresh child session, and its output is the tool result.
+- **Subagents** (`WithSubAgent`): exposed to the parent as a tool named `agent_<name>` that takes `{"task": string}`, validated as strictly as other tool arguments. Each call runs a child session whose ID is derived from the parent session and the call (`childSessionID`), and its output is the tool result. When the child stops for approval, the tool returns `errToolWaiting`: the call gets no result, the child is kept in `Session.children`, and the parent returns `ErrApprovalNeeded`. Running the call again loads the child by its ID and resumes it. `NewSession` reloads waiting children when it loads a session from the store.
 - **Fork** (`fork.go`): copies history into a new session, optionally switching model or provider. Provider-specific data (`Opaque`) is dropped when the provider changes.
 - **Errors** (`errors.go`): sentinel errors for `errors.Is` checks: `ErrApprovalNeeded`, `ErrMaxTurns`, `ErrRefused`, `ErrOutputValidation`, `ErrSessionNotFound`, `ErrSessionConflict`, `ErrToolNotFound`.
 - **`Kind` values are persisted.** Never renumber them. The value after `KindStateDelta` is a reserved blank (`_`), kept for future compaction.
@@ -51,10 +52,10 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
 There are only three wire implementations. Every provider maps onto one of them:
 
 - `openai.go`: the OpenAI Responses API. It also serves xAI, DeepSeek, OpenRouter and Ollama (see `xai.go`, `deepseek.go`, `openrouter.go`, `ollama.go`).
-- `anthropic.go`: Anthropic Messages. `max_tokens` is required and defaults to `defaultAnthropicMaxTokens` (16384).
+- `anthropic.go`: Anthropic Messages. `max_tokens` is required and defaults to `defaultAnthropicMaxTokens` (16384). Every request sets prompt-cache breakpoints (`setAnthropicCacheBreakpoints`); the API allows at most 4.
 - `gemini.go`: Google GenAI.
 
-`*_provider.go` files hold the model constants and register known models, so `New` can infer the provider from the model name (`provider.go`). API keys come from environment variables (`discoverAPIKey`) unless `WithAPIKey` is given. A new agent option that affects requests (like `WithMaxTokens`/`WithTemperature`) must be wired into all three wire files, added to `CanonicalData()`, and copied in `Agent.clone` (`fork.go`).
+`*_provider.go` files hold the model constants and register known models, so `New` can infer the provider from the model name (`provider.go`). API keys come from environment variables (`discoverAPIKey`) unless `WithAPIKey` is given. A new agent option that affects requests (like `WithMaxTokens`/`WithTemperature`/`WithReasoning`) must be wired into all three wire files, added to `CanonicalData()`, and copied in `Agent.clone` (`fork.go`).
 
 ## Conventions
 

@@ -3,6 +3,7 @@ package cruxtest_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,4 +135,29 @@ func TestWithToolsetsCombinesWithTools(t *testing.T) {
 
 	_, err = crux.New("calc", crux.ChatModelGPT5_6Sol, append(mock.AgentOptions(), crux.WithToolsetsRegistry(reg, "nope"))...)
 	require.ErrorIs(t, err, crux.ErrToolNotFound)
+}
+
+func TestFilesystemIndividualTools(t *testing.T) {
+	root := t.TempDir()
+	reg := crux.NewToolsRegistry()
+	require.NoError(t, crux.AddToolsetWithRegistry(reg, crux.Filesystem(root)))
+
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnText("ok")
+
+	agent, err := crux.New("reader", crux.ChatModelGPT5_6Sol, append(mock.AgentOptions(),
+		crux.WithToolsRegistry([]string{crux.FsReadFile, crux.FsGlob}, reg),
+	)...)
+	require.NoError(t, err)
+
+	sess, err := crux.NewSession(t.Context(), agent)
+	require.NoError(t, err)
+	_, err = sess.Run(t.Context(), "read something")
+	require.NoError(t, err)
+
+	body := mock.Requests()[0].BodyString()
+	require.Contains(t, body, fmt.Sprintf(`"name":%q`, crux.FsReadFile))
+	require.Contains(t, body, fmt.Sprintf(`"name":%q`, crux.FsGlob))
+	require.NotContains(t, body, fmt.Sprintf(`"name":%q`, crux.FsWriteFile))
+	require.NotContains(t, body, fmt.Sprintf(`"name":%q`, crux.FsEditFile))
 }

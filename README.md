@@ -127,6 +127,16 @@ agent := crux.Must(crux.New("calc", crux.ChatModelGPT5_4,
 
 `WithTools` replaces the agent's tool list, so put `WithToolsets` after it. Use `WithToolsetsRegistry` with a custom registry.
 
+### Tools with a runtime schema
+
+When a tool's arguments are only known at run time, for example a tool of an MCP server, give its JSON Schema with `WithInputSchema` and take the arguments as `json.RawMessage` (or `map[string]any`). Arguments are still validated against the schema before the tool runs:
+
+```go
+crux.RegisterTool("docs_search", "Search the docs", func(ctx context.Context, args json.RawMessage) (string, error) {
+	return mcpClient.CallTool(ctx, "search", args)
+}, crux.WithInputSchema(schemaFromServer))
+```
+
 ### Filesystem tools
 
 `Filesystem(root)` is a built-in toolset for reading and editing files under `root`. Nothing outside `root` can be reached (not through `..`, absolute paths or symlinks), paths use `/` on every OS, and it works the same on Linux, macOS and Windows. Tools that change files refuse paths that go through a symlink, so the change lands on the path that was approved.
@@ -178,6 +188,8 @@ coordinator := crux.Must(crux.New("coordinator", crux.ClaudeSonnet5,
 
 The coordinator sees a tool named `agent_researcher` that takes a `task` string.
 
+If a subagent calls a tool that needs approval, the parent's `Run` returns `ErrApprovalNeeded` too. `PendingApprovals` lists the subagent's calls, with `Agent` set to the subagent's name, and `Approve`, `Reject` and `Resume` on the parent session continue the subagent where it stopped. This also works after the session is loaded again from a store.
+
 ### Persisting and resuming sessions
 
 Sessions are kept in memory by default. To keep them, use any `crux.Store`. `crux.NewGORMStore` works with any GORM driver:
@@ -200,6 +212,14 @@ session, _ = crux.NewSession(ctx, agent, crux.WithStore(store), crux.WithSession
 The store is the source of truth: an entry joins the session only once the store has saved it. If a write fails, `Run` returns the error and the session is unchanged, so a tool whose result was not saved runs again on the next `Run` or `Resume`. Make tools with side effects idempotent.
 
 If two `Session` values for the same ID write to one store (for example two requests for the same chat), the second write fails with `ErrSessionConflict`. Load the session again with `WithSessionID` and retry.
+
+### Reasoning
+
+```go
+agent := crux.Must(crux.New("planner", crux.ClaudeOpus4_8, crux.WithReasoning(crux.ReasoningHigh)))
+```
+
+`WithReasoning` takes `ReasoningOff`, `ReasoningLow`, `ReasoningMedium`, `ReasoningHigh` or `ReasoningMax` and maps it to each provider's setting (Anthropic adaptive thinking and effort, or a thinking budget before Claude 4.6; OpenAI reasoning effort; Gemini thinking level, or a budget on Gemini 2.5). Readable reasoning is requested where the provider offers it, so `Stream` yields `ChunkReasoning` chunks. Without the option, each provider uses its default.
 
 ### Forking
 
@@ -228,7 +248,9 @@ The provider is inferred from known model constants (`crux.ClaudeSonnet5`, `crux
 | OpenRouter | `ProviderOpenrouter` | `OPENROUTER_API_KEY` | – |
 | Ollama | `ProviderOllama` | none needed locally (`http://localhost:11434/v1`) | with `OLLAMA_API_KEY` |
 
-Common agent options: `WithInstructions`, `WithTools`, `WithToolsets`, `WithMaxTurns`, `WithMaxTokens`, `WithTemperature`, `WithOutputSchemaFrom`, `WithWebSearch`, `WithAPIKey`, `WithBaseURL`, `WithHTTPClient`.
+Anthropic requests cache the prompt automatically, so each turn of a run reads the conversation so far from the cache instead of paying for it again.
+
+Common agent options: `WithInstructions`, `WithTools`, `WithToolsets`, `WithMaxTurns`, `WithMaxTokens`, `WithTemperature`, `WithReasoning`, `WithOutputSchemaFrom`, `WithWebSearch`, `WithAPIKey`, `WithBaseURL`, `WithHTTPClient`.
 
 ## Testing your agents
 

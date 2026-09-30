@@ -116,6 +116,9 @@ type ToolCall struct {
 	ID   string          `json:"id"` // provider-issued call ID
 	Name string          `json:"name"`
 	Args json.RawMessage `json:"args,omitempty"`
+	// Agent names the agent that made the call. It is set on the calls
+	// PendingApprovals returns, which include calls made by subagents.
+	Agent string `json:"agent,omitempty"`
 }
 
 // normalizeToolArgs keeps arguments that are not valid JSON as a JSON string,

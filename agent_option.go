@@ -240,6 +240,37 @@ func WithTemperature(temperature float64) AgentOption {
 	}
 }
 
+// ReasoningEffort sets how much a model reasons before it answers.
+type ReasoningEffort string
+
+const (
+	// ReasoningOff reasons as little as the model allows. Models that always
+	// reason, such as Claude Opus 5.5, use their lowest effort instead.
+	ReasoningOff    ReasoningEffort = "off"
+	ReasoningLow    ReasoningEffort = "low"
+	ReasoningMedium ReasoningEffort = "medium"
+	ReasoningHigh   ReasoningEffort = "high"
+	ReasoningMax    ReasoningEffort = "max"
+)
+
+// WithReasoning sets how much the model reasons. Unset keeps the provider
+// default. Readable reasoning is requested where the provider offers it, so
+// Stream yields ChunkReasoning chunks. Each provider maps the level to its
+// own setting, and a model that does not support a level rejects the
+// request. On Anthropic, reasoning other than ReasoningOff cannot be combined
+// with WithTemperature.
+func WithReasoning(effort ReasoningEffort) AgentOption {
+	return func(a *Agent) error {
+		switch effort {
+		case ReasoningOff, ReasoningLow, ReasoningMedium, ReasoningHigh, ReasoningMax:
+		default:
+			return fmt.Errorf("unknown reasoning effort %q", effort)
+		}
+		a.reasoning = effort
+		return nil
+	}
+}
+
 // WithMaxRepairs sets the number of attempts the agent will make
 // to ask the model to repair its response if output validation fails.
 // Each Run or Resume has this many repairs, on top of WithMaxTurns; Resume
@@ -358,6 +389,7 @@ func WithSubAgent(subAgent *Agent, description string) AgentOption {
 			description: description,
 			schema:      subAgentInputSchema,
 			kind:        toolKindSubagent,
+			subAgent:    subAgent,
 			invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
 				input, err := decodeToolArgs[subAgentInput](name, args, subAgentArgsValidator())
 				if err != nil {
@@ -367,11 +399,29 @@ func WithSubAgent(subAgent *Agent, description string) AgentOption {
 					return "", nil, fmt.Errorf("subagent %q needs a non-empty task", subAgent.name)
 				}
 
-				sess, err := NewSession(ctx, subAgent)
+				// The session ID derives from the call, so a call that stopped
+				// for approval, or whose result was not stored, continues in
+				// the same session instead of starting over.
+				var opts []SessionOption
+				parent, _ := ctx.Value(sessionContextKey{}).(*Session)
+				info, _ := ctx.Value(toolCallContextKey{}).(*toolCallInfo)
+				if parent != nil && info != nil {
+					opts = append(opts, WithSessionID(childSessionID(parent.id, info.key)))
+				}
+				sess, err := NewSession(ctx, subAgent, opts...)
 				if err != nil {
 					return "", nil, err
 				}
-				output, err := sess.Run(ctx, input.Task)
+				var output string
+				if len(sess.logs) > 0 {
+					output, err = sess.Resume(ctx)
+				} else {
+					output, err = sess.Run(ctx, input.Task)
+				}
+				if errors.Is(err, ErrApprovalNeeded) && info != nil {
+					info.waiting = sess
+					return "", nil, errToolWaiting
+				}
 				if err != nil {
 					return "", nil, err
 				}

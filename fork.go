@@ -73,6 +73,7 @@ func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {
 		fork.maxRepairs = a.maxRepairs
 		fork.maxTokens = a.maxTokens
 		fork.temperature = a.temperature
+		fork.reasoning = a.reasoning
 		fork.apiKey = a.apiKey
 		fork.tools = slices.Clone(a.tools)
 		fork.searchOptions = cloneSearchOptions(a.searchOptions)

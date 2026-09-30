@@ -4,6 +4,12 @@ import "github.com/anthropics/anthropic-sdk-go"
 
 type AnthropicModel = anthropic.Model
 
+// Models newer than the SDK's constants.
+const (
+	ClaudeOpus5_5   AnthropicModel = "claude-opus-5-5"
+	ClaudeSonnet5_5 AnthropicModel = "claude-sonnet-5-5"
+)
+
 const (
 	ClaudeFable5_1           = anthropic.ModelClaudeFable5_1
 	ClaudeMythos5_1          = anthropic.ModelClaudeMythos5_1
@@ -27,6 +33,7 @@ func init() {
 	providerMu.Lock()
 	defer providerMu.Unlock()
 	providers[ProviderAnthropic] = []model{
+		{Name: ClaudeOpus5_5}, {Name: ClaudeSonnet5_5},
 		{Name: ClaudeFable5_1}, {Name: ClaudeMythos5_1},
 		{Name: ClaudeSonnet5}, {Name: ClaudeFable5},
 		{Name: ClaudeMythos5}, {Name: ClaudeOpus5},

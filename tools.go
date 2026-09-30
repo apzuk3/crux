@@ -35,6 +35,8 @@ type Tool struct {
 	invoke         func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error)
 	approvalNeeded bool
 	toolset        string
+	schemaErr      error  // from WithInputSchema, reported at registration
+	subAgent       *Agent // set for WithSubAgent tools
 }
 
 type ToolOption func(*Tool)
@@ -51,6 +53,48 @@ func WithToolset(name string) ToolOption {
 	return func(tool *Tool) {
 		tool.toolset = name
 	}
+}
+
+// WithInputSchema gives the tool a JSON Schema for its arguments in place of
+// the one generated from its input type, for tools whose arguments are only
+// known at run time, such as the tools of an MCP server. schema is anything
+// that encodes to a JSON Schema object, such as json.RawMessage,
+// map[string]any or *jsonschema.Schema. Arguments are validated against it
+// before the tool runs. Take them as json.RawMessage or map[string]any to
+// receive whatever the schema allows; a struct input still rejects keys that
+// match none of its fields.
+func WithInputSchema(schema any) ToolOption {
+	return func(tool *Tool) {
+		tool.schema, tool.schemaErr = inputSchemaFrom(schema)
+	}
+}
+
+func inputSchemaFrom(schema any) (map[string]any, error) {
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return nil, fmt.Errorf("encode input schema: %w", err)
+	}
+	var object map[string]any
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return nil, fmt.Errorf("input schema must be a JSON object, got %s", raw)
+	}
+	if object["type"] != "object" {
+		// Providers only accept tools whose arguments are a JSON object.
+		return nil, fmt.Errorf(`input schema must have "type": "object", got %v`, object["type"])
+	}
+	return object, nil
+}
+
+// decodesObject reports whether encoding/json can decode a JSON object into t.
+func decodesObject(t reflect.Type) bool {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Struct, reflect.Map, reflect.Interface:
+		return true
+	}
+	return reflect.PointerTo(t).Implements(jsonUnmarshalerType)
 }
 
 // ToolsRegistry holds registered tools. Create one with NewToolsRegistry; the
@@ -95,46 +139,55 @@ func RegisterToolStateMutate[In, Out any](name string, description string, fn fu
 // and if In is not a struct or map, since tool arguments are a JSON object. A
 // struct decoded by UnmarshalText, or by a decoder it gets from an embedded
 // field, is rejected too, because its fields do not describe its arguments.
+// With WithInputSchema, In may also be json.RawMessage, and an invalid schema
+// panics.
 func RegisterToolWithRegistry[In, Out any](registry ToolsRegistry, name string, description string, fn func(ctx context.Context, input In) (Out, *StateDelta, error), opts ...ToolOption) {
 	if err := validateToolName(name); err != nil {
 		panic(toolRegistrationError{err})
 	}
-	schema := jsonSchemaOf[In]()
-	if schema["type"] != "object" {
-		// Providers only accept tools whose arguments are a JSON object.
-		in := reflect.TypeFor[In]()
-		if in.Kind() == reflect.Struct {
-			panic(toolRegistrationError{fmt.Errorf("tool %q: input type %s must decode from a JSON object field by field; its UnmarshalText or embedded decoder does not", name, in)})
-		}
-		panic(toolRegistrationError{fmt.Errorf("tool %q: input type %s must be a struct or a map", name, in)})
-	}
-	validator, err := compileToolSchema(schema)
-	if err != nil {
-		panic(toolRegistrationError{fmt.Errorf("tool %q: %w", name, err)})
-	}
-
 	tool := Tool{
 		name:        name,
 		description: description,
-		schema:      schema,
 		kind:        toolKindTool,
-		invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
-			input, err := decodeToolArgs[In](name, args, validator)
-			if err != nil {
-				return "", nil, err
-			}
-
-			output, delta, err := fn(ctx, input)
-			if err != nil {
-				return "", nil, err
-			}
-			outputStr, err := renderToolOutput(output)
-
-			return outputStr, delta, err
-		},
 	}
 	for _, opt := range opts {
 		opt(&tool)
+	}
+	in := reflect.TypeFor[In]()
+	switch {
+	case tool.schemaErr != nil:
+		panic(toolRegistrationError{fmt.Errorf("tool %q: %w", name, tool.schemaErr)})
+	case tool.schema != nil:
+		if !decodesObject(in) {
+			panic(toolRegistrationError{fmt.Errorf("tool %q: input type %s cannot hold a JSON object; use a struct, a map or json.RawMessage", name, in)})
+		}
+	default:
+		tool.schema = jsonSchemaOf[In]()
+		if tool.schema["type"] != "object" {
+			// Providers only accept tools whose arguments are a JSON object.
+			if in.Kind() == reflect.Struct {
+				panic(toolRegistrationError{fmt.Errorf("tool %q: input type %s must decode from a JSON object field by field; its UnmarshalText or embedded decoder does not", name, in)})
+			}
+			panic(toolRegistrationError{fmt.Errorf("tool %q: input type %s must be a struct or a map", name, in)})
+		}
+	}
+	validator, err := compileToolSchema(tool.schema)
+	if err != nil {
+		panic(toolRegistrationError{fmt.Errorf("tool %q: %w", name, err)})
+	}
+	tool.invoke = func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
+		input, err := decodeToolArgs[In](name, args, validator)
+		if err != nil {
+			return "", nil, err
+		}
+
+		output, delta, err := fn(ctx, input)
+		if err != nil {
+			return "", nil, err
+		}
+		outputStr, err := renderToolOutput(output)
+
+		return outputStr, delta, err
 	}
 
 	registry.mustBeInitialized()

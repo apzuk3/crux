@@ -38,8 +38,9 @@ type Agent struct {
 	// Execution Policies & Limits
 	maxTurns    int
 	maxRepairs  int
-	maxTokens   int      // 0 uses the provider default
-	temperature *float64 // nil uses the provider default
+	maxTokens   int             // 0 uses the provider default
+	temperature *float64        // nil uses the provider default
+	reasoning   ReasoningEffort // "" uses the provider default
 }
 
 type Session struct {
@@ -49,11 +50,32 @@ type Session struct {
 	logs       []Entry // cache of the entries the store has accepted
 	httpClient *http.Client
 	store      Store
+	children   map[string]*Session // subagent sessions waiting for approval, by toolCallInfo.key
 }
 
 // sessionContextKey carries the session running a tool, so sessions created
 // inside that tool (such as subagents) are recorded as its children.
 type sessionContextKey struct{}
+
+// toolCallContextKey carries the *toolCallInfo of the call a tool runs for.
+type toolCallContextKey struct{}
+
+// toolCallInfo identifies a running tool call and lets a subagent tool report
+// that its session stopped for approval.
+type toolCallInfo struct {
+	key     string   // unique within the session: the call's entry Seq and ID
+	waiting *Session // set by a subagent whose session waits for approval
+}
+
+// errToolWaiting is returned by a subagent tool whose session waits for
+// approval. The call then gets no result and runs again once it is decided.
+var errToolWaiting = errors.New("tool is waiting for approval")
+
+// childSessionID derives the session ID of a subagent call, so a call that
+// stopped for approval continues in the same session when it runs again.
+func childSessionID(parent uuid.UUID, callKey string) uuid.UUID {
+	return uuid.NewSHA1(parent, []byte(callKey))
+}
 
 // NewSession starts a conversation with agent. Sessions are kept in an
 // in-memory store unless WithStore supplies another one.
@@ -105,6 +127,9 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 		return nil, fmt.Errorf("session %s already has history; WithSessionLogs cannot replace it", session.id)
 	case len(stored) > 0:
 		session.logs = stored
+		if err := session.loadWaitingChildren(ctx); err != nil {
+			return nil, err
+		}
 	case len(session.logs) > 0:
 		now := time.Now().UTC()
 		var prev uint64
@@ -123,6 +148,30 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 	}
 
 	return session, nil
+}
+
+// loadWaitingChildren finds the subagent sessions that stopped for approval
+// inside the session's open tool calls, so PendingApprovals lists their calls
+// once the session is loaded again.
+func (s *Session) loadWaitingChildren(ctx context.Context) error {
+	for _, open := range s.openToolCalls() {
+		index := slices.IndexFunc(s.agent.tools, func(tool Tool) bool { return tool.name == open.call.Name })
+		if index < 0 || s.agent.tools[index].subAgent == nil {
+			continue
+		}
+		child, err := NewSession(context.WithValue(ctx, sessionContextKey{}, s), s.agent.tools[index].subAgent,
+			WithSessionID(childSessionID(s.id, open.key())), WithStore(s.store))
+		if err != nil {
+			return fmt.Errorf("load subagent session of call %q: %w", open.call.ID, err)
+		}
+		if len(child.PendingApprovals()) > 0 {
+			if s.children == nil {
+				s.children = make(map[string]*Session)
+			}
+			s.children[open.key()] = child
+		}
+	}
+	return nil
 }
 
 func MustSession(session *Session, err error) *Session {
@@ -225,6 +274,10 @@ func New(name, model string, opts ...AgentOption) (*Agent, error) {
 		return nil, fmt.Errorf("cannot infer provider from model %q, please pass through crux.WithProvider", agent.model)
 	}
 
+	if agent.provider == ProviderAnthropic && agent.temperature != nil && agent.reasoning != "" && agent.reasoning != ReasoningOff {
+		return nil, errors.New("anthropic does not accept a temperature while the model reasons; remove WithTemperature or use WithReasoning(ReasoningOff)")
+	}
+
 	if agent.apiKey == "" {
 		agent.apiKey = discoverAPIKey(agent.provider)
 	}
@@ -273,7 +326,7 @@ func (a *Agent) CanonicalData() []byte {
 		}
 	}
 
-	raw, _ := json.Marshal(map[string]any{
+	data := map[string]any{
 		"name":           a.name,
 		"model":          a.model,
 		"provider":       a.provider,
@@ -286,7 +339,12 @@ func (a *Agent) CanonicalData() []byte {
 		"tools":          toolNames,
 		"search_options": a.searchOptions,
 		"output_schema":  a.outputSchema,
-	})
+	}
+	// Added only when set, so the IDs of existing agents do not change.
+	if a.reasoning != "" {
+		data["reasoning"] = a.reasoning
+	}
+	raw, _ := json.Marshal(data)
 	return raw
 }
 
@@ -497,6 +555,9 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
+		if len(s.PendingApprovals()) > 0 {
+			return "", ErrApprovalNeeded // a subagent stopped for approval
+		}
 
 		start := time.Now()
 		var sink chunkSink
@@ -687,7 +748,13 @@ func (a *Agent) toolRequiresApproval(name string) bool {
 // decision on it if one was recorded.
 type openToolCall struct {
 	call     *ToolCall
+	seq      uint64 // of the call's entry
 	decision *Approval
+}
+
+// key identifies the call within the session even when a provider reuses call IDs.
+func (c openToolCall) key() string {
+	return fmt.Sprintf("%d/%s", c.seq, c.call.ID)
 }
 
 // openToolCalls returns the tool calls without a result, in log order. A result
@@ -704,7 +771,7 @@ func (s *Session) openToolCalls() []openToolCall {
 				continue // repeated while still open; answered once
 			}
 			pending[entry.ToolCall.ID] = len(open)
-			open = append(open, openToolCall{call: entry.ToolCall})
+			open = append(open, openToolCall{call: entry.ToolCall, seq: entry.Seq})
 		case entry.Kind == KindApproval && entry.Approval != nil:
 			if i, ok := pending[entry.Approval.CallID]; ok {
 				open[i].decision = entry.Approval
@@ -739,6 +806,7 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 	const maxConcurrentToolCalls = 8
 	state := s.StateSnapshot()
 	results := make([][]Entry, len(unexecuted))
+	infos := make([]*toolCallInfo, len(unexecuted))
 	slots := make(chan struct{}, maxConcurrentToolCalls)
 	var wg sync.WaitGroup
 calls:
@@ -766,12 +834,26 @@ calls:
 		case <-ctx.Done():
 			break calls
 		}
+		infos[i] = &toolCallInfo{key: open.key()}
 		wg.Go(func() {
 			defer func() { <-slots }()
-			results[i], _ = s.dispatch(ctx, call, state)
+			results[i], _ = s.dispatch(context.WithValue(ctx, toolCallContextKey{}, infos[i]), call, state)
 		})
 	}
 	wg.Wait()
+
+	for _, info := range infos {
+		switch {
+		case info == nil:
+		case info.waiting != nil:
+			if s.children == nil {
+				s.children = make(map[string]*Session)
+			}
+			s.children[info.key] = info.waiting
+		default:
+			delete(s.children, info.key)
+		}
+	}
 
 	var entries []Entry
 	for _, result := range results {
@@ -781,74 +863,78 @@ calls:
 }
 
 // PendingApprovals returns copies of the tool calls waiting for Approve or
-// Reject. Changing them does not change what runs.
+// Reject, including calls of subagents, in the order they were made. Agent
+// names the agent that made each call. Changing them does not change what runs.
 func (s *Session) PendingApprovals() []*ToolCall {
 	var pending []*ToolCall
+	for _, p := range s.pendingApprovals() {
+		call := *p.call
+		call.Args = slices.Clone(call.Args)
+		call.Agent = p.owner.agent.name
+		pending = append(pending, &call)
+	}
+	return pending
+}
+
+// pendingApproval is a call waiting for a decision, and the session, this one
+// or a subagent's, that made it.
+type pendingApproval struct {
+	owner *Session
+	call  *ToolCall
+}
+
+func (s *Session) pendingApprovals() []pendingApproval {
+	var pending []pendingApproval
 	for _, open := range s.openToolCalls() {
+		if child := s.children[open.key()]; child != nil {
+			pending = append(pending, child.pendingApprovals()...)
+			continue
+		}
 		if open.decision == nil && s.agent.toolRequiresApproval(open.call.Name) {
-			call := *open.call
-			call.Args = slices.Clone(call.Args)
-			pending = append(pending, &call)
+			pending = append(pending, pendingApproval{owner: s, call: open.call})
 		}
 	}
 	return pending
 }
 
+// Approve lets the pending tool call run on the next Resume.
 func (s *Session) Approve(ctx context.Context, callID string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	if callID == "" {
-		return errors.New("tool call ID cannot be empty")
-	}
-
-	pending := s.PendingApprovals()
-	idx := slices.IndexFunc(pending, func(p *ToolCall) bool {
-		return p.ID == callID
-	})
-	if idx < 0 {
-		return fmt.Errorf("tool call %q is not pending approval", callID)
-	}
-
-	return s.appendLogs(ctx, Entry{
-		Kind: KindApproval,
-		Approval: &Approval{
-			CallID:   callID,
-			Approved: true,
-		},
-	})
+	return s.decide(ctx, Approval{CallID: callID, Approved: true})
 }
 
+// Reject declines the pending tool call; the model is told reason, or that
+// the user declined it.
 func (s *Session) Reject(ctx context.Context, callID string, reason string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	if callID == "" {
-		return errors.New("tool call ID cannot be empty")
-	}
-
-	pending := s.PendingApprovals()
-	idx := slices.IndexFunc(pending, func(p *ToolCall) bool {
-		return p.ID == callID
-	})
-	if idx < 0 {
-		return fmt.Errorf("tool call %q is not pending approval", callID)
-	}
-
 	if reason == "" {
 		reason = "tool execution declined by user"
 	}
+	return s.decide(ctx, Approval{CallID: callID, Approved: false, Reason: reason})
+}
 
-	return s.appendLogs(ctx, Entry{
-		Kind: KindApproval,
-		Approval: &Approval{
-			CallID:   callID,
-			Approved: false,
-			Reason:   reason,
-		},
-	})
+// decide records a decision in the session that made the call, which is a
+// subagent's session for a call made by a subagent.
+func (s *Session) decide(ctx context.Context, decision Approval) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if decision.CallID == "" {
+		return errors.New("tool call ID cannot be empty")
+	}
+
+	var owners []*Session
+	for _, p := range s.pendingApprovals() {
+		if p.call.ID == decision.CallID {
+			owners = append(owners, p.owner)
+		}
+	}
+	switch len(owners) {
+	case 0:
+		return fmt.Errorf("tool call %q is not pending approval", decision.CallID)
+	case 1:
+		return owners[0].appendLogs(ctx, Entry{Kind: KindApproval, Approval: &decision})
+	default:
+		return fmt.Errorf("tool call ID %q is pending approval in %d sessions", decision.CallID, len(owners))
+	}
 }
 
 // RunInto executes the agent and decodes its final response into target.
@@ -898,6 +984,9 @@ func (s *Session) dispatch(ctx context.Context, call *ToolCall, snapshot map[str
 	toolCtx := context.WithValue(ContextWithState(ctx, snapshot), sessionContextKey{}, s)
 	output, delta, err := invokeTool(toolCtx, tool, call.Args)
 	duration := time.Since(start)
+	if errors.Is(err, errToolWaiting) {
+		return nil, nil // no result yet; the call runs again once it is decided
+	}
 	if err != nil {
 		result.Error = err.Error()
 	} else {

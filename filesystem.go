@@ -44,7 +44,22 @@ var (
 	fsMaxRegexLine         = 32 << 10  // bytes of one line a regex search reads
 )
 
-const filesystemToolsetName = "filesystem"
+// Filesystem tool names.
+const (
+	FsReadFile           = "read_file"
+	FsReadMultipleFiles  = "read_multiple_files"
+	FsListDirectory      = "list_directory"
+	FsDirectoryTree      = "directory_tree"
+	FsGlob               = "glob"
+	FsSearchFilesContent = "search_files_content"
+	FsWriteFile          = "write_file"
+	FsEditFile           = "edit_file"
+	FsCreateDirectory    = "create_directory"
+	FsRemoveDirectory    = "remove_directory"
+)
+
+// ToolsetFilesystem is the name of the toolset registered by Filesystem.
+const ToolsetFilesystem = "filesystem"
 
 var (
 	errIsDir      = errors.New("is a directory")
@@ -97,22 +112,22 @@ func (f *filesystemToolset) Register(registry ToolsRegistry) error {
 	t := &fsTools{root: root}
 	approval := WithApprovalNeeded(true)
 
-	registerFSTool(registry, "read_file", "Read a text file. The whole file is returned unless line (1-based start line) and limit (maximum number of lines) select a range.", t.readFile)
-	registerFSTool(registry, "read_multiple_files", fmt.Sprintf("Read several text files at once (at most %d). Prefer this over sequential read_file calls.", fsMaxMultiReadFiles), t.readMultipleFiles)
-	registerFSTool(registry, "list_directory", "List the files and directories directly inside a directory.", t.listDirectory)
-	registerFSTool(registry, "directory_tree", "Show a recursive tree of files and directories.", t.directoryTree)
-	registerFSTool(registry, "glob", "Find files whose path matches a glob pattern such as **/*.go or src/*.ts. ** matches any number of directories.", t.glob)
-	registerFSTool(registry, "search_files_content", "Search file contents for text or a regular expression. Returns matches as path:line:column: text.", t.searchFilesContent)
-	registerFSTool(registry, "write_file", "Create a file, or completely overwrite an existing one. Missing parent directories are created.", t.writeFile, approval)
-	registerFSTool(registry, "edit_file", "Edit a text file by replacing exact text. Each old_text must appear exactly once in the file; include enough surrounding text to make it unique. Edits are applied in order and either all succeed or none are written. In a file with CRLF line endings, an old_text that is only found once its \\n line endings become \\r\\n is matched that way, and the \\n line endings in its new_text are then written as \\r\\n too.", t.editFile, approval)
-	registerFSTool(registry, "create_directory", "Create one or more directories, including missing parents.", t.createDirectory, approval)
-	registerFSTool(registry, "remove_directory", "Remove one or more empty directories.", t.removeDirectory, approval)
+	registerFSTool(registry, FsReadFile, "Read a text file. The whole file is returned unless line (1-based start line) and limit (maximum number of lines) select a range.", t.readFile)
+	registerFSTool(registry, FsReadMultipleFiles, fmt.Sprintf("Read several text files at once (at most %d). Prefer this over sequential read_file calls.", fsMaxMultiReadFiles), t.readMultipleFiles)
+	registerFSTool(registry, FsListDirectory, "List the files and directories directly inside a directory.", t.listDirectory)
+	registerFSTool(registry, FsDirectoryTree, "Show a recursive tree of files and directories.", t.directoryTree)
+	registerFSTool(registry, FsGlob, "Find files whose path matches a glob pattern such as **/*.go or src/*.ts. ** matches any number of directories.", t.glob)
+	registerFSTool(registry, FsSearchFilesContent, "Search file contents for text or a regular expression. Returns matches as path:line:column: text.", t.searchFilesContent)
+	registerFSTool(registry, FsWriteFile, "Create a file, or completely overwrite an existing one. Missing parent directories are created.", t.writeFile, approval)
+	registerFSTool(registry, FsEditFile, "Edit a text file by replacing exact text. Each old_text must appear exactly once in the file; include enough surrounding text to make it unique. Edits are applied in order and either all succeed or none are written. In a file with CRLF line endings, an old_text that is only found once its \\n line endings become \\r\\n is matched that way, and the \\n line endings in its new_text are then written as \\r\\n too.", t.editFile, approval)
+	registerFSTool(registry, FsCreateDirectory, "Create one or more directories, including missing parents.", t.createDirectory, approval)
+	registerFSTool(registry, FsRemoveDirectory, "Remove one or more empty directories.", t.removeDirectory, approval)
 
 	return nil
 }
 
 func registerFSTool[In any](registry ToolsRegistry, name, description string, fn func(context.Context, In) (string, error), opts ...ToolOption) {
-	opts = append([]ToolOption{WithToolset(filesystemToolsetName)}, opts...)
+	opts = append([]ToolOption{WithToolset(ToolsetFilesystem)}, opts...)
 	RegisterToolWithRegistry(registry, name, description, func(ctx context.Context, in In) (string, *StateDelta, error) {
 		out, err := fn(ctx, in)
 		return out, nil, err
@@ -557,7 +572,8 @@ func (t *fsTools) directoryTree(ctx context.Context, in directoryTreeInput) (str
 		return "", fsError(in.Path, err)
 	}
 	if exhausted {
-		out.WriteString(walkBudgetNote() + "\n")
+		out.WriteString(walkBudgetNote())
+		out.WriteString("\n")
 	}
 	return out.String(), nil
 }
@@ -774,7 +790,8 @@ func (t *fsTools) searchFilesContent(ctx context.Context, in searchFilesContentI
 		return "No results found", nil
 	}
 	if stopped != "" {
-		out.WriteString("\n" + stopped)
+		out.WriteString("\n")
+		out.WriteString(stopped)
 	}
 	return out.String(), nil
 }

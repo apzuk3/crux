@@ -63,6 +63,9 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		temperature := float32(*a.temperature)
 		config.Temperature = &temperature
 	}
+	if a.reasoning != "" {
+		config.ThinkingConfig = geminiThinking(a.model, a.reasoning)
+	}
 	if a.searchOptions != nil {
 		config.Tools = append(config.Tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
 		if location := a.searchOptions.UserLocation; location != nil && location.Latitude != nil && location.Longitude != nil {
@@ -193,16 +196,43 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 // geminiStructuredOutputWithTools reports whether the model accepts a response
 // schema together with tools, which Gemini supports from version 3.
 func geminiStructuredOutputWithTools(model string) bool {
+	return geminiMajorVersion(model) >= 3
+}
+
+// geminiMajorVersion returns the major version of a model ID such as
+// gemini-2.5-flash, or 0 when the ID has none.
+func geminiMajorVersion(model string) int {
 	version, ok := strings.CutPrefix(strings.TrimPrefix(model, "models/"), "gemini-")
 	if !ok {
-		return false
+		return 0
 	}
 	end := strings.IndexFunc(version, func(r rune) bool { return r < '0' || r > '9' })
 	if end == -1 {
 		end = len(version)
 	}
-	major, err := strconv.Atoi(version[:end])
-	return err == nil && major >= 3
+	major, _ := strconv.Atoi(version[:end])
+	return major
+}
+
+// geminiThinking maps WithReasoning onto a thinking level from Gemini 3, or a
+// thinking budget on Gemini 2.5, which has no levels. Thought summaries are
+// requested so they can stream.
+// https://ai.google.dev/gemini-api/docs/thinking
+func geminiThinking(model string, effort ReasoningEffort) *genai.ThinkingConfig {
+	if major := geminiMajorVersion(model); major > 0 && major < 3 {
+		budgets := map[ReasoningEffort]int32{
+			ReasoningOff: 0, ReasoningLow: 1024, ReasoningMedium: 8192, ReasoningHigh: 24576, ReasoningMax: 24576,
+		}
+		return &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(budgets[effort]), IncludeThoughts: effort != ReasoningOff}
+	}
+	levels := map[ReasoningEffort]genai.ThinkingLevel{
+		ReasoningOff:    genai.ThinkingLevelMinimal,
+		ReasoningLow:    genai.ThinkingLevelLow,
+		ReasoningMedium: genai.ThinkingLevelMedium,
+		ReasoningHigh:   genai.ThinkingLevelHigh,
+		ReasoningMax:    genai.ThinkingLevelHigh,
+	}
+	return &genai.ThinkingConfig{ThinkingLevel: levels[effort], IncludeThoughts: effort != ReasoningOff}
 }
 
 func streamGemini(ctx context.Context, client *genai.Client, model string, contents []*genai.Content, config *genai.GenerateContentConfig, emit chunkSink) (*genai.GenerateContentResponse, error) {

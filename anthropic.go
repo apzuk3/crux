@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -98,6 +99,10 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 			Format: anthropic.JSONOutputFormatParam{Schema: schema},
 		}
 	}
+	if err := a.setAnthropicReasoning(&params); err != nil {
+		return nil, err
+	}
+	setAnthropicCacheBreakpoints(&params)
 	client := a.newAnthropicClient(httpClient)
 	now := time.Now().UTC()
 	// Bound server-side continuation independently of the agent's tool turns.
@@ -188,6 +193,96 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 		})
 		if len(paused.Content) > 0 {
 			params.Messages = append(params.Messages, paused)
+		}
+	}
+}
+
+// anthropicThinkingBudgets are the thinking budgets of models without
+// adaptive thinking. A budget must be at least 1024 and below max_tokens.
+var anthropicThinkingBudgets = map[ReasoningEffort]int64{
+	ReasoningLow: 2048, ReasoningMedium: 8192, ReasoningHigh: 16384, ReasoningMax: 32768,
+}
+
+// setAnthropicReasoning maps WithReasoning onto the model's thinking settings:
+// adaptive thinking with an effort from Claude 4.6, a thinking budget before
+// it. Models that always think reject disabled thinking, so ReasoningOff uses
+// their lowest effort. The thinking summary is requested so it can stream.
+// https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
+func (a *Agent) setAnthropicReasoning(params *anthropic.MessageNewParams) error {
+	if a.reasoning == "" {
+		return nil
+	}
+	major, minor, family := claudeVersion(a.model)
+	budgetThinking := major > 0 && (major < 4 || major == 4 && minor < 6)
+	alwaysThinks := family == "fable" || family == "mythos" || major == 5 && minor >= 5 || major > 5
+	switch {
+	case a.reasoning == ReasoningOff && alwaysThinks:
+		params.OutputConfig.Effort = anthropic.OutputConfigEffortLow
+	case a.reasoning == ReasoningOff:
+		params.Thinking = anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}}
+	case budgetThinking:
+		budget := anthropicThinkingBudgets[a.reasoning]
+		if a.maxTokens == 0 {
+			params.MaxTokens = budget + defaultAnthropicMaxTokens
+		}
+		budget = min(budget, params.MaxTokens-1)
+		if budget < 1024 {
+			return fmt.Errorf("anthropic thinking needs more than 1024 output tokens; raise crux.WithMaxTokens above %d", params.MaxTokens)
+		}
+		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(budget)
+	default:
+		params.Thinking = anthropic.ThinkingConfigParamUnion{OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{
+			Display: anthropic.ThinkingConfigAdaptiveDisplaySummarized,
+		}}
+		params.OutputConfig.Effort = anthropic.OutputConfigEffort(a.reasoning)
+	}
+	return nil
+}
+
+// claudeVersion reads the family and version from a model ID such as
+// claude-opus-4-6, claude-sonnet-4-5-20250929 or claude-3-5-haiku-20241022.
+// major is 0 when the ID has no version.
+func claudeVersion(model string) (major, minor int, family string) {
+	parts := strings.Split(model, "-")
+	if len(parts) < 2 || parts[0] != "claude" {
+		return 0, 0, ""
+	}
+	var numbers []int
+	for _, part := range parts[1:] {
+		n, err := strconv.Atoi(part)
+		switch {
+		case err != nil:
+			if family == "" {
+				family = part
+			}
+		case len(part) <= 2 && len(numbers) < 2:
+			numbers = append(numbers, n)
+		}
+	}
+	if len(numbers) == 0 {
+		return 0, 0, family
+	}
+	if len(numbers) == 2 {
+		minor = numbers[1]
+	}
+	return numbers[0], minor, family
+}
+
+// setAnthropicCacheBreakpoints caches the prompt, because every turn of a run
+// resends the whole conversation. The top-level marker moves to the last block
+// of each request; the one on the tools and system prompt keeps that prefix
+// cached when a turn adds more blocks than the cache lookback covers. Prompts
+// below the model's minimum cacheable length are simply not cached.
+// https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+func setAnthropicCacheBreakpoints(params *anthropic.MessageNewParams) {
+	params.CacheControl = anthropic.NewCacheControlEphemeralParam()
+	if n := len(params.System); n > 0 {
+		params.System[n-1].CacheControl = anthropic.NewCacheControlEphemeralParam()
+		return
+	}
+	if n := len(params.Tools); n > 0 {
+		if cache := params.Tools[n-1].GetCacheControl(); cache != nil {
+			*cache = anthropic.NewCacheControlEphemeralParam()
 		}
 	}
 }

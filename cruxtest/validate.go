@@ -68,6 +68,10 @@ func validateAnthropicRequest(body []byte) error {
 	if len(request.Messages) == 0 {
 		return errors.New("anthropic: messages must not be empty")
 	}
+	// https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+	if n := bytes.Count(body, []byte(`"cache_control":`)); n > 4 {
+		return fmt.Errorf("anthropic: a maximum of 4 blocks with cache_control may be provided, found %d", n)
+	}
 	type block struct {
 		Type      string `json:"type"`
 		Text      string `json:"text"`
