@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,7 +19,7 @@ const anthropicContentBlockOpaqueKey = "anthropic.message.content_block"
 // anthropicUnknownContentBlockOpaqueKey holds blocks the SDK cannot replay.
 const anthropicUnknownContentBlockOpaqueKey = "anthropic.message.unknown_content_block"
 
-func (a *Agent) newAnthropicClient(httpClient *http.Client) *anthropic.Client {
+func (a *Agent) newAnthropicClient() *anthropic.Client {
 	var opts []option.RequestOption
 	if a.apiKey != "" {
 		opts = append(opts, option.WithAPIKey(a.apiKey))
@@ -30,7 +29,7 @@ func (a *Agent) newAnthropicClient(httpClient *http.Client) *anthropic.Client {
 		opts = append(opts, option.WithBaseURL(a.baseURL))
 	}
 
-	client := a.effectiveHTTPClient(httpClient)
+	client := a.httpClient
 	if client == nil {
 		// The SDK would fall back to http.DefaultClient, which never times out
 		// a server that accepts a streaming request but does not answer.
@@ -48,7 +47,7 @@ const defaultAnthropicMaxTokens = 16384
 
 // anthropicStep returns ordered blocks with usage, resuming paused server turns
 // internally until the model finishes or requests a local tool.
-func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
+func (a *Agent) anthropicStep(ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error) {
 	messages, err := toAnthropicMessages(log)
 	if err != nil {
 		return nil, err
@@ -103,7 +102,7 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 		return nil, err
 	}
 	setAnthropicCacheBreakpoints(&params)
-	client := a.newAnthropicClient(httpClient)
+	client := a.newAnthropicClient()
 	now := time.Now().UTC()
 	// Bound server-side continuation independently of the agent's tool turns.
 	const maxContinuations = 10
@@ -174,6 +173,7 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, httpClient *http
 				// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons
 				produced = append(produced, Entry{At: now, Kind: KindAssistant})
 			}
+			produced[len(produced)-1].Response = &ResponseInfo{ID: response.ID}
 			produced[len(produced)-1].Usage = &Usage{
 				InputTokens:      totalInputTokens,
 				OutputTokens:     totalOutputTokens,

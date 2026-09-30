@@ -29,7 +29,7 @@ func TestOpenAIMock_TextPrompt(t *testing.T) {
 
 	agent, err := crux.New(
 		"test-agent",
-		crux.ChatModelGPT5_6Sol,
+		crux.OpenAIGPT5_6Sol,
 		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
 	)
@@ -61,7 +61,7 @@ func TestOpenAIMock_ToolCalling(t *testing.T) {
 
 	agent, err := crux.New(
 		"weather-agent",
-		crux.ChatModelGPT5_6Sol,
+		crux.OpenAIGPT5_6Sol,
 		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
 		crux.WithToolsRegistry([]string{"get_weather"}, tools),
@@ -93,7 +93,7 @@ func TestOpenAIMock_StructuredOutput(t *testing.T) {
 
 	agent, err := crux.New(
 		"sentiment-agent",
-		crux.ChatModelGPT5_6Sol,
+		crux.OpenAIGPT5_6Sol,
 		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
 		crux.WithOutputSchemaFrom[SentimentResult](),
@@ -238,7 +238,7 @@ func TestMock_ErrorStatus(t *testing.T) {
 
 	agent, err := crux.New(
 		"error-agent",
-		crux.ChatModelGPT5_6Sol,
+		crux.OpenAIGPT5_6Sol,
 		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
 	)
@@ -257,7 +257,7 @@ func TestMock_UnexpectedRequestError(t *testing.T) {
 
 	agent, err := crux.New(
 		"agent",
-		crux.ChatModelGPT5_6Sol,
+		crux.OpenAIGPT5_6Sol,
 		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
 	)
@@ -277,7 +277,7 @@ func TestMock_AgentOptionsHelper(t *testing.T) {
 
 	agent, err := crux.New(
 		"helper-agent",
-		crux.ChatModelGPT5_6Sol,
+		crux.OpenAIGPT5_6Sol,
 		mock.AgentOptions()...,
 	)
 	require.NoError(t, err)
@@ -316,12 +316,10 @@ func TestMock_TokenUsage(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "Response with usage", out)
 
-	entries := sess.Logs()
-	require.NotEmpty(t, entries)
-	lastEntry := entries[len(entries)-1]
-	require.NotNil(t, lastEntry.Usage)
-	require.Equal(t, 150, lastEntry.Usage.InputTokens)
-	require.Equal(t, 42, lastEntry.Usage.OutputTokens)
+	last := lastEntry(t, sess)
+	require.NotNil(t, last.Usage)
+	require.Equal(t, 150, last.Usage.InputTokens)
+	require.Equal(t, 42, last.Usage.OutputTokens)
 }
 
 func TestMock_ParallelToolCalls(t *testing.T) {
@@ -344,7 +342,7 @@ func TestMock_ParallelToolCalls(t *testing.T) {
 
 	agent, err := crux.New(
 		"parallel-agent",
-		crux.ChatModelGPT5_6Sol,
+		crux.OpenAIGPT5_6Sol,
 		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-key"),
 		crux.WithToolsRegistry([]string{"tool_a", "tool_b"}, reg),

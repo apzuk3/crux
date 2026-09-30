@@ -268,12 +268,12 @@ func TestResumeRepairsStoredInvalidOutput(t *testing.T) {
 	mock.Expect().ReturnText(`{}`)
 	mock.Expect().ReturnText(`{"status":"ok","score":1,"note":null}`)
 
-	strict := newMockAgent(t, mock, crux.ChatModelGPT5_6Sol, crux.WithOutputSchemaFrom[structuredAnswer]())
+	strict := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithOutputSchemaFrom[structuredAnswer]())
 	session := crux.MustSession(crux.NewSession(t.Context(), strict))
 	_, err := session.Run(t.Context(), "extract")
 	require.ErrorIs(t, err, crux.ErrOutputValidation)
 
-	repairing := newMockAgent(t, mock, crux.ChatModelGPT5_6Sol,
+	repairing := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol,
 		crux.WithOutputSchemaFrom[structuredAnswer](), crux.WithMaxRepairs(1), crux.WithMaxTurns(1))
 	resumed := crux.MustSession(crux.NewSession(t.Context(), repairing,
 		crux.WithSessionID(session.ID()), crux.WithStore(session.Store())))

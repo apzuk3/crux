@@ -33,7 +33,7 @@ func main() {
 
 	agent := crux.Must(crux.New(
 		"store-agent",
-		crux.ChatModelGPT5_4,
+		crux.OpenAIGPT5_4,
 		crux.WithInstructions("You are a concise assistant. Remember what the user tells you."),
 	))
 

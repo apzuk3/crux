@@ -23,11 +23,11 @@ func TestForkCrossProviderInference(t *testing.T) {
 	require.NoError(t, err)
 
 	// Fork with WithModel pointing to an OpenAI model
-	forked, err := session.Fork(t.Context(), WithModel(ChatModelGPT4_1Mini))
+	forked, err := session.Fork(t.Context(), WithModel(OpenAIGPT4_1Mini))
 	require.NoError(t, err)
 
 	require.Equal(t, ProviderOpenAI, forked.agent.provider)
-	require.Equal(t, ChatModelGPT4_1Mini, forked.agent.model)
+	require.Equal(t, OpenAIGPT4_1Mini, forked.agent.model)
 	require.Len(t, forked.logs, 1)
 	require.Nil(t, forked.logs[0].Opaque)
 }
@@ -39,7 +39,7 @@ func TestForkInheritsConfiguration(t *testing.T) {
 
 	agent := &Agent{
 		name:         "parent-agent",
-		model:        ChatModelGPT4_1Mini,
+		model:        OpenAIGPT4_1Mini,
 		provider:     ProviderOpenAI,
 		maxTurns:     42,
 		instructions: "be helpful",
@@ -108,7 +108,7 @@ func TestForkCrossProviderDefaultBaseURL(t *testing.T) {
 func TestForkUserOverrides(t *testing.T) {
 	agent := &Agent{
 		name:         "parent",
-		model:        ChatModelGPT4_1Mini,
+		model:        OpenAIGPT4_1Mini,
 		provider:     ProviderOpenAI,
 		instructions: "old instructions",
 		maxTurns:     5,
@@ -148,13 +148,13 @@ func TestForkFromOffsetAndSanitization(t *testing.T) {
 	require.NoError(t, err)
 
 	// Offset out of bounds
-	_, err = session.ForkFrom(t.Context(), -1)
+	_, err = session.forkFrom(t.Context(), -1)
 	require.Error(t, err)
-	_, err = session.ForkFrom(t.Context(), 5)
+	_, err = session.forkFrom(t.Context(), 5)
 	require.Error(t, err)
 
 	// Fork at offset 3 with cross-provider
-	forked, err := session.ForkFrom(t.Context(), 3, WithModel(ChatModelGPT4_1Mini))
+	forked, err := session.forkFrom(t.Context(), 3, WithModel(OpenAIGPT4_1Mini))
 	require.NoError(t, err)
 	// Entry at offset 2 was KindProviderTool, which should be deleted across providers
 	require.Len(t, forked.logs, 2)
@@ -179,7 +179,7 @@ func TestForkKeepsExplicitSameProvider(t *testing.T) {
 }
 
 func TestForkDropsUsage(t *testing.T) {
-	agent := Must(New("usage", ChatModelGPT4_1Mini, WithAPIKey("k")))
+	agent := Must(New("usage", OpenAIGPT4_1Mini, WithAPIKey("k")))
 	session, err := NewSession(t.Context(), agent, WithSessionLogs([]Entry{
 		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "hi"}}},
 		{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: "hello"}},
@@ -195,7 +195,7 @@ func TestForkDropsUsage(t *testing.T) {
 }
 
 func TestForkAcceptsRepeatedOpenCallID(t *testing.T) {
-	agent := Must(New("dup", ChatModelGPT4_1Mini, WithAPIKey("k")))
+	agent := Must(New("dup", OpenAIGPT4_1Mini, WithAPIKey("k")))
 	call := &ToolCall{ID: "call_1", Name: "noop", Args: []byte(`{}`)}
 	logs := []Entry{
 		{Kind: KindUser, Content: []ContentPart{{Kind: ContentKindText, Text: "go"}}},
@@ -212,6 +212,6 @@ func TestForkAcceptsRepeatedOpenCallID(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, forked.logs, len(logs))
 
-	_, err = session.ForkFrom(t.Context(), 3)
+	_, err = session.forkFrom(t.Context(), 3)
 	require.ErrorContains(t, err, `tool call "call_1" has no result`)
 }

@@ -25,7 +25,7 @@
 //      decode cleanly without unmarshaling errors or fidelity loss.
 //
 // Evaluation Matrix:
-// - OpenAI: crux.ChatModelGPT4_1Mini (strict schema mode)
+// - OpenAI: crux.OpenAIGPT4_1Mini (strict schema mode)
 // - Anthropic: crux.ClaudeHaiku4_5 (JSON output format)
 // - Google Gemini: crux.Gemini3_5FlashLite (responseJsonSchema)
 // - xAI: crux.XAIGrok4_20 (OpenAI-compatible strict format)
@@ -94,7 +94,7 @@ func Test_ComplexStructuredOutputValidation(t *testing.T) {
 		{
 			name:     "OpenAI_GPT4_1Mini",
 			provider: crux.ProviderOpenAI,
-			model:    crux.ChatModelGPT4_1Mini,
+			model:    crux.OpenAIGPT4_1Mini,
 		},
 		{
 			name:     "Anthropic_ClaudeHaiku4_5",

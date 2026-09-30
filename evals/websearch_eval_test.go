@@ -33,7 +33,7 @@
 //      to each provider's native API without schema errors or payload rejections.
 //
 // Evaluation Matrix:
-// - OpenAI: GPT-4.1 (crux.ChatModelGPT4_1Mini) & GPT-5 (crux.ChatModelGPT5Mini)
+// - OpenAI: GPT-4.1 (crux.OpenAIGPT4_1Mini) & GPT-5 (crux.OpenAIGPT5Mini)
 // - Anthropic: Claude Haiku 4.5 (crux.ClaudeHaiku4_5)
 // - Google Gemini: Gemini 2.5 Flash (crux.Gemini2_5Flash)
 // - xAI: Grok 4.20 (crux.XAIGrok4_20)
@@ -90,12 +90,12 @@ func Test_WebSearchEval(t *testing.T) {
 		{
 			name:     "OpenAI_GPT4_1",
 			provider: crux.ProviderOpenAI,
-			model:    crux.ChatModelGPT4_1Mini,
+			model:    crux.OpenAIGPT4_1Mini,
 		},
 		{
 			name:     "OpenAI_GPT5",
 			provider: crux.ProviderOpenAI,
-			model:    crux.ChatModelGPT5Mini,
+			model:    crux.OpenAIGPT5Mini,
 		},
 		{
 			name:     "Anthropic_ClaudeHaiku4_5",

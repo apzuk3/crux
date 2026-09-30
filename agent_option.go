@@ -1,14 +1,11 @@
 package crux
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
 	"slices"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/invopop/jsonschema"
@@ -16,11 +13,6 @@ import (
 
 // AgentOption configures an Agent in New.
 type AgentOption func(*Agent) error
-
-// WithAgentID overrides the agent's ID, which otherwise derives from its configuration.
-func WithAgentID(id uuid.UUID) AgentOption {
-	return func(a *Agent) error { a.id = id; return nil }
-}
 
 // SessionOption configures a Session in NewSession.
 type SessionOption func(*Session) error
@@ -48,11 +40,6 @@ func WithStore(store Store) SessionOption {
 		s.store = store
 		return nil
 	}
-}
-
-// WithSessionHTTPClient overrides the agent's HTTP client for this session.
-func WithSessionHTTPClient(client *http.Client) SessionOption {
-	return func(s *Session) error { s.httpClient = client; return nil }
 }
 
 // WithTools replaces existing registry tools with the selected ones, preserving subagents.
@@ -144,16 +131,7 @@ func WithInstructions(instructions string) AgentOption {
 // named location fields. Providers without location support ignore it.
 func WithUserLocation(location UserLocation) SearchOption {
 	return func(opts *SearchOptions) {
-		value := location
-		if location.Latitude != nil {
-			latitude := *location.Latitude
-			value.Latitude = &latitude
-		}
-		if location.Longitude != nil {
-			longitude := *location.Longitude
-			value.Longitude = &longitude
-		}
-		opts.UserLocation = &value
+		opts.UserLocation = cloneUserLocation(&location)
 	}
 }
 
@@ -390,44 +368,6 @@ func WithSubAgent(subAgent *Agent, description string) AgentOption {
 			schema:      subAgentInputSchema,
 			kind:        toolKindSubagent,
 			subAgent:    subAgent,
-			invoke: func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
-				input, err := decodeToolArgs[subAgentInput](name, args, subAgentArgsValidator())
-				if err != nil {
-					return "", nil, err
-				}
-				if strings.TrimSpace(input.Task) == "" {
-					return "", nil, fmt.Errorf("subagent %q needs a non-empty task", subAgent.name)
-				}
-
-				// The session ID derives from the call, so a call that stopped
-				// for approval, or whose result was not stored, continues in
-				// the same session instead of starting over.
-				var opts []SessionOption
-				parent, _ := ctx.Value(sessionContextKey{}).(*Session)
-				info, _ := ctx.Value(toolCallContextKey{}).(*toolCallInfo)
-				if parent != nil && info != nil {
-					opts = append(opts, WithSessionID(childSessionID(parent.id, info.key)))
-				}
-				sess, err := NewSession(ctx, subAgent, opts...)
-				if err != nil {
-					return "", nil, err
-				}
-				var output string
-				if len(sess.logs) > 0 {
-					output, err = sess.Resume(ctx)
-				} else {
-					output, err = sess.Run(ctx, input.Task)
-				}
-				if errors.Is(err, ErrApprovalNeeded) && info != nil {
-					info.waiting = sess
-					return "", nil, errToolWaiting
-				}
-				if err != nil {
-					return "", nil, err
-				}
-
-				return output, &StateDelta{Set: map[string]any{subAgent.name: output}}, nil
-			},
 		}
 
 		parent.tools = append(parent.tools, tool)

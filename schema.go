@@ -359,35 +359,39 @@ func validateOutput(validator *sjs.Schema, text string) error {
 	if validator == nil {
 		return nil
 	}
-
-	clean := strings.TrimSpace(text)
-	var doc any
-	if err := decodeJSONNumber(strings.NewReader(clean), &doc); err == nil {
+	for _, candidate := range jsonCandidates(text) {
+		var doc any
+		if decodeJSONNumber(strings.NewReader(candidate), &doc) != nil {
+			continue
+		}
 		if err := validator.Validate(doc); err != nil {
 			return fmt.Errorf("%w: %v", ErrOutputValidation, err)
 		}
 		return nil
 	}
-
-	// Try extracting from markdown fence ```json ... ```
-	if start := strings.Index(clean, "```"); start != -1 {
-		rest := clean[start+3:]
-		if end := strings.LastIndex(rest, "```"); end != -1 {
-			block := rest[:end]
-			if nl := strings.Index(block, "\n"); nl != -1 {
-				block = block[nl+1:]
-			} else if strings.HasPrefix(strings.ToLower(block), "json") {
-				block = block[4:]
-			}
-			block = strings.TrimSpace(block)
-			if err := decodeJSONNumber(strings.NewReader(block), &doc); err == nil {
-				if err := validator.Validate(doc); err != nil {
-					return fmt.Errorf("%w: %v", ErrOutputValidation, err)
-				}
-				return nil
-			}
-		}
-	}
-
 	return fmt.Errorf("%w: invalid json: output could not be parsed as JSON", ErrOutputValidation)
+}
+
+// jsonCandidates returns the forms a model's JSON answer may take: the whole
+// text, trimmed, and the content of a fenced code block (```json ... ```) in
+// it, if there is one.
+func jsonCandidates(text string) []string {
+	clean := strings.TrimSpace(text)
+	candidates := []string{clean}
+	start := strings.Index(clean, "```")
+	if start == -1 {
+		return candidates
+	}
+	rest := clean[start+3:]
+	end := strings.LastIndex(rest, "```")
+	if end == -1 {
+		return candidates
+	}
+	block := rest[:end]
+	if nl := strings.Index(block, "\n"); nl != -1 {
+		block = block[nl+1:]
+	} else if strings.HasPrefix(strings.ToLower(block), "json") {
+		block = block[4:]
+	}
+	return append(candidates, strings.TrimSpace(block))
 }

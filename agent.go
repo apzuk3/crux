@@ -1,6 +1,7 @@
 package crux
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -44,32 +45,19 @@ type Agent struct {
 }
 
 type Session struct {
-	id         uuid.UUID
-	parentID   uuid.UUID // session whose tool call created this one; uuid.Nil at the top level
-	agent      *Agent
-	logs       []Entry // cache of the entries the store has accepted
-	httpClient *http.Client
-	store      Store
-	children   map[string]*Session // subagent sessions waiting for approval, by toolCallInfo.key
+	id       uuid.UUID
+	parentID uuid.UUID // session whose tool call created this one; uuid.Nil at the top level
+	agent    *Agent
+	logs     []Entry // cache of the entries the store has accepted
+	store    Store
+	children map[string]*Session // subagent sessions waiting for approval, by openToolCall.key
+	onEntry  []func(context.Context, *Session, Entry)
+	entryMu  *sync.Mutex // serialises onEntry across the session and its subagents
 }
 
 // sessionContextKey carries the session running a tool, so sessions created
 // inside that tool (such as subagents) are recorded as its children.
 type sessionContextKey struct{}
-
-// toolCallContextKey carries the *toolCallInfo of the call a tool runs for.
-type toolCallContextKey struct{}
-
-// toolCallInfo identifies a running tool call and lets a subagent tool report
-// that its session stopped for approval.
-type toolCallInfo struct {
-	key     string   // unique within the session: the call's entry Seq and ID
-	waiting *Session // set by a subagent whose session waits for approval
-}
-
-// errToolWaiting is returned by a subagent tool whose session waits for
-// approval. The call then gets no result and runs again once it is decided.
-var errToolWaiting = errors.New("tool is waiting for approval")
 
 // childSessionID derives the session ID of a subagent call, so a call that
 // stopped for approval continues in the same session when it runs again.
@@ -112,6 +100,14 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 		if session.store == nil {
 			session.store = parent.store
 		}
+		if len(parent.onEntry) > 0 {
+			// The parent's handlers see every descendant, before the child's own.
+			session.onEntry = append(slices.Clone(parent.onEntry), session.onEntry...)
+			session.entryMu = parent.entryMu
+		}
+	}
+	if len(session.onEntry) > 0 && session.entryMu == nil {
+		session.entryMu = new(sync.Mutex)
 	}
 	if session.store == nil {
 		session.store = NewMemoryStore()
@@ -235,6 +231,15 @@ func (s *Session) appendLogs(ctx context.Context, entries ...Entry) error {
 	}
 	s.logs = append(s.logs, entries...)
 
+	if len(s.onEntry) > 0 {
+		s.entryMu.Lock()
+		defer s.entryMu.Unlock()
+		for _, entry := range entries {
+			for _, fn := range s.onEntry {
+				fn(ctx, s, cloneEntries([]Entry{entry})[0])
+			}
+		}
+	}
 	return nil
 }
 
@@ -290,9 +295,7 @@ func New(name, model string, opts ...AgentOption) (*Agent, error) {
 		}
 	}
 
-	if agent.id == uuid.Nil {
-		agent.id = agent.computeAgentID()
-	}
+	agent.id = uuid.NewSHA1(agentNamespace, agent.canonicalData())
 
 	return agent, nil
 }
@@ -308,7 +311,11 @@ func Must(agent *Agent, err error) *Agent {
 // agentNamespace is the base UUID namespace for computing deterministic agent IDs.
 var agentNamespace = uuid.MustParse("e0f4f9a0-6f91-4c74-9844-3bfa3eb238b1")
 
-func (a *Agent) CanonicalData() []byte {
+// canonicalData describes the agent's configuration. The agent's ID derives
+// from it, and GORMStore keeps it in crux_agents. Each tool is identified by a
+// hash of its definition, so the ID changes when a tool's description or schema
+// does.
+func (a *Agent) canonicalData() []byte {
 	var toolNames []string
 	if len(a.tools) > 0 {
 		toolNames = make([]string, len(a.tools))
@@ -322,42 +329,18 @@ func (a *Agent) CanonicalData() []byte {
 		"model":          a.model,
 		"provider":       a.provider,
 		"instructions":   a.instructions,
-		"base_url":       redactURL(a.baseURL),
 		"max_turns":      a.maxTurns,
 		"max_repairs":    a.maxRepairs,
 		"max_tokens":     a.maxTokens,
 		"temperature":    a.temperature,
 		"tools":          toolNames,
+		"tool_hashes":    hashTools(a.tools),
 		"search_options": a.searchOptions,
 		"output_schema":  a.outputSchema,
-	}
-	// Added only when set, so the IDs of existing agents do not change.
-	if a.reasoning != "" {
-		data["reasoning"] = a.reasoning
+		"reasoning":      a.reasoning,
 	}
 	raw, _ := json.Marshal(data)
 	return raw
-}
-
-// redactURL removes credentials a base URL may carry in its user info or
-// query, because the canonical data is stored in plain text (GORMStore saves
-// it in crux_agents).
-func redactURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return ""
-	}
-	if u.User != nil {
-		u.User = url.User("redacted")
-	}
-	if u.RawQuery != "" {
-		query := u.Query()
-		for key := range query {
-			query[key] = []string{"redacted"}
-		}
-		u.RawQuery = query.Encode()
-	}
-	return u.String()
 }
 
 // redactURLSecrets removes the credentials a base URL carries from err's
@@ -416,10 +399,6 @@ type redactedError struct {
 func (e *redactedError) Error() string { return e.msg }
 func (e *redactedError) Unwrap() error { return e.err }
 
-func (a *Agent) computeAgentID() uuid.UUID {
-	return uuid.NewSHA1(agentNamespace, a.CanonicalData())
-}
-
 func (a *Agent) ID() uuid.UUID {
 	return a.id
 }
@@ -441,16 +420,8 @@ func (a *Agent) Instructions() string {
 	return a.instructions
 }
 
-func (a *Agent) BaseURL() string {
-	return a.baseURL
-}
-
 func (a *Agent) MaxTurns() int {
 	return a.maxTurns
-}
-
-func (a *Agent) MaxRepairs() int {
-	return a.maxRepairs
 }
 
 func (a *Agent) ToolNames() []string {
@@ -470,7 +441,7 @@ func (s *Session) Run(ctx context.Context, input any) (string, error) {
 	return s.run(ctx, input, nil)
 }
 
-func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, error) {
+func (s *Session) run(ctx context.Context, input any, emit chunkSink) (text string, err error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -489,6 +460,7 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 	}
 
 	repairsLeft := s.agent.maxRepairs
+	var repair error // a stored answer that fails validation is repaired like a new one
 	if input == nil {
 		if text, ok := s.FinalOutput(); ok {
 			if validator == nil {
@@ -501,19 +473,15 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 			if repairsLeft == 0 {
 				return "", valErr
 			}
-			// A stored answer that fails validation is repaired like a new one.
-			repairsLeft--
-			if err := s.requestRepair(ctx, valErr); err != nil {
-				return "", err
-			}
+			repair = valErr
 		}
 	}
 
-	if input != nil && s.hasUnexecutedToolCalls() {
-		return "", errors.New("cannot run agent with new user input while tool calls are pending execution; call Resume first")
-	}
-
+	var userEntry *Entry
 	if input != nil {
+		if s.hasUnexecutedToolCalls() {
+			return "", errors.New("cannot run agent with new user input while tool calls are pending execution; call Resume first")
+		}
 		// The user turn is part of the log, so every provider sees one shape and a
 		// resumed session needs nothing but its history.
 		entry, err := NewUserEntry(input)
@@ -523,20 +491,44 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 		if strings.TrimSpace(entry.Text()) == "" {
 			return "", errors.New("user input produced empty text")
 		}
+		userEntry = &entry
+	}
 
-		if err := s.appendLogs(ctx, entry); err != nil {
+	// From here the run does work, so it is recorded between a started and a
+	// finished entry. The finished entry is kept even if ctx was cancelled.
+	if err := s.appendLogs(ctx, Entry{Kind: KindRunStarted}); err != nil {
+		return "", err
+	}
+	defer func() {
+		status := runStatus(err)
+		if finishErr := s.appendLogs(context.WithoutCancel(ctx), Entry{Kind: KindRunFinished, Run: &status}); finishErr != nil {
+			text, err = "", errors.Join(err, finishErr)
+		}
+	}()
+
+	if repair != nil {
+		repairsLeft--
+		if err := s.requestRepair(ctx, repair); err != nil {
+			return "", err
+		}
+	}
+	if userEntry != nil {
+		if err := s.appendLogs(ctx, *userEntry); err != nil {
 			return "", err
 		}
 	}
 
-	// ---> Notify start
 	// Repair requests do not count against maxTurns.
 	for turn := 0; turn < s.agent.maxTurns+s.agent.maxRepairs-repairsLeft; turn++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
 
-		if toolResults := s.executeUnexecutedToolCalls(ctx); len(toolResults) > 0 {
+		toolResults, err := s.executeUnexecutedToolCalls(ctx)
+		if err != nil {
+			return "", err
+		}
+		if len(toolResults) > 0 {
 			// The tools have already run, so their results are kept even if ctx
 			// was cancelled meanwhile; otherwise the next Resume would run them again.
 			if err := s.appendLogs(context.WithoutCancel(ctx), toolResults...); err != nil {
@@ -550,20 +542,34 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 			return "", ErrApprovalNeeded // a subagent stopped for approval
 		}
 
+		if err := s.appendLogs(ctx, Entry{Kind: KindTurnStarted, Turn: s.agent.turnInfo()}); err != nil {
+			return "", err
+		}
 		start := time.Now()
 		var sink chunkSink
+		var firstToken time.Time
 		if emit != nil {
 			sink = func(chunk Chunk) error {
+				if firstToken.IsZero() {
+					firstToken = time.Now()
+				}
 				chunk.Turn = turn + 1
 				return emit(chunk)
 			}
 		}
-		produced, err := s.step(ctx, s.logs, sink)
+		produced, err := s.agent.step(ctx, s.logs, sink)
 		if err != nil {
 			return "", err
 		}
 		if len(produced) > 0 {
-			produced[len(produced)-1].Duration = time.Since(start)
+			last := &produced[len(produced)-1]
+			last.Duration = time.Since(start)
+			if !firstToken.IsZero() {
+				if last.Response == nil {
+					last.Response = &ResponseInfo{}
+				}
+				last.Response.FirstTokenAfter = firstToken.Sub(start)
+			}
 		}
 
 		// Retain all model entries in history before dispatching local tools.
@@ -598,12 +604,32 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (string, e
 					return "", valErr
 				}
 			}
-			// ---> Notify end
 			return text, nil
 		}
 	}
 
 	return "", fmt.Errorf("%w (%d)", ErrMaxTurns, s.agent.maxTurns)
+}
+
+// runStatus describes how a run that returned err ended.
+func runStatus(err error) RunStatus {
+	var status RunStatus
+	switch {
+	case err == nil:
+		return RunStatus{Outcome: RunAnswered}
+	case errors.Is(err, ErrApprovalNeeded):
+		status.Outcome = RunApprovalNeeded
+	case errors.Is(err, ErrRefused):
+		status.Outcome = RunRefused
+	case errors.Is(err, ErrMaxTurns):
+		status.Outcome = RunMaxTurns
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		status.Outcome = RunCancelled
+	default:
+		status.Outcome = RunFailed
+	}
+	status.Error = err.Error()
+	return status
 }
 
 // requestRepair asks the model to correct an answer that failed validation.
@@ -615,31 +641,18 @@ func (s *Session) requestRepair(ctx context.Context, valErr error) error {
 	return s.appendLogs(ctx, entry)
 }
 
-func (s *Session) step(ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error) {
-	return s.agent.step(ctx, log, s.httpClient, emit)
-}
-
-func (a *Agent) effectiveHTTPClient(sessionClient *http.Client) *http.Client {
-	if sessionClient != nil {
-		return sessionClient
-	}
-	return a.httpClient
-}
-
-func (a *Agent) step(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
-	entries, err := a.providerStep(ctx, log, httpClient, emit)
-	if err != nil {
-		return nil, redactURLSecrets(err, a.baseURL)
-	}
-	return entries, nil
-}
-
-func (a *Agent) providerStep(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
+// step sends one request to the provider. Credentials a base URL carries are
+// removed from the error, because provider SDKs print the request URL.
+func (a *Agent) step(ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error) {
 	spec, ok := providerSpecs[a.provider]
 	if !ok {
 		return nil, fmt.Errorf("unsupported provider %q", a.provider)
 	}
-	return spec.step(a, ctx, log, a.effectiveHTTPClient(httpClient), emit)
+	entries, err := spec.step(a, ctx, log, emit)
+	if err != nil {
+		return nil, redactURLSecrets(err, a.baseURL)
+	}
+	return entries, nil
 }
 
 // FinalOutput returns the final assistant text if the latest turn completed
@@ -652,7 +665,7 @@ func (s *Session) FinalOutput() (string, bool) {
 	start := len(s.logs)
 	for i, v := range slices.Backward(s.logs) {
 		kind := v.Kind
-		if kind == KindUser || kind == KindToolResult || v.HiddenFromModel() {
+		if kind == KindUser || kind == KindToolResult || (v.HiddenFromModel() && !kind.lifecycle()) {
 			start = i + 1
 			break
 		}
@@ -767,14 +780,41 @@ func (s *Session) hasUnexecutedToolCalls() bool {
 	return len(s.openToolCalls()) > 0
 }
 
-func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
+func (s *Session) executeUnexecutedToolCalls(ctx context.Context) ([]Entry, error) {
 	if len(s.PendingApprovals()) > 0 {
-		return nil
+		return nil, nil
 	}
 
 	unexecuted := s.openToolCalls()
 	if len(unexecuted) == 0 {
-		return nil
+		return nil, nil
+	}
+
+	// Rejected calls are answered without running. The others are recorded as
+	// started, in one write, before any of them runs.
+	results := make([][]Entry, len(unexecuted))
+	var run []int
+	var started []Entry
+	for i, open := range unexecuted {
+		if ctx.Err() != nil {
+			break
+		}
+		call, dec := open.call, open.decision
+		if dec != nil && !dec.Approved {
+			reason := cmp.Or(dec.Reason, "tool execution declined by user")
+			result := ToolResult{CallID: call.ID, Error: reason, Denied: true}
+			results[i] = []Entry{{Kind: KindToolResult, ToolResult: &result, At: time.Now().UTC()}}
+			continue
+		}
+		run = append(run, i)
+		started = append(started, Entry{Kind: KindToolStarted, ToolCall: &ToolCall{ID: call.ID, Name: call.Name}})
+	}
+	if len(started) > 0 && ctx.Err() == nil {
+		if err := s.appendLogs(ctx, started...); err != nil {
+			return nil, err
+		}
+	} else {
+		run = nil
 	}
 
 	// Calls from one model turn run concurrently, at most
@@ -782,53 +822,35 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) []Entry {
 	// are recorded in the order the model requested them.
 	const maxConcurrentToolCalls = 8
 	state := s.StateSnapshot()
-	results := make([][]Entry, len(unexecuted))
-	infos := make([]*toolCallInfo, len(unexecuted))
+	ran := make([]bool, len(unexecuted))
+	waiting := make([]*Session, len(unexecuted))
 	slots := make(chan struct{}, maxConcurrentToolCalls)
 	var wg sync.WaitGroup
 calls:
-	for i, open := range unexecuted {
-		if ctx.Err() != nil {
-			break
-		}
-
-		call, dec := open.call, open.decision
-		if dec != nil && !dec.Approved {
-			reason := dec.Reason
-			if reason == "" {
-				reason = "tool execution declined by user"
-			}
-			result := ToolResult{
-				CallID: call.ID,
-				Error:  reason,
-			}
-			results[i] = []Entry{{Kind: KindToolResult, ToolResult: &result, At: time.Now().UTC()}}
-			continue
-		}
-
+	for _, i := range run {
 		select {
 		case slots <- struct{}{}:
 		case <-ctx.Done():
 			break calls
 		}
-		infos[i] = &toolCallInfo{key: open.key()}
+		ran[i] = true
 		wg.Go(func() {
 			defer func() { <-slots }()
-			results[i], _ = s.dispatch(context.WithValue(ctx, toolCallContextKey{}, infos[i]), call, state)
+			results[i], waiting[i] = s.dispatch(ctx, unexecuted[i], state)
 		})
 	}
 	wg.Wait()
 
-	for _, info := range infos {
+	for i, open := range unexecuted {
 		switch {
-		case info == nil:
-		case info.waiting != nil:
+		case !ran[i]:
+		case waiting[i] != nil:
 			if s.children == nil {
 				s.children = make(map[string]*Session)
 			}
-			s.children[info.key] = info.waiting
+			s.children[open.key()] = waiting[i]
 		default:
-			delete(s.children, info.key)
+			delete(s.children, open.key())
 		}
 	}
 
@@ -836,7 +858,7 @@ calls:
 	for _, result := range results {
 		entries = append(entries, result...)
 	}
-	return entries
+	return entries, nil
 }
 
 // PendingApprovals returns copies of the tool calls waiting for Approve or
@@ -939,15 +961,15 @@ func (s *Session) RunInto(ctx context.Context, input any, target any) error {
 	return nil
 }
 
-// dispatch runs a tool call locally. A failure is reported to the model rather
-// than returned, because the call is still owed an answer.
+// dispatch runs a tool call locally and returns its result entry, followed by
+// the state delta the tool introduced, if any. A failure is reported to the
+// model rather than returned, because the call is still owed an answer.
 //
-// dispatch returns the tool result entry and any state delta that the tool introduced.
-func (s *Session) dispatch(ctx context.Context, call *ToolCall, snapshot map[string]any) ([]Entry, *StateDelta) {
-	if call == nil {
-		return nil, nil
-	}
-
+// A subagent whose session stops for approval returns no entries and its
+// session as waiting: the call gets no result and runs again once the
+// approval is decided.
+func (s *Session) dispatch(ctx context.Context, open openToolCall, snapshot map[string]any) (entries []Entry, waiting *Session) {
+	call := open.call
 	result := ToolResult{CallID: call.ID}
 	index := slices.IndexFunc(s.agent.tools, func(tool Tool) bool { return tool.name == call.Name })
 	if index < 0 {
@@ -959,19 +981,22 @@ func (s *Session) dispatch(ctx context.Context, call *ToolCall, snapshot map[str
 
 	start := time.Now()
 	toolCtx := context.WithValue(ContextWithState(ctx, snapshot), sessionContextKey{}, s)
-	output, delta, err := invokeTool(toolCtx, tool, call.Args)
-	duration := time.Since(start)
-	if errors.Is(err, errToolWaiting) {
-		return nil, nil // no result yet; the call runs again once it is decided
+	var output string
+	var delta *StateDelta
+	var err error
+	if tool.subAgent != nil {
+		output, delta, waiting, err = s.runSubAgent(toolCtx, tool, open)
+		if waiting != nil {
+			return nil, waiting
+		}
+	} else {
+		output, delta, err = invokeTool(toolCtx, tool, call.Args)
 	}
+	duration := time.Since(start)
 	if err != nil {
 		result.Error = err.Error()
 	} else {
 		result.Output = output
-	}
-
-	var resp = []Entry{
-		{Kind: KindToolResult, ToolResult: &result, At: start.UTC(), Duration: duration},
 	}
 
 	if delta != nil {
@@ -980,8 +1005,15 @@ func (s *Session) dispatch(ctx context.Context, call *ToolCall, snapshot map[str
 		if _, err := json.Marshal(delta); err != nil {
 			result.Output = ""
 			result.Error = fmt.Sprintf("tool %q returned state that cannot be stored as JSON: %v", call.Name, err)
-			return []Entry{{Kind: KindToolResult, ToolResult: &result, At: start.UTC(), Duration: duration}}, nil
+			delta = nil
 		}
+	}
+
+	var resp = []Entry{
+		{Kind: KindToolResult, ToolResult: &result, At: start.UTC(), Duration: duration},
+	}
+
+	if delta != nil {
 		// The tool may keep and change its maps, so the log holds its own copy.
 		delta = &StateDelta{By: delta.By, Set: cloneState(delta.Set), Delete: slices.Clone(delta.Delete)}
 		if delta.By == "" {
@@ -991,7 +1023,39 @@ func (s *Session) dispatch(ctx context.Context, call *ToolCall, snapshot map[str
 		resp = append(resp, Entry{Kind: KindStateDelta, Delta: delta, At: time.Now().UTC()})
 	}
 
-	return resp, delta
+	return resp, nil
+}
+
+// runSubAgent runs the subagent of a WithSubAgent tool on the task in the
+// call's arguments. The subagent's session ID derives from the call, so a call
+// that stopped for approval, or whose result was not stored, continues in the
+// same session instead of starting over. When that session stops for approval
+// it is returned as waiting.
+func (s *Session) runSubAgent(ctx context.Context, tool Tool, open openToolCall) (output string, delta *StateDelta, waiting *Session, err error) {
+	input, err := decodeToolArgs[subAgentInput](tool.name, open.call.Args, subAgentArgsValidator())
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if strings.TrimSpace(input.Task) == "" {
+		return "", nil, nil, fmt.Errorf("subagent %q needs a non-empty task", tool.subAgent.name)
+	}
+
+	child, err := NewSession(ctx, tool.subAgent, WithSessionID(childSessionID(s.id, open.key())))
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if len(child.logs) > 0 {
+		output, err = child.Resume(ctx)
+	} else {
+		output, err = child.Run(ctx, input.Task)
+	}
+	if errors.Is(err, ErrApprovalNeeded) {
+		return "", nil, child, nil
+	}
+	if err != nil {
+		return "", nil, nil, err
+	}
+	return output, &StateDelta{Set: map[string]any{tool.subAgent.name: output}}, nil, nil
 }
 
 // invokeTool runs a tool and turns a panic into an error, so one faulty tool
@@ -1016,16 +1080,10 @@ func finalText(entries []Entry) string {
 	return text.String()
 }
 
+// decodeInto decodes a final answer into target, a non-nil pointer. Text
+// targets take the answer as is; anything else is decoded as JSON, which may
+// be wrapped in a fenced code block.
 func decodeInto(text string, target any) error {
-	if target == nil {
-		return errors.New("decode target cannot be nil")
-	}
-
-	rv := reflect.ValueOf(target)
-	if rv.Kind() != reflect.Pointer || rv.IsNil() {
-		return fmt.Errorf("decode target must be a non-nil pointer, got %T", target)
-	}
-
 	switch dest := target.(type) {
 	case *string:
 		*dest = text
@@ -1041,29 +1099,12 @@ func decodeInto(text string, target any) error {
 		return nil
 	}
 
-	clean := strings.TrimSpace(text)
-	if err := json.Unmarshal([]byte(clean), target); err == nil {
-		return nil
-	}
-
-	if start := strings.Index(clean, "```"); start != -1 {
-		rest := clean[start+3:]
-		if end := strings.LastIndex(rest, "```"); end != -1 {
-			block := rest[:end]
-			if nl := strings.Index(block, "\n"); nl != -1 {
-				block = block[nl+1:]
-			} else if strings.HasPrefix(strings.ToLower(block), "json") {
-				block = block[4:]
-			}
-			block = strings.TrimSpace(block)
-			if err := json.Unmarshal([]byte(block), target); err == nil {
-				return nil
-			}
+	candidates := jsonCandidates(text)
+	for _, candidate := range candidates {
+		if json.Unmarshal([]byte(candidate), target) == nil {
+			return nil
 		}
 	}
-
-	if err := json.Unmarshal([]byte(clean), target); err != nil {
-		return fmt.Errorf("decode agent output as %T: %w", target, err)
-	}
-	return nil
+	err := json.Unmarshal([]byte(candidates[0]), target)
+	return fmt.Errorf("decode agent output as %T: %w", target, err)
 }

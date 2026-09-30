@@ -65,15 +65,17 @@ func TestNewUserEntryTypes(t *testing.T) {
 
 func TestDecodeInto(t *testing.T) {
 	t.Run("nil and non-pointer targets", func(t *testing.T) {
-		if err := decodeInto("text", nil); err == nil {
+		// RunInto rejects them before it runs anything.
+		var s Session
+		if err := s.RunInto(t.Context(), "text", nil); err == nil {
 			t.Fatal("expected error on nil target")
 		}
 		var val string
-		if err := decodeInto("text", val); err == nil {
+		if err := s.RunInto(t.Context(), "text", val); err == nil {
 			t.Fatal("expected error on non-pointer target")
 		}
 		var nilPtr *string
-		if err := decodeInto("text", nilPtr); err == nil {
+		if err := s.RunInto(t.Context(), "text", nilPtr); err == nil {
 			t.Fatal("expected error on nil pointer target")
 		}
 	})

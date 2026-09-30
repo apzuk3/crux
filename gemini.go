@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -21,7 +20,7 @@ const geminiPartOpaqueKey = "gemini.content.part"
 // Candidate metadata is retained for sources/display, not replayed as a part.
 const geminiGroundingMetadataOpaqueKey = "gemini.candidate.grounding_metadata"
 
-func (a *Agent) newGeminiClient(ctx context.Context, httpClient *http.Client) (*genai.Client, error) {
+func (a *Agent) newGeminiClient(ctx context.Context) (*genai.Client, error) {
 	config := &genai.ClientConfig{Backend: genai.BackendGeminiAPI}
 	if a.apiKey != "" {
 		config.APIKey = a.apiKey
@@ -29,7 +28,7 @@ func (a *Agent) newGeminiClient(ctx context.Context, httpClient *http.Client) (*
 	if a.baseURL != "" {
 		config.HTTPOptions.BaseURL = a.baseURL
 	}
-	client := a.effectiveHTTPClient(httpClient)
+	client := a.httpClient
 	if client == nil {
 		// genai's own default client has no timeout at all.
 		client = defaultHTTPClient()
@@ -46,7 +45,7 @@ func (a *Agent) newGeminiClient(ctx context.Context, httpClient *http.Client) (*
 }
 
 // geminiStep returns the model's ordered parts with usage attached.
-func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
+func (a *Agent) geminiStep(ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error) {
 	contents, err := toGeminiContents(log)
 	if err != nil {
 		return nil, err
@@ -104,7 +103,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 		}
 	}
 	// The SDK constructor can fail, so initialization errors flow through Run.
-	client, err := a.newGeminiClient(ctx, httpClient)
+	client, err := a.newGeminiClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gemini client: %w", err)
 	}
@@ -175,6 +174,9 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, httpClient *http.Cl
 			last.Opaque = make(map[string][]byte)
 		}
 		last.Opaque[geminiGroundingMetadataOpaqueKey] = raw
+	}
+	if response.ResponseID != "" {
+		produced[len(produced)-1].Response = &ResponseInfo{ID: response.ResponseID}
 	}
 	if usage := response.UsageMetadata; usage != nil {
 		var cacheRead int
@@ -250,6 +252,9 @@ func streamGemini(ctx context.Context, client *genai.Client, model string, conte
 		}
 		if chunk.UsageMetadata != nil {
 			response.UsageMetadata = chunk.UsageMetadata
+		}
+		if chunk.ResponseID != "" {
+			response.ResponseID = chunk.ResponseID
 		}
 		if chunk.PromptFeedback != nil {
 			response.PromptFeedback = chunk.PromptFeedback

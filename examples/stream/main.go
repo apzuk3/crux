@@ -13,7 +13,7 @@ import (
 
 func main() {
 	provider := flag.String("provider", "openai", "Provider: openai, anthropic, google, openrouter, xai, deepseek, ollama")
-	model := flag.String("model", crux.ChatModelGPT5_4, "Provider model ID")
+	model := flag.String("model", crux.OpenAIGPT5_4, "Provider model ID")
 	prompt := flag.String("prompt", "Explain why binary search is logarithmic", "Message to send")
 	baseURL := flag.String("base-url", "", "Optional provider base URL")
 	flag.Parse()

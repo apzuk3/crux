@@ -36,6 +36,12 @@
 // example with NewGORMStore, and WithSessionID to continue a stored
 // conversation.
 //
+// A session's log is the full record of what happened: besides the
+// conversation it holds when each run started and how it ended, each provider
+// request (with the agent, model and tool definitions it used) and each tool
+// that started. WithEntryHandler reports every entry as it is stored, which is
+// the way to follow a session live, subagents included.
+//
 // The cruxtest package provides a mock HTTP transport for testing agents
 // without calling a real provider.
 package crux

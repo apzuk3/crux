@@ -78,6 +78,7 @@ func buildGeminiResponse(turn *Turn, callIndex int) ([]byte, error) {
 	}
 
 	resp := map[string]any{
+		"responseId": fmt.Sprintf("gemini_resp_%d", callIndex),
 		"candidates": []any{
 			map[string]any{
 				"content": map[string]any{

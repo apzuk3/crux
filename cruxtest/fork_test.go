@@ -11,7 +11,7 @@ import (
 func TestForkUsesNewHTTPClient(t *testing.T) {
 	parentMock := cruxtest.NewMock()
 	parentMock.Expect().ReturnText("from parent")
-	session := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, parentMock, crux.ChatModelGPT5_6Sol)))
+	session := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, parentMock, crux.OpenAIGPT5_6Sol)))
 	_, err := session.Run(t.Context(), "hi")
 	require.NoError(t, err)
 
@@ -26,34 +26,11 @@ func TestForkUsesNewHTTPClient(t *testing.T) {
 	forkMock.AssertAllConsumed(t)
 }
 
-func TestForkPrefersNewHTTPClientOverSessionClient(t *testing.T) {
-	sessionMock := cruxtest.NewMock()
-	agent, err := crux.New("test-agent", crux.ChatModelGPT5_6Sol, crux.WithAPIKey("k"))
-	require.NoError(t, err)
-	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithSessionHTTPClient(sessionMock.Client())))
-
-	inherited, err := session.Fork(t.Context())
-	require.NoError(t, err)
-	sessionMock.Expect().ReturnText("session client")
-	out, err := inherited.Run(t.Context(), "hi")
-	require.NoError(t, err)
-	require.Equal(t, "session client", out)
-
-	forkMock := cruxtest.NewMock()
-	forkMock.Expect().ReturnText("fork client")
-	forked, err := session.Fork(t.Context(), crux.WithHTTPClient(forkMock.Client()))
-	require.NoError(t, err)
-	out, err = forked.Run(t.Context(), "hi")
-	require.NoError(t, err)
-	require.Equal(t, "fork client", out)
-	sessionMock.AssertTurnCount(t, 1)
-}
-
 func TestForkUsageCountsOnlyOwnRequests(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnText("one").WithUsage(cruxtest.TokenUsage{InputTokens: 10, OutputTokens: 2})
 	mock.Expect().ReturnText("two").WithUsage(cruxtest.TokenUsage{InputTokens: 7, OutputTokens: 1})
-	session := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.ChatModelGPT5_6Sol)))
+	session := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.OpenAIGPT5_6Sol)))
 	_, err := session.Run(t.Context(), "hi")
 	require.NoError(t, err)
 

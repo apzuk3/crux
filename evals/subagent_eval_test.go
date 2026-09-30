@@ -29,7 +29,7 @@
 //      summary (including the 'SUMMARY:' prefix) into its final response to the user.
 //
 // Evaluation Matrix:
-// - OpenAI: crux.ChatModelGPT4_1Mini
+// - OpenAI: crux.OpenAIGPT4_1Mini
 // - Anthropic: crux.ClaudeHaiku4_5
 // - Google Gemini: crux.Gemini3_5FlashLite
 
@@ -68,7 +68,7 @@ func Test_SubAgentDelegation(t *testing.T) {
 		{
 			name:     "OpenAI",
 			provider: crux.ProviderOpenAI,
-			model:    crux.ChatModelGPT4_1Mini,
+			model:    crux.OpenAIGPT4_1Mini,
 		},
 		{
 			name:     "Anthropic",

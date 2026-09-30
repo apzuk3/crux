@@ -3,6 +3,7 @@ package cruxtest_test
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/apzuk3/crux"
@@ -29,7 +30,7 @@ func TestWithInputSchema(t *testing.T) {
 		provider crux.Provider
 		model    string
 	}{
-		{crux.ProviderOpenAI, crux.ChatModelGPT5_4},
+		{crux.ProviderOpenAI, crux.OpenAIGPT5_4},
 		{crux.ProviderAnthropic, crux.ClaudeHaiku4_5},
 		{crux.ProviderGoogle, crux.Gemini3_8Flash},
 	} {
@@ -75,11 +76,13 @@ func TestWithInputSchemaMapInput(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnToolCall("echo", map[string]any{"a": 1})
 	mock.Expect().ReturnText("done")
-	a := crux.Must(crux.New("e", crux.ChatModelGPT5_4, append(mock.AgentOptions(), crux.WithToolsRegistry([]string{"echo"}, reg))...))
+	a := crux.Must(crux.New("e", crux.OpenAIGPT5_4, append(mock.AgentOptions(), crux.WithToolsRegistry([]string{"echo"}, reg))...))
 	s := crux.MustSession(crux.NewSession(t.Context(), a))
 	_, err := s.Run(t.Context(), "go")
 	require.NoError(t, err)
-	require.Equal(t, `{"a":1}`, s.Logs()[2].ToolResult.Output)
+	logs := s.Logs()
+	result := logs[slices.IndexFunc(logs, func(e crux.Entry) bool { return e.Kind == crux.KindToolResult })]
+	require.Equal(t, `{"a":1}`, result.ToolResult.Output)
 }
 
 func TestWithInputSchemaRejectsBadSchemas(t *testing.T) {

@@ -7,16 +7,7 @@ import (
 )
 
 // Fork creates a session with the full retained history and inherited
-// configuration, then applies opts in order to the session's agent. See ForkFrom for copying rules.
-// Fork must not run concurrently with writes to the session.
-func (s *Session) Fork(ctx context.Context, opts ...AgentOption) (*Session, error) {
-	return s.ForkFrom(ctx, len(s.logs), opts...)
-}
-
-// ForkFrom creates a session with logs[:from] and inherited configuration, then
-// applies opts in order to the session's agent. from is an exclusive slice offset, not an Entry.Seq.
-// Empty history is valid; a prefix with an unfinished local tool exchange or
-// an unmatched tool result is not.
+// configuration, then applies opts in order to the session's agent.
 // Changing providers clears opaque data and removes provider-only tool events
 // from the copied history. Portable entries remain in their original order.
 //
@@ -26,7 +17,14 @@ func (s *Session) Fork(ctx context.Context, opts ...AgentOption) (*Session, erro
 // The tools registry and output schema remain shared unless overridden.
 // Token usage is not copied: the fork's Usage counts only its own requests.
 // Fork must not run concurrently with writes to the session.
-func (s *Session) ForkFrom(ctx context.Context, from int, opts ...AgentOption) (*Session, error) {
+func (s *Session) Fork(ctx context.Context, opts ...AgentOption) (*Session, error) {
+	return s.forkFrom(ctx, len(s.logs), opts...)
+}
+
+// forkFrom is Fork with only logs[:from] copied. from is an exclusive slice
+// offset, not an Entry.Seq. Empty history is valid; a prefix with an
+// unfinished local tool exchange or an unmatched tool result is not.
+func (s *Session) forkFrom(ctx context.Context, from int, opts ...AgentOption) (*Session, error) {
 	if from < 0 || from > len(s.logs) {
 		return nil, fmt.Errorf("cannot fork at offset %d: must be between 0 and %d", from, len(s.logs))
 	}
@@ -52,12 +50,7 @@ func (s *Session) ForkFrom(ctx context.Context, from int, opts ...AgentOption) (
 		})
 	}
 
-	sessionOpts := []SessionOption{WithSessionLogs(forkedLogs), WithStore(s.store)}
-	// A session-level client is kept unless the fork chose its own client.
-	if s.httpClient != nil && clonedAgent.httpClient == s.agent.httpClient {
-		sessionOpts = append(sessionOpts, WithSessionHTTPClient(s.httpClient))
-	}
-	return NewSession(ctx, clonedAgent, sessionOpts...)
+	return NewSession(ctx, clonedAgent, WithSessionLogs(forkedLogs), WithStore(s.store))
 }
 
 func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {
@@ -111,19 +104,26 @@ func cloneSearchOptions(s *SearchOptions) *SearchOptions {
 		return nil
 	}
 	search := *s
-	if s.UserLocation != nil {
-		loc := *s.UserLocation
-		if s.UserLocation.Latitude != nil {
-			lat := *s.UserLocation.Latitude
-			loc.Latitude = &lat
-		}
-		if s.UserLocation.Longitude != nil {
-			long := *s.UserLocation.Longitude
-			loc.Longitude = &long
-		}
-		search.UserLocation = &loc
-	}
+	search.UserLocation = cloneUserLocation(s.UserLocation)
 	return &search
+}
+
+// cloneUserLocation copies the location with its coordinates, so the caller
+// can change its own value afterwards.
+func cloneUserLocation(l *UserLocation) *UserLocation {
+	if l == nil {
+		return nil
+	}
+	loc := *l
+	if l.Latitude != nil {
+		lat := *l.Latitude
+		loc.Latitude = &lat
+	}
+	if l.Longitude != nil {
+		long := *l.Longitude
+		loc.Longitude = &long
+	}
+	return &loc
 }
 
 func validateForkHistory(entries []Entry) error {
@@ -183,6 +183,18 @@ func cloneEntries(entries []Entry) []Entry {
 		if e.Usage != nil {
 			value := *e.Usage
 			e.Usage = &value
+		}
+		if e.Run != nil {
+			value := *e.Run
+			e.Run = &value
+		}
+		if e.Turn != nil {
+			value := *e.Turn
+			e.Turn = &value
+		}
+		if e.Response != nil {
+			value := *e.Response
+			e.Response = &value
 		}
 		if e.Opaque != nil {
 			opaque := make(map[string][]byte, len(e.Opaque))

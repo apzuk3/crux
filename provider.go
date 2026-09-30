@@ -21,17 +21,12 @@ const (
 	ProviderOllama     Provider = "ollama"
 )
 
-// model is a known model name, used to infer a provider.
-type model struct {
-	Name string
-}
-
 // providerSpec is everything crux knows about one provider.
 type providerSpec struct {
-	models  []model
+	models  []string
 	envVars []string // checked in order for an API key
 	baseURL string   // "" uses the SDK default
-	step    func(a *Agent, ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error)
+	step    func(a *Agent, ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error)
 	schema  func(root map[string]any, provider Provider) (map[string]any, error)
 	prepare func(a *Agent) error // optional; provider rules and defaults, run at the end of New
 }
@@ -50,7 +45,7 @@ func inferProvider(modelName string) Provider {
 	var matched Provider
 	for provider, spec := range providerSpecs {
 		for _, m := range spec.models {
-			if m.Name == modelName {
+			if m == modelName {
 				if matched != "" && matched != provider {
 					return "" // Ambiguous IDs require WithProvider.
 				}

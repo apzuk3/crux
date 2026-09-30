@@ -31,7 +31,7 @@ func TestToolPanicIsReportedToModel(t *testing.T) {
 	mock.Expect().ReturnToolCall("explode", map[string]any{})
 	mock.Expect().ReturnText("The tool failed.")
 
-	agent := newMockAgent(t, mock, crux.ChatModelGPT5_6Sol, crux.WithToolsRegistry([]string{"explode"}, reg))
+	agent := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithToolsRegistry([]string{"explode"}, reg))
 	session := crux.MustSession(crux.NewSession(t.Context(), agent))
 
 	out, err := session.Run(t.Context(), "go")
@@ -58,7 +58,7 @@ func TestMaxTurnsIsSentinel(t *testing.T) {
 	mock.Expect().ReturnToolCall("noop", map[string]any{})
 	mock.Expect().ReturnToolCall("noop", map[string]any{})
 
-	agent := newMockAgent(t, mock, crux.ChatModelGPT5_6Sol,
+	agent := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol,
 		crux.WithToolsRegistry([]string{"noop"}, reg), crux.WithMaxTurns(2))
 	session := crux.MustSession(crux.NewSession(t.Context(), agent))
 
@@ -67,7 +67,7 @@ func TestMaxTurnsIsSentinel(t *testing.T) {
 }
 
 func TestRefusalIsSentinel(t *testing.T) {
-	for _, model := range []string{crux.ChatModelGPT5_6Sol, crux.ClaudeHaiku4_5} {
+	for _, model := range []string{crux.OpenAIGPT5_6Sol, crux.ClaudeHaiku4_5} {
 		t.Run(model, func(t *testing.T) {
 			mock := cruxtest.NewMock()
 			mock.Expect().ReturnRefusal("no")
@@ -89,7 +89,7 @@ func TestSessionUsageSumsAllRequests(t *testing.T) {
 	mock.Expect().ReturnToolCall("noop", map[string]any{}).WithUsage(cruxtest.TokenUsage{InputTokens: 10, OutputTokens: 2})
 	mock.Expect().ReturnText("done").WithUsage(cruxtest.TokenUsage{InputTokens: 15, OutputTokens: 3})
 
-	agent := newMockAgent(t, mock, crux.ChatModelGPT5_6Sol, crux.WithToolsRegistry([]string{"noop"}, reg))
+	agent := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithToolsRegistry([]string{"noop"}, reg))
 	session := crux.MustSession(crux.NewSession(t.Context(), agent))
 	_, err := session.Run(t.Context(), "go")
 	require.NoError(t, err)
@@ -106,7 +106,7 @@ func TestMaxTokensAndTemperatureReachTheWire(t *testing.T) {
 		temperature func(body map[string]any) any
 	}{
 		{
-			model:       crux.ChatModelGPT5_6Sol,
+			model:       crux.OpenAIGPT5_6Sol,
 			maxTokens:   func(b map[string]any) any { return b["max_output_tokens"] },
 			temperature: func(b map[string]any) any { return b["temperature"] },
 		},
@@ -164,14 +164,14 @@ func TestSubAgentTakesTaskAndReturnsOutput(t *testing.T) {
 
 	child := cruxtest.NewMock()
 	child.Expect().ReturnJSON(Brief{Text: "brief"})
-	subAgent, err := crux.New("researcher", crux.ChatModelGPT5_6Sol,
+	subAgent, err := crux.New("researcher", crux.OpenAIGPT5_6Sol,
 		append(child.AgentOptions(), crux.WithOutputSchemaFrom[Brief]())...)
 	require.NoError(t, err)
 
 	parent := cruxtest.NewMock()
 	parent.Expect().ReturnToolCall("agent_researcher", map[string]any{"task": "research the lantern"})
 	parent.Expect().ReturnText("final")
-	agent := newMockAgent(t, parent, crux.ChatModelGPT5_6Sol, crux.WithSubAgent(subAgent, "Researches things"))
+	agent := newMockAgent(t, parent, crux.OpenAIGPT5_6Sol, crux.WithSubAgent(subAgent, "Researches things"))
 
 	session := crux.MustSession(crux.NewSession(t.Context(), agent))
 	out, err := session.Run(t.Context(), "go")
@@ -215,13 +215,13 @@ func TestSubAgentSessionIsStoredAsChild(t *testing.T) {
 
 	child := cruxtest.NewMock()
 	child.Expect().ReturnText("brief")
-	subAgent, err := crux.New("researcher", crux.ChatModelGPT5_6Sol, child.AgentOptions()...)
+	subAgent, err := crux.New("researcher", crux.OpenAIGPT5_6Sol, child.AgentOptions()...)
 	require.NoError(t, err)
 
 	parent := cruxtest.NewMock()
 	parent.Expect().ReturnToolCall("agent_researcher", map[string]any{"task": "research"})
 	parent.Expect().ReturnText("final")
-	agent := newMockAgent(t, parent, crux.ChatModelGPT5_6Sol, crux.WithSubAgent(subAgent, "Researches things"))
+	agent := newMockAgent(t, parent, crux.OpenAIGPT5_6Sol, crux.WithSubAgent(subAgent, "Researches things"))
 
 	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithStore(store)))
 	_, err = session.Run(t.Context(), "go")
@@ -238,8 +238,13 @@ func TestSubAgentSessionIsStoredAsChild(t *testing.T) {
 	// The subagent's conversation is kept in the parent's store.
 	entries, err := store.Get(t.Context(), children[0].ID)
 	require.NoError(t, err)
-	require.Equal(t, "research", entries[0].Text())
-	require.Equal(t, "brief", entries[len(entries)-1].Text())
+	var said []string
+	for _, e := range entries {
+		if e.Kind == crux.KindUser || e.Kind == crux.KindAssistant {
+			said = append(said, e.Text())
+		}
+	}
+	require.Equal(t, []string{"research", "brief"}, said)
 }
 
 func TestMalformedToolArgumentsAreReportedAndStored(t *testing.T) {
@@ -261,7 +266,7 @@ func TestMalformedToolArgumentsAreReportedAndStored(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnToolCall("lookup", truncated)
 	mock.Expect().ReturnText("Sorry, try again.")
-	agent := newMockAgent(t, mock, crux.ChatModelGPT5_6Sol, crux.WithToolsRegistry([]string{"lookup"}, reg))
+	agent := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithToolsRegistry([]string{"lookup"}, reg))
 
 	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithStore(store)))
 	out, err := session.Run(t.Context(), "weather?")
@@ -339,7 +344,7 @@ func TestUnsavedToolResultRunsAgainOnResume(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnToolCall("count", map[string]any{})
 	mock.Expect().ReturnText("done")
-	agent := newMockAgent(t, mock, crux.ChatModelGPT5_6Sol, crux.WithToolsRegistry([]string{"count"}, reg))
+	agent := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithToolsRegistry([]string{"count"}, reg))
 
 	store := &failingStore{MemoryStore: crux.NewMemoryStore(), failToolResults: true}
 	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithStore(store)))

@@ -33,7 +33,7 @@ func run() int {
 	flag.Parse()
 
 	cases := []providerCase{
-		{provider: crux.ProviderOpenAI, model: crux.ChatModelGPT4_1Mini,
+		{provider: crux.ProviderOpenAI, model: crux.OpenAIGPT4_1Mini,
 			keyEnv: []string{"OPENAI_API_KEY", "OPENAI_APIKEY", "OPENAI_KEY"}},
 		{provider: crux.ProviderAnthropic, model: crux.ClaudeHaiku4_5,
 			keyEnv: []string{"ANTHROPIC_API_KEY", "ANTHROPIC_APIKEY", "ANTHROPIC_KEY", "ANTHROPIC_AUTH_TOKEN"}},

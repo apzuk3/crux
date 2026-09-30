@@ -25,9 +25,9 @@ func approvalAgents(t *testing.T, mock *cruxtest.Mock) (*crux.Agent, *atomic.Int
 		return "deleted " + in.Path, nil, nil
 	}, crux.WithApprovalNeeded(true))
 
-	worker := crux.Must(crux.New("worker", crux.ChatModelGPT5_4, append(mock.AgentOptions(),
+	worker := crux.Must(crux.New("worker", crux.OpenAIGPT5_4, append(mock.AgentOptions(),
 		crux.WithToolsRegistry([]string{"delete_file"}, reg))...))
-	coordinator := crux.Must(crux.New("coordinator", crux.ChatModelGPT5_4, append(mock.AgentOptions(),
+	coordinator := crux.Must(crux.New("coordinator", crux.OpenAIGPT5_4, append(mock.AgentOptions(),
 		crux.WithSubAgent(worker, "Does file work"))...))
 	return coordinator, &deleted
 }
@@ -141,8 +141,8 @@ func TestSubagentWithoutApprovalsIsUnchanged(t *testing.T) {
 	mock.Expect().ReturnText("hi")
 	mock.Expect().ReturnText("helper said hi")
 
-	helper := crux.Must(crux.New("helper", crux.ChatModelGPT5_4, mock.AgentOptions()...))
-	parent := crux.Must(crux.New("parent", crux.ChatModelGPT5_4, append(mock.AgentOptions(), crux.WithSubAgent(helper, "Helps"))...))
+	helper := crux.Must(crux.New("helper", crux.OpenAIGPT5_4, mock.AgentOptions()...))
+	parent := crux.Must(crux.New("parent", crux.OpenAIGPT5_4, append(mock.AgentOptions(), crux.WithSubAgent(helper, "Helps"))...))
 	s := crux.MustSession(crux.NewSession(t.Context(), parent))
 	out, err := s.Run(t.Context(), "go")
 	require.NoError(t, err)

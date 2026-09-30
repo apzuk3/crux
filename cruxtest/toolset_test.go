@@ -40,7 +40,7 @@ func TestAddToolsetWithRegistry(t *testing.T) {
 	mock.Expect().ReturnToolCall("multiply", map[string]any{"a": 5, "b": 4})
 	mock.Expect().ReturnText("20")
 
-	agent, err := crux.New("calc", crux.ChatModelGPT5_6Sol,
+	agent, err := crux.New("calc", crux.OpenAIGPT5_6Sol,
 		append(mock.AgentOptions(), crux.WithToolsetsRegistry(reg, "math"))...)
 	require.NoError(t, err)
 
@@ -79,7 +79,7 @@ func TestFilesystemWriteNeedsApproval(t *testing.T) {
 	mock.Expect().ReturnToolCall("read_file", map[string]any{"path": "notes/todo.txt"})
 	mock.Expect().ReturnText("done")
 
-	agent, err := crux.New("writer", crux.ChatModelGPT5_6Sol,
+	agent, err := crux.New("writer", crux.OpenAIGPT5_6Sol,
 		append(mock.AgentOptions(), crux.WithToolsetsRegistry(reg, "filesystem"))...)
 	require.NoError(t, err)
 
@@ -116,7 +116,7 @@ func TestWithToolsetsCombinesWithTools(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnText("ok")
 
-	agent, err := crux.New("calc", crux.ChatModelGPT5_6Sol, append(mock.AgentOptions(),
+	agent, err := crux.New("calc", crux.OpenAIGPT5_6Sol, append(mock.AgentOptions(),
 		crux.WithToolsRegistry([]string{"echo", "add"}, reg),
 		crux.WithToolsetsRegistry(reg, "math"),
 	)...)
@@ -133,7 +133,7 @@ func TestWithToolsetsCombinesWithTools(t *testing.T) {
 	}
 	require.Equal(t, 1, strings.Count(body, `"name":"add"`), body)
 
-	_, err = crux.New("calc", crux.ChatModelGPT5_6Sol, append(mock.AgentOptions(), crux.WithToolsetsRegistry(reg, "nope"))...)
+	_, err = crux.New("calc", crux.OpenAIGPT5_6Sol, append(mock.AgentOptions(), crux.WithToolsetsRegistry(reg, "nope"))...)
 	require.ErrorIs(t, err, crux.ErrToolNotFound)
 }
 
@@ -145,7 +145,7 @@ func TestFilesystemIndividualTools(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnText("ok")
 
-	agent, err := crux.New("reader", crux.ChatModelGPT5_6Sol, append(mock.AgentOptions(),
+	agent, err := crux.New("reader", crux.OpenAIGPT5_6Sol, append(mock.AgentOptions(),
 		crux.WithToolsRegistry([]string{crux.FsReadFile, crux.FsGlob}, reg),
 	)...)
 	require.NoError(t, err)

@@ -127,7 +127,7 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 		provider crux.Provider
 		model    string
 	}{
-		{"OpenAI_GPT5", crux.ProviderOpenAI, crux.ChatModelGPT5_6Sol},
+		{"OpenAI_GPT5", crux.ProviderOpenAI, crux.OpenAIGPT5_6Sol},
 		{"Anthropic_Claude", crux.ProviderAnthropic, crux.ClaudeHaiku4_5},
 		{"Gemini_Flash", crux.ProviderGoogle, crux.Gemini3_5FlashLite},
 		{"xAI_Grok", crux.ProviderXAI, crux.XAIGrok4_20},

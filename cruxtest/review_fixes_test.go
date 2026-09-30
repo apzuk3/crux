@@ -15,9 +15,9 @@ import (
 // the provider again with history that ends in an assistant message.
 func TestReasoningOnlyTurnIsFinal(t *testing.T) {
 	cases := map[string]string{
-		crux.ClaudeHaiku4_5:     `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"sig"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
-		crux.Gemini2_5Flash:     `{"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"c2ln"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}`,
-		crux.ChatModelGPT5_6Sol: `{"id":"resp_1","status":"completed","output":[{"id":"rs_1","type":"reasoning","summary":[],"encrypted_content":"enc"}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+		crux.ClaudeHaiku4_5:  `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"sig"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+		crux.Gemini2_5Flash:  `{"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"c2ln"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}`,
+		crux.OpenAIGPT5_6Sol: `{"id":"resp_1","status":"completed","output":[{"id":"rs_1","type":"reasoning","summary":[],"encrypted_content":"enc"}],"usage":{"input_tokens":1,"output_tokens":1}}`,
 	}
 	for model, body := range cases {
 		t.Run(model, func(t *testing.T) {
@@ -39,7 +39,7 @@ func TestStoredSessionDropsForeignOpenAIItems(t *testing.T) {
 	store := crux.NewMemoryStore()
 	openaiMock := cruxtest.NewMock()
 	openaiMock.Expect().ReturnRaw(200, []byte(`{"id":"resp_1","status":"completed","output":[{"id":"rs_secret","type":"reasoning","summary":[],"encrypted_content":"openai-only"},{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"first","annotations":[]}]}],"usage":{"input_tokens":1,"output_tokens":1}}`))
-	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, openaiMock, crux.ChatModelGPT5_6Sol), crux.WithStore(store)))
+	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, openaiMock, crux.OpenAIGPT5_6Sol), crux.WithStore(store)))
 	_, err := s.Run(t.Context(), "hi")
 	require.NoError(t, err)
 

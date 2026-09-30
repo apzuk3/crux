@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var wireModels = []string{crux.ChatModelGPT5_6Sol, crux.ClaudeHaiku4_5, crux.Gemini2_5Flash}
+var wireModels = []string{crux.OpenAIGPT5_6Sol, crux.ClaudeHaiku4_5, crux.Gemini2_5Flash}
 
 func sseBody(events ...string) []byte {
 	var b strings.Builder
@@ -30,11 +31,24 @@ func sseBody(events ...string) []byte {
 	return []byte(b.String())
 }
 
+// lastEntry returns the session's last conversation entry, skipping the
+// entries that only record a run's progress.
 func lastEntry(t *testing.T, s *crux.Session) crux.Entry {
 	t.Helper()
-	logs := s.Logs()
+	logs := conversation(s.Logs())
 	require.NotEmpty(t, logs)
 	return logs[len(logs)-1]
+}
+
+// conversation drops the run, turn and tool-started records from logs.
+func conversation(logs []crux.Entry) []crux.Entry {
+	return slices.DeleteFunc(logs, func(e crux.Entry) bool {
+		switch e.Kind {
+		case crux.KindRunStarted, crux.KindRunFinished, crux.KindTurnStarted, crux.KindToolStarted:
+			return true
+		}
+		return false
+	})
 }
 
 func TestEmptyFinalAnswerKeepsUsage(t *testing.T) {
@@ -106,7 +120,7 @@ func TestGeminiSkipsEmptyParts(t *testing.T) {
 		out, err := s.Run(t.Context(), "hi")
 		require.NoError(t, err)
 		require.Equal(t, "hello", out)
-		require.Len(t, s.Logs(), 2)
+		require.Len(t, conversation(s.Logs()), 2)
 	})
 	t.Run("stream", func(t *testing.T) {
 		mock := cruxtest.NewMock()
@@ -186,7 +200,7 @@ func TestUsageInputTokensIncludeCache(t *testing.T) {
 	}{
 		{crux.ClaudeHaiku4_5, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":50,"output_tokens":5,"cache_read_input_tokens":30,"cache_creation_input_tokens":20}}`, 100, 30, 20},
 		{crux.Gemini2_5Flash, `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":40,"toolUsePromptTokenCount":7,"candidatesTokenCount":5}}`, 107, 40, 0},
-		{crux.ChatModelGPT5_6Sol, `{"id":"resp_1","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":100,"output_tokens":5,"input_tokens_details":{"cached_tokens":40}}}`, 100, 40, 0},
+		{crux.OpenAIGPT5_6Sol, `{"id":"resp_1","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":100,"output_tokens":5,"input_tokens_details":{"cached_tokens":40}}}`, 100, 40, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.model, func(t *testing.T) {
@@ -233,8 +247,8 @@ func TestSafetyStopsAreRefusals(t *testing.T) {
 		{"gemini blocked prompt", crux.Gemini2_5Flash, false, []byte(`{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"}}`)},
 		{"gemini blocked prompt stream", crux.Gemini2_5Flash, true, sseBody(`{"promptFeedback":{"blockReason":"SAFETY"}}`)},
 		{"gemini spii stream", crux.Gemini2_5Flash, true, sseBody(`{"candidates":[{"content":{"role":"model","parts":[{"text":"x"}]}}]}`, `{"candidates":[{"finishReason":"SPII"}]}`)},
-		{"openai content filter", crux.ChatModelGPT5_6Sol, false, []byte(`{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[]}`)},
-		{"openai content filter stream", crux.ChatModelGPT5_6Sol, true, sseBody(`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[]}}`)},
+		{"openai content filter", crux.OpenAIGPT5_6Sol, false, []byte(`{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[]}`)},
+		{"openai content filter stream", crux.OpenAIGPT5_6Sol, true, sseBody(`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[]}}`)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -308,11 +322,11 @@ func TestOpenAIReasoningSummaryAndUnknownItems(t *testing.T) {
 		{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok","annotations":[]}]}
 	],"usage":{"input_tokens":1,"output_tokens":1}}`))
 	mock.Expect().ReturnText("again")
-	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.ChatModelGPT5_6Sol)))
+	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.OpenAIGPT5_6Sol)))
 	out, err := s.Run(t.Context(), "hi")
 	require.NoError(t, err)
 	require.Equal(t, "ok", out)
-	logs := s.Logs()
+	logs := conversation(s.Logs())
 	require.Equal(t, crux.KindReasoning, logs[1].Kind)
 	require.Equal(t, "first\n\nsecond", logs[1].Reasoning.Summary)
 	require.Equal(t, crux.KindProviderTool, logs[2].Kind)
@@ -330,7 +344,7 @@ func TestAnthropicUnknownBlockIsKept(t *testing.T) {
 	out, err := s.Run(t.Context(), "hi")
 	require.NoError(t, err)
 	require.Equal(t, "ok", out)
-	require.Equal(t, crux.KindProviderTool, s.Logs()[1].Kind)
+	require.Equal(t, crux.KindProviderTool, conversation(s.Logs())[1].Kind)
 	_, err = s.Run(t.Context(), "more")
 	require.NoError(t, err)
 	require.NotContains(t, mock.Requests()[1].BodyString(), "mystery_block")
@@ -344,7 +358,7 @@ func TestGeminiOtherPartsAreKeptAndReplayed(t *testing.T) {
 	out, err := s.Run(t.Context(), "hi")
 	require.NoError(t, err)
 	require.Equal(t, "ok", out)
-	require.Equal(t, crux.KindProviderTool, s.Logs()[1].Kind)
+	require.Equal(t, crux.KindProviderTool, conversation(s.Logs())[1].Kind)
 	_, err = s.Run(t.Context(), "more")
 	require.NoError(t, err)
 	require.Contains(t, mock.Requests()[1].BodyString(), "print(1)")

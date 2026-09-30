@@ -97,11 +97,6 @@ func NewGORMStore(db *gorm.DB) (*GORMStore, error) {
 	return &GORMStore{db: db}, nil
 }
 
-// DB returns the underlying *gorm.DB instance.
-func (s *GORMStore) DB() *gorm.DB {
-	return s.db
-}
-
 // Append persists newly produced log entries for a session within a single transaction,
 // creating or updating the corresponding crux_agents and crux_sessions records.
 func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Entry) error {
@@ -119,7 +114,7 @@ func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Ent
 		// 1. Upsert crux_agents
 		agentRec := agentRecord{
 			ID:        dbUUID(agent.ID()),
-			Data:      agent.CanonicalData(),
+			Data:      agent.canonicalData(),
 			CreatedAt: now,
 			UpdatedAt: now,
 		}

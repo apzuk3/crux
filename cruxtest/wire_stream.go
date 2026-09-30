@@ -78,7 +78,7 @@ func buildStreamResponse(provider crux.Provider, raw []byte) ([]byte, error) {
 				emit(part)
 			}
 		}
-		write(map[string]any{"candidates": []any{map[string]any{"finishReason": candidate["finishReason"]}}, "usageMetadata": response["usageMetadata"]})
+		write(map[string]any{"candidates": []any{map[string]any{"finishReason": candidate["finishReason"]}}, "usageMetadata": response["usageMetadata"], "responseId": response["responseId"]})
 	default:
 		for i, value := range response["output"].([]any) {
 			item := value.(map[string]any)

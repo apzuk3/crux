@@ -11,26 +11,31 @@ import (
 )
 
 func TestAgentDeterministicID(t *testing.T) {
-	agent1 := Must(New("store-agent", ChatModelGPT4, WithInstructions("You manage server stores."), WithMaxTurns(10)))
-	agent2 := Must(New("store-agent", ChatModelGPT4, WithInstructions("You manage server stores."), WithMaxTurns(10)))
+	agent1 := Must(New("store-agent", OpenAIGPT4, WithInstructions("You manage server stores."), WithMaxTurns(10)))
+	agent2 := Must(New("store-agent", OpenAIGPT4, WithInstructions("You manage server stores."), WithMaxTurns(10)))
 
 	// Identical blueprints must have identical IDs
 	require.NotEqual(t, uuid.Nil, agent1.ID())
 	require.Equal(t, agent1.ID(), agent2.ID())
 
 	// Different instructions must produce a different ID
-	agent3 := Must(New("store-agent", ChatModelGPT4, WithInstructions("You manage databases."), WithMaxTurns(10)))
+	agent3 := Must(New("store-agent", OpenAIGPT4, WithInstructions("You manage databases."), WithMaxTurns(10)))
 	require.NotEqual(t, agent1.ID(), agent3.ID())
 
-	// Custom ID override
-	customID := uuid.New()
-	require.Equal(t, customID, Must(New("store-agent", ChatModelGPT4, WithAgentID(customID))).ID())
+	// A tool with the same name but another definition produces a different ID
+	withTool := func(description string) *Agent {
+		reg := NewToolsRegistry()
+		RegisterToolWithRegistry(reg, "lookup", description, func(ctx context.Context, in struct{}) (string, *StateDelta, error) { return "", nil, nil })
+		return Must(New("store-agent", OpenAIGPT4, WithToolsRegistry([]string{"lookup"}, reg)))
+	}
+	require.Equal(t, withTool("Looks up a record.").ID(), withTool("Looks up a record.").ID())
+	require.NotEqual(t, withTool("Looks up a record.").ID(), withTool("Deletes a record.").ID())
 }
 
 func TestMemoryStore_AppendAndGet(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()
-	agent := Must(New("bot", ChatModelGPT4))
+	agent := Must(New("bot", OpenAIGPT4))
 	session1, session2 := uuid.New(), uuid.New()
 
 	_, err := store.Get(ctx, session1)
@@ -58,20 +63,20 @@ func TestMemoryStore_AppendAndGet(t *testing.T) {
 }
 
 func TestNewSession_DefaultsToMemoryStore(t *testing.T) {
-	session, err := NewSession(context.Background(), Must(New("bot", ChatModelGPT4)))
+	session, err := NewSession(context.Background(), Must(New("bot", OpenAIGPT4)))
 	require.NoError(t, err)
 	require.IsType(t, &MemoryStore{}, session.Store())
 }
 
 func TestNewSession_RejectsNilStore(t *testing.T) {
-	_, err := NewSession(context.Background(), Must(New("bot", ChatModelGPT4)), WithStore(nil))
+	_, err := NewSession(context.Background(), Must(New("bot", OpenAIGPT4)), WithStore(nil))
 	require.Error(t, err)
 }
 
 func TestNewSession_LoadsExistingSession(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()
-	agent := Must(New("resume-agent", ChatModelGPT4))
+	agent := Must(New("resume-agent", OpenAIGPT4))
 
 	session, err := NewSession(ctx, agent, WithStore(store))
 	require.NoError(t, err)
@@ -104,7 +109,7 @@ func TestNewSession_LoadsExistingSession(t *testing.T) {
 
 func TestNewSession_UnknownIDStartsFresh(t *testing.T) {
 	id := uuid.New()
-	session, err := NewSession(context.Background(), Must(New("bot", ChatModelGPT4)), WithSessionID(id))
+	session, err := NewSession(context.Background(), Must(New("bot", OpenAIGPT4)), WithSessionID(id))
 	require.NoError(t, err)
 	require.Equal(t, id, session.ID())
 	require.Empty(t, session.Logs())
@@ -113,7 +118,7 @@ func TestNewSession_UnknownIDStartsFresh(t *testing.T) {
 func TestSession_ForkPersistsCopiedHistory(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()
-	agent := Must(New("fork-agent", ChatModelGPT4))
+	agent := Must(New("fork-agent", OpenAIGPT4))
 
 	session, err := NewSession(ctx, agent, WithStore(store))
 	require.NoError(t, err)
@@ -140,7 +145,7 @@ func TestSession_ForkPersistsCopiedHistory(t *testing.T) {
 }
 
 func TestSessionOutsideToolHasNoParent(t *testing.T) {
-	session, err := NewSession(context.Background(), Must(New("bot", ChatModelGPT4)))
+	session, err := NewSession(context.Background(), Must(New("bot", OpenAIGPT4)))
 	require.NoError(t, err)
 	require.Equal(t, uuid.Nil, session.parentID)
 }
@@ -160,7 +165,7 @@ func (f *flakyStore) Append(ctx context.Context, session *Session, entries ...En
 func TestFailedAppendLeavesSessionUnchanged(t *testing.T) {
 	ctx := context.Background()
 	store := &flakyStore{MemoryStore: NewMemoryStore()}
-	session := MustSession(NewSession(ctx, Must(New("bot", ChatModelGPT4)), WithStore(store)))
+	session := MustSession(NewSession(ctx, Must(New("bot", OpenAIGPT4)), WithStore(store)))
 
 	user, _ := NewUserEntry("hi")
 	require.NoError(t, session.appendLogs(ctx, user))
@@ -180,4 +185,22 @@ func TestFailedAppendLeavesSessionUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, session.Logs(), stored)
 	require.Equal(t, []uint64{1, 2, 3}, []uint64{stored[0].Seq, stored[1].Seq, stored[2].Seq})
+}
+
+func TestEntryHandlerSeesOnlyStoredEntries(t *testing.T) {
+	ctx := context.Background()
+	store := &flakyStore{MemoryStore: NewMemoryStore()}
+	var seen []Entry
+	session := MustSession(NewSession(ctx, Must(New("bot", OpenAIGPT4)), WithStore(store),
+		WithEntryHandler(func(_ context.Context, _ *Session, e Entry) { seen = append(seen, e) })))
+
+	store.fail = true
+	_, err := session.Run(ctx, "hi")
+	require.ErrorContains(t, err, "database unavailable")
+	require.Empty(t, seen, "an entry the store rejected must not be reported")
+
+	store.fail = false
+	user, _ := NewUserEntry("hi")
+	require.NoError(t, session.appendLogs(ctx, user))
+	require.Equal(t, session.Logs(), seen)
 }

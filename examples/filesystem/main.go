@@ -33,7 +33,7 @@ func run() error {
 		return err
 	}
 
-	agent, err := crux.New("files", crux.ChatModelGPT5_4,
+	agent, err := crux.New("files", crux.OpenAIGPT5_4,
 		crux.WithInstructions("You help with files in the current project. Paths are relative to the project root."),
 		crux.WithToolsets("filesystem"),
 		crux.WithMaxTurns(30),

@@ -100,20 +100,20 @@ func Test_CrossProviderForking(t *testing.T) {
 			fromProv:    crux.ProviderAnthropic,
 			toProv:      crux.ProviderOpenAI,
 			sourceModel: crux.ClaudeHaiku4_5,
-			targetModel: crux.ChatModelGPT4_1Mini,
+			targetModel: crux.OpenAIGPT4_1Mini,
 		},
 		{
 			name:        "OpenAI_to_Anthropic",
 			fromProv:    crux.ProviderOpenAI,
 			toProv:      crux.ProviderAnthropic,
-			sourceModel: crux.ChatModelGPT4_1Mini,
+			sourceModel: crux.OpenAIGPT4_1Mini,
 			targetModel: crux.ClaudeHaiku4_5,
 		},
 		{
 			name:        "OpenAI_to_Gemini",
 			fromProv:    crux.ProviderOpenAI,
 			toProv:      crux.ProviderGoogle,
-			sourceModel: crux.ChatModelGPT4_1Mini,
+			sourceModel: crux.OpenAIGPT4_1Mini,
 			targetModel: crux.Gemini3_5FlashLite,
 		},
 		{
@@ -121,7 +121,7 @@ func Test_CrossProviderForking(t *testing.T) {
 			fromProv:    crux.ProviderGoogle,
 			toProv:      crux.ProviderOpenAI,
 			sourceModel: crux.Gemini3_5FlashLite,
-			targetModel: crux.ChatModelGPT4_1Mini,
+			targetModel: crux.OpenAIGPT4_1Mini,
 		},
 		{
 			name:        "Gemini_to_Anthropic",

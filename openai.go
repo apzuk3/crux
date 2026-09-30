@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -52,7 +51,7 @@ func withoutForeignOpenAIItems(log []Entry, provider Provider) []Entry {
 	return out
 }
 
-func (a *Agent) newOpenAIClient(httpClient *http.Client) *openai.Client {
+func (a *Agent) newOpenAIClient() *openai.Client {
 	var opts []option.RequestOption
 	if a.apiKey != "" {
 		opts = append(opts, option.WithAPIKey(a.apiKey))
@@ -60,7 +59,7 @@ func (a *Agent) newOpenAIClient(httpClient *http.Client) *openai.Client {
 	if a.baseURL != "" {
 		opts = append(opts, option.WithBaseURL(a.baseURL))
 	}
-	client := a.effectiveHTTPClient(httpClient)
+	client := a.httpClient
 	if client != nil {
 		opts = append(opts, option.WithHTTPClient(client))
 	} else if a.provider != ProviderOpenAI {
@@ -77,7 +76,7 @@ func (a *Agent) newOpenAIClient(httpClient *http.Client) *openai.Client {
 }
 
 // openAIstep sends the log and returns the model's entries with usage attached.
-func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Client, emit chunkSink) ([]Entry, error) {
+func (a *Agent) openAIstep(ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error) {
 	input, err := toOpenAIResponseInput(withoutForeignOpenAIItems(log, a.provider))
 	if err != nil {
 		return nil, err
@@ -152,7 +151,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 		}
 	}
 
-	client := a.newOpenAIClient(httpClient)
+	client := a.newOpenAIClient()
 	var response *responses.Response
 	if emit == nil {
 		response, err = client.Responses.New(ctx, params)
@@ -216,6 +215,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, httpClient *http.Cl
 	// produced rather than being spread over the entries. InputTokens already
 	// includes cached tokens: https://platform.openai.com/docs/guides/prompt-caching
 	usage := response.Usage
+	produced[len(produced)-1].Response = &ResponseInfo{ID: response.ID}
 	produced[len(produced)-1].Usage = &Usage{
 		InputTokens:      int(usage.InputTokens),
 		OutputTokens:     int(usage.OutputTokens),

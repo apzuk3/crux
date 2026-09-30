@@ -83,7 +83,7 @@ type Forecast struct {
 	Summary string `json:"summary"`
 }
 
-agent := crux.Must(crux.New("forecaster", crux.ChatModelGPT5_4,
+agent := crux.Must(crux.New("forecaster", crux.OpenAIGPT5_4,
 	crux.WithOutputSchemaFrom[Forecast](),
 	crux.WithMaxRepairs(1), // ask the model to fix invalid output once
 ))
@@ -119,7 +119,7 @@ func (mathTools) Register(reg crux.ToolsRegistry) error {
 if err := crux.AddToolset(mathTools{}); err != nil {
 	log.Fatal(err)
 }
-agent := crux.Must(crux.New("calc", crux.ChatModelGPT5_4,
+agent := crux.Must(crux.New("calc", crux.OpenAIGPT5_4,
 	crux.WithTools([]string{"get_weather"}), // single tools
 	crux.WithToolsets("math"),               // plus every tool in the "math" toolset
 ))
@@ -145,7 +145,7 @@ crux.RegisterTool("docs_search", "Search the docs", func(ctx context.Context, ar
 if err := crux.AddToolset(crux.Filesystem("./workspace")); err != nil {
 	log.Fatal(err)
 }
-agent := crux.Must(crux.New("coder", crux.ChatModelGPT5_4, crux.WithToolsets("filesystem")))
+agent := crux.Must(crux.New("coder", crux.OpenAIGPT5_4, crux.WithToolsets("filesystem")))
 ```
 
 | Tool | What it does | Approval |
@@ -180,7 +180,7 @@ if errors.Is(err, crux.ErrApprovalNeeded) {
 ### Subagents
 
 ```go
-researcher := crux.Must(crux.New("researcher", crux.ChatModelGPT5_4, crux.WithTools([]string{"search"})))
+researcher := crux.Must(crux.New("researcher", crux.OpenAIGPT5_4, crux.WithTools([]string{"search"})))
 coordinator := crux.Must(crux.New("coordinator", crux.ClaudeSonnet5,
 	crux.WithSubAgent(researcher, "Researches a topic and returns a brief"),
 ))
@@ -236,7 +236,7 @@ If `Run` fails after your input was recorded (a network error, say), retry with 
 
 ## Providers
 
-The provider is inferred from known model constants (`crux.ClaudeSonnet5`, `crux.ChatModelGPT5_4`, `crux.Gemini3_8Flash`, …). For any other model ID, pass `crux.WithProvider`.
+The provider is inferred from known model constants (`crux.ClaudeSonnet5`, `crux.OpenAIGPT5_4`, `crux.Gemini3_8Flash`, …). For any other model ID, pass `crux.WithProvider`.
 
 | Provider | `Provider` | API key environment variable | Web search |
 |---|---|---|---|

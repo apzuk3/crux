@@ -23,10 +23,10 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
   - a simpler custom-registry option, `WithRegistry(reg)`.
 - **Runtime schemas:** `WithInputSchema(schema)` replaces the schema generated from the input type, for tools whose arguments are only known at run time (such as MCP tools). The input type may then be `json.RawMessage`.
 - **Toolsets** group tools. A `Toolset` registers its tools in `Register(registry)` and labels each one with the `WithToolset(name)` tool option; `AddToolset`/`AddToolsetWithRegistry` call `Register`. Agents select a whole set with `WithToolsets`/`WithToolsetsRegistry`, which add to the tool list (unlike `WithTools`, which replaces it).
-- **Agent** (`agent.go`): an immutable, stateless blueprint (model, instructions, tool names, limits), safe for concurrent use. Its ID is derived from `CanonicalData()` unless `WithAgentID` is given.
+- **Agent** (`agent.go`): an immutable, stateless blueprint (model, instructions, tool names, limits), safe for concurrent use. Its ID is derived from `canonicalData()`, which includes a SHA-256 of each tool definition, so a changed tool description or schema changes the ID.
 - **Session** (`agent.go`): one conversation, stored as an append-only log of `Entry` values (`types.go`). Not safe for concurrent use. `Run`/`RunInto`/`Stream` drive the loop:
   1. run any pending tool calls (the calls from one model turn run concurrently, at most 8 at a time; results keep the model's order);
-  2. call the provider (`step`);
+  2. record `KindTurnStarted` and call the provider (`step`);
   3. append what the model produced;
   4. stop on approvals, refusals or a final answer; otherwise repeat, up to `maxTurns`. Output repair requests (`WithMaxRepairs`) are extra and don't count as turns.
 - **Tool failures never stop a run.** Tool errors, and tool panics (recovered in `invokeTool`), are sent to the model as `ToolResult.Error`. Arguments are validated against the tool's input schema first; repeated keys, keys that match a field only case-insensitively and keys of a struct input that match no field are rejected (maps and nested types with their own decoder accept any key), so an approval shown from the raw arguments matches what the tool receives.
@@ -42,10 +42,12 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
   - `NewSession` reads it, records the parent's ID, and reuses the parent's store.
   - `GORMStore` saves the link in `crux_sessions.parent_id`.
   - There is no public API for this, and none should be added without discussion.
-- **Subagents** (`WithSubAgent`): exposed to the parent as a tool named `agent_<name>` that takes `{"task": string}`, validated as strictly as other tool arguments. Each call runs a child session whose ID is derived from the parent session and the call (`childSessionID`), and its output is the tool result. When the child stops for approval, the tool returns `errToolWaiting`: the call gets no result, the child is kept in `Session.children`, and the parent returns `ErrApprovalNeeded`. Running the call again loads the child by its ID and resumes it. `NewSession` reloads waiting children when it loads a session from the store.
+- **Subagents** (`WithSubAgent`): exposed to the parent as a tool named `agent_<name>` that takes `{"task": string}`, validated as strictly as other tool arguments. Each call runs a child session whose ID is derived from the parent session and the call (`childSessionID`), and its output is the tool result. Subagent tools have no `invoke`: `dispatch` runs them through `Session.runSubAgent`. When the child stops for approval, `dispatch` returns it as waiting: the call gets no result, the child is kept in `Session.children`, and the parent returns `ErrApprovalNeeded`. Running the call again loads the child by its ID and resumes it. `NewSession` reloads waiting children when it loads a session from the store.
 - **Fork** (`fork.go`): copies history into a new session, optionally switching model or provider. Provider-specific data (`Opaque`) is dropped when the provider changes.
 - **Errors** (`errors.go`): sentinel errors for `errors.Is` checks: `ErrApprovalNeeded`, `ErrMaxTurns`, `ErrRefused`, `ErrOutputValidation`, `ErrSessionNotFound`, `ErrSessionConflict`, `ErrToolNotFound`.
-- **`Kind` values are persisted.** Never renumber them. The value after `KindStateDelta` is a reserved blank (`_`), kept for future compaction.
+- **The log is the absolute source of truth, including the run's lifecycle.** `run` records `KindRunStarted` before it does any work and `KindRunFinished` (`Entry.Run`: outcome and error text) when it returns, even after a cancel. `KindTurnStarted` precedes each provider request (`Entry.Turn`: agent ID, provider and model; the agent ID pins the tool definitions). `KindToolStarted` is written, in one batch, before the tools of a turn run. A start without a result means the tool may have run; a start without a finish means the process died. The last entry of a model response carries `Entry.Response` (provider response ID, time to first streamed token). These kinds are `HiddenFromModel`, and `FinalOutput` skips them rather than treating them as a turn boundary. Only streamed deltas are not stored: they are previews of an entry that is stored whole. Don't add lifecycle events that bypass the log.
+- **Listening:** `WithEntryHandler` is a session option that subagent sessions inherit (`NewSession`, through `sessionContextKey`). It is additive (handlers run in the order added; a child keeps the parent's handlers before its own) and fires from `appendLogs` after `Store.Append` succeeds, serialised by a mutex shared across the session tree. User rejections set `ToolResult.Denied`. There are deliberately no tool hooks: when control over tools is needed, prefer tool middleware on the registry or per-call approval decided by code (discuss first).
+- **`Kind` values are persisted.** Never renumber them; append new ones at the end. The value after `KindStateDelta` is a reserved blank (`_`), kept for future compaction.
 
 ## Providers
 
@@ -55,7 +57,7 @@ There are only three wire implementations. Every provider maps onto one of them:
 - `anthropic.go`: Anthropic Messages. `max_tokens` is required and defaults to `defaultAnthropicMaxTokens` (16384). Every request sets prompt-cache breakpoints (`setAnthropicCacheBreakpoints`); the API allows at most 4.
 - `gemini.go`: Google GenAI.
 
-Each `*_provider.go` file holds the model constants and registers the provider in `init` with `registerProvider` (`provider.go`). Its `providerSpec` lists the known models (so `New` can infer the provider from the model name), the API key environment variables (used unless `WithAPIKey` is given), the default base URL, the wire `step`, the output-schema adapter and an optional `prepare` hook that `New` runs for provider-specific rules and defaults. Adding a provider means adding one such file; don't add `switch` statements on the provider elsewhere. A new agent option that affects requests (like `WithMaxTokens`/`WithTemperature`/`WithReasoning`) must be wired into all three wire files, added to `CanonicalData()`, and copied in `Agent.clone` (`fork.go`).
+`models.go` holds every provider's model constants (OpenAI ones are prefixed `OpenAI`) and registers each provider in its single `init` with `registerProvider` (`provider.go`), next to the providers' `prepare` hooks. Each `providerSpec` lists the known models (so `New` can infer the provider from the model name), the API key environment variables (used unless `WithAPIKey` is given), the default base URL, the wire `step`, the output-schema adapter and an optional `prepare` hook that `New` runs for provider-specific rules and defaults. Adding a provider means adding its constants and registration to `models.go`; don't add `switch` statements on the provider elsewhere. `TestModelConstantsAreRegistered` fails for a constant that is not in its provider's `models` list. A new agent option that affects requests (like `WithMaxTokens`/`WithTemperature`/`WithReasoning`) must be wired into all three wire files, added to `canonicalData()`, and copied in `Agent.clone` (`fork.go`).
 
 ## Conventions
 
@@ -89,11 +91,13 @@ go test -tags evals ./evals/...    # live provider evals; needs API keys, don't 
 | `filesystem.go` | `Filesystem(root)` toolset (`"filesystem"`): file tools confined to a root with `os.Root`; tools that change files need approval |
 | `schema.go` | output schema validation and per-provider schema adaptation |
 | `state.go` | state deltas and `StateSnapshot`/`StateFromContext` |
+| `lifecycle.go` | `WithEntryHandler`, turn info and tool hashes |
 | `stream.go` | `Session.Stream` (text and reasoning chunks) |
-| `fork.go` | `Fork`/`ForkFrom`, `cloneEntries` |
+| `fork.go` | `Fork`, `cloneEntries` |
 | `store.go`, `store_gorm.go` | `Store`, `MemoryStore`, `GORMStore` |
 | `types.go`, `errors.go` | log entry types, sentinel errors |
 | `openai.go`, `anthropic.go`, `gemini.go` + adapters | provider wire code |
+| `models.go`, `provider.go` | model constants and provider registration; `providerSpec` |
 | `cruxtest/` | mock transport for tests |
 | `examples/` | runnable examples (need real API keys) |
 | `evals/` | live evals (`-tags evals`) |

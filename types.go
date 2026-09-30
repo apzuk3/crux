@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // UserLocation provides optional geographic context for provider searches.
@@ -33,6 +35,10 @@ const (
 	_                // reserved for conversation compaction
 	KindProviderTool // server-executed tool event retained in Opaque
 	KindApproval
+	KindRunStarted  // a Run, Resume or Stream began work
+	KindRunFinished // Run holds how it ended
+	KindTurnStarted // a provider request is about to be sent; Turn describes it
+	KindToolStarted // a tool is about to run; ToolCall holds the call's ID and name. Without a result, the tool may have run
 )
 
 type ContentKind string
@@ -60,6 +66,10 @@ type Entry struct {
 	ToolResult *ToolResult `json:"tool_result,omitempty"`
 	Delta      *StateDelta `json:"delta,omitempty"`
 	Approval   *Approval   `json:"approval,omitempty"`
+
+	Run      *RunStatus    `json:"run,omitempty"`
+	Turn     *TurnInfo     `json:"turn,omitempty"`
+	Response *ResponseInfo `json:"response,omitempty"` // on the last entry of a model response
 
 	Opaque map[string][]byte `json:"opaque,omitempty"` // provider adornments; dropped on provider switch
 	Usage  *Usage            `json:"usage,omitempty"`  // tokens; never affects replay
@@ -103,9 +113,20 @@ func (e Entry) Text() string {
 }
 
 // HiddenFromModel reports whether the entry is an internal bookkeeping event
-// (like state deltas or user approvals) that is not sent to LLM providers.
+// (like state deltas, user approvals or lifecycle records) that is not sent to
+// LLM providers.
 func (e Entry) HiddenFromModel() bool {
-	return e.Kind == KindStateDelta || e.Kind == KindApproval
+	return e.Kind == KindStateDelta || e.Kind == KindApproval || e.Kind.lifecycle()
+}
+
+// lifecycle reports whether entries of this kind only record the progress of
+// a run, so they neither end a model turn nor belong to one.
+func (k Kind) lifecycle() bool {
+	switch k {
+	case KindRunStarted, KindRunFinished, KindTurnStarted, KindToolStarted:
+		return true
+	}
+	return false
 }
 
 type Reasoning struct {
@@ -153,6 +174,9 @@ type ToolResult struct {
 	CallID string `json:"call_id"` // references ToolCall.ID
 	Output string `json:"output,omitempty"`
 	Error  string `json:"error,omitempty"` // set on failure or decline; still owed to the model
+	// Denied reports that the tool did not run because the user rejected the
+	// call. Error holds the reason.
+	Denied bool `json:"denied,omitempty"`
 }
 
 type StateDelta struct {
@@ -165,6 +189,44 @@ type Approval struct {
 	CallID   string `json:"call_id"`
 	Approved bool   `json:"approved"`
 	Reason   string `json:"reason,omitempty"`
+}
+
+// RunOutcome says how a run ended.
+type RunOutcome string
+
+const (
+	RunAnswered       RunOutcome = "answered"
+	RunApprovalNeeded RunOutcome = "approval_needed"
+	RunRefused        RunOutcome = "refused"
+	RunMaxTurns       RunOutcome = "max_turns"
+	RunCancelled      RunOutcome = "cancelled"
+	RunFailed         RunOutcome = "failed"
+)
+
+// RunStatus is recorded on a KindRunFinished entry. Error is the text of the
+// error the run returned, if any.
+type RunStatus struct {
+	Outcome RunOutcome `json:"outcome"`
+	Error   string     `json:"error,omitempty"`
+}
+
+// TurnInfo is recorded on a KindTurnStarted entry. AgentID identifies the
+// agent's configuration, including a hash of each tool's definition
+// (GORMStore keeps it in crux_agents), so a request can be tied to the exact
+// definitions it used.
+type TurnInfo struct {
+	AgentID  uuid.UUID `json:"agent_id"`
+	Provider Provider  `json:"provider"`
+	Model    string    `json:"model"`
+}
+
+// ResponseInfo describes one model response. ID is the provider's response
+// ID, for looking the request up with the provider. FirstTokenAfter is the
+// time from sending the request to the first streamed delta; it is zero when
+// the response was not streamed.
+type ResponseInfo struct {
+	ID              string        `json:"id,omitempty"`
+	FirstTokenAfter time.Duration `json:"first_token_after,omitempty"`
 }
 
 // Usage counts the tokens of one model response, the same way on every

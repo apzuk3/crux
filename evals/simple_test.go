@@ -39,7 +39,7 @@ func Test_ExecuteSimplePrompt(t *testing.T) {
 
 	for _, modelname := range []string{
 		crux.Gemini3_5FlashLite,
-		crux.ChatModelGPT5_6Sol,
+		crux.OpenAIGPT5_6Sol,
 		crux.ClaudeHaiku4_5,
 		crux.XAIGrok4_20,
 		crux.OpenRouterXAIGrok4_20,

@@ -40,7 +40,7 @@ func ExampleSession_RunInto() {
 		Summary string `json:"summary"`
 	}
 
-	agent := crux.Must(crux.New("forecaster", crux.ChatModelGPT5_4,
+	agent := crux.Must(crux.New("forecaster", crux.OpenAIGPT5_4,
 		crux.WithOutputSchemaFrom[Forecast](),
 	))
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -66,8 +67,9 @@ func TestStreamToolsAndUsage(t *testing.T) {
 			require.True(t, ok)
 			require.Equal(t, texts[2], answer)
 			logs := s.Logs()
-			require.Equal(t, 17, logs[len(logs)-1].Usage.InputTokens)
-			require.Equal(t, 8, logs[len(logs)-1].Usage.OutputTokens)
+			last := logs[slices.IndexFunc(logs, func(e crux.Entry) bool { return e.Kind == crux.KindAssistant && e.Text() == answer })]
+			require.Equal(t, 17, last.Usage.InputTokens)
+			require.Equal(t, 8, last.Usage.OutputTokens)
 			require.Contains(t, mock.Requests()[1].BodyString(), "Sunny")
 			mock.AssertAllConsumed(t)
 		})
@@ -159,7 +161,8 @@ func TestStreamReasoningAndReplay(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, []crux.Chunk{{Kind: crux.ChunkReasoning, Delta: "Think", Turn: 1}, {Kind: crux.ChunkText, Delta: "Hello", Turn: 1}}, chunks)
 			logs := s.Logs()
-			require.Equal(t, 5, logs[len(logs)-1].Usage.OutputTokens)
+			answer := logs[slices.IndexFunc(logs, func(e crux.Entry) bool { return e.Kind == crux.KindAssistant })]
+			require.Equal(t, 5, answer.Usage.OutputTokens)
 			_, err = collectStream(s, t.Context(), "Continue")
 			require.NoError(t, err)
 			require.Contains(t, mock.Requests()[1].BodyString(), tc.metadata)
@@ -224,7 +227,7 @@ func TestStreamIncrementalAndEarlyExit(t *testing.T) {
 			_, complete := s.FinalOutput()
 			require.Equal(t, mode == "complete", complete)
 			if !complete {
-				require.Len(t, s.Logs(), 1)
+				require.Len(t, conversation(s.Logs()), 1)
 			}
 			select {
 			case <-closed:
@@ -258,7 +261,7 @@ func TestStreamRejectsIncompleteOrFailedOutput(t *testing.T) {
 			s := streamSession(t, tc.provider, mock)
 			_, err := collectStream(s, t.Context(), "Hello")
 			require.Error(t, err)
-			require.Len(t, s.Logs(), 1, "partial provider output must not be committed")
+			require.Len(t, conversation(s.Logs()), 1, "partial provider output must not be committed")
 			_, ok := s.FinalOutput()
 			require.False(t, ok)
 		})
@@ -283,7 +286,18 @@ func TestStreamAnthropicPausedTurn(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []crux.Chunk{{Kind: crux.ChunkText, Delta: "Searching. ", Turn: 1}, {Kind: crux.ChunkText, Delta: "Found it.", Turn: 1}}, chunks)
 	require.Contains(t, mock.Requests()[1].BodyString(), "Searching.")
-	logs := s.Logs()
+	logs := conversation(s.Logs())
 	require.Equal(t, 20, logs[len(logs)-1].Usage.InputTokens)
 	require.Equal(t, 10, logs[len(logs)-1].Usage.OutputTokens)
+}
+
+// conversation drops the run, turn and tool-started records from logs.
+func conversation(logs []crux.Entry) []crux.Entry {
+	return slices.DeleteFunc(logs, func(e crux.Entry) bool {
+		switch e.Kind {
+		case crux.KindRunStarted, crux.KindRunFinished, crux.KindTurnStarted, crux.KindToolStarted:
+			return true
+		}
+		return false
+	})
 }

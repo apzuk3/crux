@@ -88,10 +88,10 @@ func TestReasoningAnthropic(t *testing.T) {
 }
 
 func TestReasoningOpenAI(t *testing.T) {
-	body := reasoningRequest(t, crux.ProviderOpenAI, crux.ChatModelGPT5_4, crux.WithReasoning(crux.ReasoningMedium))
+	body := reasoningRequest(t, crux.ProviderOpenAI, crux.OpenAIGPT5_4, crux.WithReasoning(crux.ReasoningMedium))
 	require.Equal(t, map[string]any{"effort": "medium", "summary": "auto"}, body["reasoning"])
 
-	body = reasoningRequest(t, crux.ProviderOpenAI, crux.ChatModelGPT5_4, crux.WithReasoning(crux.ReasoningOff))
+	body = reasoningRequest(t, crux.ProviderOpenAI, crux.OpenAIGPT5_4, crux.WithReasoning(crux.ReasoningOff))
 	require.Equal(t, map[string]any{"effort": "none"}, body["reasoning"])
 
 	body = reasoningRequest(t, crux.ProviderXAI, "grok-5", crux.WithReasoning(crux.ReasoningHigh))
@@ -113,7 +113,6 @@ func TestReasoningChangesAgentID(t *testing.T) {
 	plain := crux.Must(crux.New("r", crux.ClaudeOpus4_8))
 	reasoning := crux.Must(crux.New("r", crux.ClaudeOpus4_8, crux.WithReasoning(crux.ReasoningHigh)))
 	require.NotEqual(t, plain.ID(), reasoning.ID())
-	require.NotContains(t, string(plain.CanonicalData()), "reasoning")
 
 	forked, err := crux.MustSession(crux.NewSession(t.Context(), reasoning)).Fork(t.Context())
 	require.NoError(t, err)
