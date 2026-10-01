@@ -196,6 +196,36 @@ agent := crux.Must(crux.New("coder", crux.OpenAIGPT5_4, crux.WithToolsets("files
 
 Read-only tools run without approval, so the model can read any file under `root` (including `.env` files and keys) and its content is sent to the provider. Point `root` at the narrowest directory the agent needs. Each call is bounded (1 MB per file read, capped listings, walks and searches), and output that hits a limit ends with a note telling the model how to narrow the request. Writes and edits replace the file atomically.
 
+### Network tools
+
+`Network()` is a built-in toolset for working with the network, in pure Go and the same on Linux, macOS and Windows. Connections, listeners and servers stay open as handles (such as `tcp-1` or `http-4`) that the model sends on, reads from and closes; incoming data is buffered until it reads it.
+
+```go
+network := crux.Network()
+defer network.Close() // closes everything still open
+if err := crux.AddToolset(network); err != nil {
+	log.Fatal(err)
+}
+agent := crux.Must(crux.New("netops", crux.Gemini3_8Flash, crux.WithToolsets(crux.ToolsetNetwork)))
+```
+
+| Tool | What it does | Approval |
+|---|---|---|
+| `dns_lookup` | DNS records like dig (A, AAAA, MX, TXT, SOA, SRV, PTR, CAA, HTTPS, …) with TTLs, from the system resolver or a given server | no |
+| `whois` | registration data for a domain, IP or AS, following referrals from whois.iana.org | no |
+| `http_get` | GET or HEAD a URL; reaches **public addresses only** | no |
+| `http_request` | any method, headers and body, to any allowed host including local ones | yes |
+| `net_connect` | open a `tcp`, `udp`, `tls`, `unix`, `unixgram`, `ws` or `wss` connection (TLS shows the certificate) | yes |
+| `net_send` | send text, hex or base64 data on a connection | yes |
+| `net_read` | read what arrived on a handle, waiting up to a timeout or for a delimiter | no |
+| `net_listen` | accept TCP or unix connections, or UDP datagrams, on a port | yes |
+| `http_serve` | serve fixed responses on a port and log every request | yes |
+| `net_list`, `net_close` | show and close open handles | no |
+
+Tools that send data the model chose or open a port need approval; change that with `WithNetworkApprovalNeeded`. `WithNetworkPrivate(false)` blocks loopback, private, link-local (including cloud metadata at 169.254.169.254) and CGNAT addresses, checked on the address actually dialed after DNS and on every redirect; `WithNetworkHosts("api.example.com", "*.internal", "10.0.0.0/8")` limits the tools to those hosts. A port alone (`:8080`) listens on 127.0.0.1, so nothing is exposed unless the model names an interface.
+
+Data can leave through any query, including the names looked up with `dns_lookup` and `whois`, and anything read from the network goes into the model's context, so treat it as untrusted input. Each call is bounded (32 open handles, 1 MB buffered per handle, 30 s timeouts, response bodies cut at 64 KB by default), and idle handles close after 30 minutes.
+
 ### Tool approvals
 
 ```go
@@ -300,7 +330,7 @@ agent := crux.Must(crux.New("assistant", crux.ClaudeHaiku4_5,
 
 ## Examples
 
-See [`examples/`](examples): `basic` (multi-tool planner with structured output), `stream`, `store`, `fork`, `subagents`, `websearch`, `filesystem`, `lifecycle` (live trace with WithEntryHandler, approvals, per-run summary from the log), `cli` (a coding agent in the terminal chat), `mcp` (chat about your Linear issues through Linear's MCP server, with OAuth login), `oncall` (an on-call engineer with an investigator subagent and approved rollbacks, in the terminal chat).
+See [`examples/`](examples): `basic` (multi-tool planner with structured output), `stream`, `store`, `fork`, `subagents`, `websearch`, `filesystem`, `lifecycle` (live trace with WithEntryHandler, approvals, per-run summary from the log), `cli` (a coding agent in the terminal chat), `mcp` (chat about your Linear issues through Linear's MCP server, with OAuth login), `network` (a network assistant with DNS, whois, HTTP, sockets and servers), `domains` (a terminal chat that proposes available domain names for an idea, checked by the network toolset with RDAP and whois), `oncall` (an on-call engineer with an investigator subagent and approved rollbacks, in the terminal chat).
 
 ## Development
 

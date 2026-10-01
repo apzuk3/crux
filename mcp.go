@@ -50,12 +50,14 @@ type mcpConfig struct {
 	header     http.Header
 	httpClient *http.Client
 	oauth      *OAuthConfig
-	approval   []mcpApproval
+	approval   []approvalRule
 }
 
-type mcpApproval struct {
+// approvalRule overrides whether the named tools, or all of a toolset's
+// tools when none are named, need approval.
+type approvalRule struct {
 	needed bool
-	tools  []string // MCP tool names; empty means every tool
+	tools  []string
 }
 
 // WithMCPEnv adds "KEY=value" variables to the environment of an MCPCommand
@@ -103,7 +105,7 @@ func WithMCPHTTPClient(client *http.Client) MCPOption {
 // server marks it read-only. Later options win.
 func WithMCPApprovalNeeded(needed bool, tools ...string) MCPOption {
 	return func(c *mcpConfig) error {
-		c.approval = append(c.approval, mcpApproval{needed: needed, tools: tools})
+		c.approval = append(c.approval, approvalRule{needed: needed, tools: tools})
 		return nil
 	}
 }
