@@ -25,6 +25,11 @@ func (s *Session) Fork(ctx context.Context, opts ...AgentOption) (*Session, erro
 // offset, not an Entry.Seq. Empty history is valid; a prefix with an
 // unfinished local tool exchange or an unmatched tool result is not.
 func (s *Session) forkFrom(ctx context.Context, from int, opts ...AgentOption) (*Session, error) {
+	return s.forkWith(ctx, from, nil, opts...)
+}
+
+// forkWith is forkFrom with extra options for the new session.
+func (s *Session) forkWith(ctx context.Context, from int, sessionOpts []SessionOption, opts ...AgentOption) (*Session, error) {
 	if from < 0 || from > len(s.logs) {
 		return nil, fmt.Errorf("cannot fork at offset %d: must be between 0 and %d", from, len(s.logs))
 	}
@@ -50,7 +55,8 @@ func (s *Session) forkFrom(ctx context.Context, from int, opts ...AgentOption) (
 		})
 	}
 
-	return NewSession(ctx, clonedAgent, WithSessionLogs(forkedLogs), WithStore(s.store))
+	sessionOpts = append([]SessionOption{WithSessionLogs(forkedLogs), WithStore(s.store)}, sessionOpts...)
+	return NewSession(ctx, clonedAgent, sessionOpts...)
 }
 
 func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {

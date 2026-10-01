@@ -10,7 +10,7 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
 
 ## Principles (non-negotiable)
 
-- **One flat package.** Everything a user needs comes from `import "github.com/apzuk3/crux"`. Do not create subpackages for features (no `crux/store/...`, `crux/tools/...`). `cruxtest` (test helpers), `examples/` and `evals/` are the only other directories.
+- **One flat package.** Everything a user needs comes from `import "github.com/apzuk3/crux"`. Do not create subpackages for features (no `crux/store/...`, `crux/tools/...`). `cruxtest` (test helpers), `internal/` (implementation details users never import, such as the terminal UI), `examples/` and `evals/` are the only other directories.
 - **Pure Go, no cgo.** The `crux` package must build and run with `CGO_ENABLED=0`. Never import a cgo SQLite driver (such as `mattn/go-sqlite3`) or any library that needs cgo or loads native libraries. GORM itself is fine because it's pure Go. Users bring their own GORM driver; tests use the pure-Go `github.com/glebarez/sqlite`. CI enforces this.
 - **Small public API.** Don't export something unless users need it. Internal mechanisms stay unexported (for example, session parent tracking). Removing an export later is a breaking change.
 - **Works with zero configuration.** `crux.New(name, model)` + `crux.NewSession(ctx, agent)` + `session.Run(ctx, input)` must work with only an API key in the environment.
@@ -46,6 +46,7 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
 - **Fork** (`fork.go`): copies history into a new session, optionally switching model or provider. Provider-specific data (`Opaque`) is dropped when the provider changes.
 - **Errors** (`errors.go`): sentinel errors for `errors.Is` checks: `ErrApprovalNeeded`, `ErrMaxTurns`, `ErrRefused`, `ErrOutputValidation`, `ErrSessionNotFound`, `ErrSessionConflict`, `ErrToolNotFound`.
 - **The log is the absolute source of truth, including the run's lifecycle.** `run` records `KindRunStarted` before it does any work and `KindRunFinished` (`Entry.Run`: outcome and error text) when it returns, even after a cancel. `KindTurnStarted` precedes each provider request (`Entry.Turn`: agent ID, provider and model; the agent ID pins the tool definitions). `KindToolStarted` is written, in one batch, before the tools of a turn run. A start without a result means the tool may have run; a start without a finish means the process died. The last entry of a model response carries `Entry.Response` (provider response ID, time to first streamed token). These kinds are `HiddenFromModel`, and `FinalOutput` skips them rather than treating them as a turn boundary. Only streamed deltas are not stored: they are previews of an entry that is stored whole. Don't add lifecycle events that bypass the log.
+- **Terminal chat** (`cli.go`, `internal/tui`): `CLI` is a `WithEntryHandler` listener plus `Stream` for deltas. It shows lifecycle entries (`KindRunStarted`, `KindTurnStarted`, `KindToolStarted`, …) as a progress pipeline, so new lifecycle facts belong in the log and get shown from there. The handler only forwards events; approvals, runs and model switches happen off the UI goroutine. Switching models forks the session with the unexported `forkWith`, which also copies the session's entry handlers (public `Fork` does not).
 - **Listening:** `WithEntryHandler` is a session option that subagent sessions inherit (`NewSession`, through `sessionContextKey`). It is additive (handlers run in the order added; a child keeps the parent's handlers before its own) and fires from `appendLogs` after `Store.Append` succeeds, serialised by a mutex shared across the session tree. User rejections set `ToolResult.Denied`. There are deliberately no tool hooks: when control over tools is needed, prefer tool middleware on the registry or per-call approval decided by code (discuss first).
 - **`Kind` values are persisted.** Never renumber them; append new ones at the end. The value after `KindStateDelta` is a reserved blank (`_`), kept for future compaction.
 
@@ -63,7 +64,7 @@ There are only three wire implementations. Every provider maps onto one of them:
 
 - Functional options: `AgentOption func(*Agent) error` and `SessionOption func(*Session) error`. Validate inside the option and return an error rather than panicking. `Must`/`MustSession` exist for examples and main functions.
 - Match the surrounding style: short doc comments on exported identifiers, few inline comments, errors wrapped with `%w` and context.
-- Minimum Go version is 1.25 (set by `openai-go`). Don't use newer standard-library APIs; `go vet` checks this.
+- Minimum Go version is 1.25.8 (set by `glamour`; `openai-go` needs 1.25). Check a new dependency's `go` directive before adding it: `bubbletea` v2.0.10 needs Go 1.26, so it is pinned at v2.0.9. Don't use newer standard-library APIs; `go vet` checks this.
 - Pre-v0.0.1: breaking changes are acceptable when they improve developer experience. Say so in the PR description.
 
 ## Testing
@@ -94,6 +95,8 @@ go test -tags evals ./evals/...    # live provider evals; needs API keys, don't 
 | `lifecycle.go` | `WithEntryHandler`, turn info and tool hashes |
 | `stream.go` | `Session.Stream` (text and reasoning chunks) |
 | `fork.go` | `Fork`, `cloneEntries` |
+| `cli.go` | `CLI(agent, opts...)`: adapts a session to `internal/tui` (entries become `tui.Event`s, subagent sessions are tied to the call that started them) |
+| `internal/tui/` | the terminal chat (Bubble Tea, Lip Gloss, Glamour); it doesn't import `crux` and speaks only `tui.Info`, `tui.Event` and `tui.Backend` |
 | `store.go`, `store_gorm.go` | `Store`, `MemoryStore`, `GORMStore` |
 | `types.go`, `errors.go` | log entry types, sentinel errors |
 | `openai.go`, `anthropic.go`, `gemini.go` + adapters | provider wire code |

@@ -64,6 +64,16 @@ func main() {
 
 `Run` sends the input, executes every tool the model calls, sends the results back, and repeats until the model gives a final answer or `WithMaxTurns` (default 10) is reached.
 
+### Chat in the terminal
+
+`crux.CLI` opens a full-screen chat with any agent: answers stream in as rendered markdown, each tool call and subagent shows up as a live card, a sidebar on the right lists the agent's tools with call counts and token usage, and a progress bar follows each run from request to answer. Tools registered with `WithApprovalNeeded` ask for approval in a dialog, and `ctrl+o` (or `/model`) switches the model mid-conversation: the chat continues in a fork of the session on the new model, listing every provider that has an API key in the environment.
+
+```go
+crux.CLI(agent) // blocks until the user quits
+```
+
+Session options work too: `crux.CLI(agent, crux.WithStore(store), crux.WithSessionID(id))` reopens a stored conversation with its history.
+
 ## Concepts
 
 | | |
@@ -267,7 +277,7 @@ agent := crux.Must(crux.New("assistant", crux.ClaudeHaiku4_5,
 
 ## Examples
 
-See [`examples/`](examples): `basic` (multi-tool planner with structured output), `stream`, `store`, `fork`, `subagents`, `websearch`, `filesystem`.
+See [`examples/`](examples): `basic` (multi-tool planner with structured output), `stream`, `store`, `fork`, `subagents`, `websearch`, `filesystem`, `lifecycle` (live trace with WithEntryHandler, approvals, per-run summary from the log), `cli` (a coding agent in the terminal chat), `oncall` (an on-call engineer with an investigator subagent and approved rollbacks, in the terminal chat).
 
 ## Development
 
