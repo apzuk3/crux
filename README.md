@@ -147,6 +147,29 @@ crux.RegisterTool("docs_search", "Search the docs", func(ctx context.Context, ar
 }, crux.WithInputSchema(schemaFromServer))
 ```
 
+### MCP servers
+
+`ConfigureMCP` connects to an [MCP](https://modelcontextprotocol.io) server, lists its tools and registers them as a toolset; agents use them with `WithMCPs`. Each tool is registered as `<server>_<tool>`, its arguments are validated against the server's schema, and it needs approval unless the server marks it read-only (`WithMCPApprovalNeeded` changes that).
+
+```go
+github, err := crux.ConfigureMCP(ctx, "github", crux.MCPRemote("https://api.githubcopilot.com/mcp/"))
+defer github.Close()
+
+files, err := crux.ConfigureMCP(ctx, "files",
+	crux.MCPCommand("npx", "-y", "@modelcontextprotocol/server-filesystem", "./workspace"))
+defer files.Close()
+
+agent := crux.Must(crux.New("dev", crux.ClaudeSonnet5_5, crux.WithMCPs("github", "files")))
+```
+
+Authentication:
+
+- **Local servers** (`MCPCommand`) get credentials from their environment: `WithMCPEnv("GITHUB_TOKEN=" + token)`.
+- **API keys** for remote servers: `WithMCPHeader("Authorization", "Bearer "+key)`.
+- **OAuth** needs no setup. When a remote server answers 401, crux finds its authorization server, registers itself as a client, opens the browser on the login page, receives the code on a loopback address (PKCE) and caches the token under the user's config directory. Later runs reuse and refresh it. Customise this with `WithMCPOAuth(crux.OAuthConfig{...})`: a pre-registered `ClientID`, `Scopes`, a fixed `RedirectURL`, your own `OpenURL`, or a `TokenStore` such as a database.
+
+Tools are listed once, when the server is configured. Resources, prompts and sampling are not supported yet.
+
 ### Filesystem tools
 
 `Filesystem(root)` is a built-in toolset for reading and editing files under `root`. Nothing outside `root` can be reached (not through `..`, absolute paths or symlinks), paths use `/` on every OS, and it works the same on Linux, macOS and Windows. Tools that change files refuse paths that go through a symlink, so the change lands on the path that was approved.
@@ -277,7 +300,7 @@ agent := crux.Must(crux.New("assistant", crux.ClaudeHaiku4_5,
 
 ## Examples
 
-See [`examples/`](examples): `basic` (multi-tool planner with structured output), `stream`, `store`, `fork`, `subagents`, `websearch`, `filesystem`, `lifecycle` (live trace with WithEntryHandler, approvals, per-run summary from the log), `cli` (a coding agent in the terminal chat), `oncall` (an on-call engineer with an investigator subagent and approved rollbacks, in the terminal chat).
+See [`examples/`](examples): `basic` (multi-tool planner with structured output), `stream`, `store`, `fork`, `subagents`, `websearch`, `filesystem`, `lifecycle` (live trace with WithEntryHandler, approvals, per-run summary from the log), `cli` (a coding agent in the terminal chat), `mcp` (chat about your Linear issues through Linear's MCP server, with OAuth login), `oncall` (an on-call engineer with an investigator subagent and approved rollbacks, in the terminal chat).
 
 ## Development
 

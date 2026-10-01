@@ -22,6 +22,7 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
   - `RegisterTool` could return a reference value that agents can pass instead of a string;
   - a simpler custom-registry option, `WithRegistry(reg)`.
 - **Runtime schemas:** `WithInputSchema(schema)` replaces the schema generated from the input type, for tools whose arguments are only known at run time (such as MCP tools). The input type may then be `json.RawMessage`.
+- **MCP** (`mcp.go`, `mcp_auth.go`): `ConfigureMCP(ctx, name, transport)` connects to an MCP server through the official Go SDK (`github.com/modelcontextprotocol/go-sdk`, kept out of the public API), lists its tools once and registers each one as `<name>_<tool>` with `WithInputSchema`, `WithToolset(name)` and approval unless the server marks it read-only. Agents select them with `WithMCPs(name)` (sugar over `WithToolsets`). All names, schemas and conflicts are checked before anything is registered. Results become text: `IsError` is a tool error, structured content is JSON when there is no text. Remote servers authorize with OAuth on a 401 (`oauthHandler`: protected resource metadata, auth server metadata, dynamic client registration or a configured client, PKCE with a loopback redirect, token cached in a `TokenStore` and refreshed). Not supported yet: `list_changed`, resources, prompts, sampling, elicitation, per-user identities.
 - **Toolsets** group tools. A `Toolset` registers its tools in `Register(registry)` and labels each one with the `WithToolset(name)` tool option; `AddToolset`/`AddToolsetWithRegistry` call `Register`. Agents select a whole set with `WithToolsets`/`WithToolsetsRegistry`, which add to the tool list (unlike `WithTools`, which replaces it).
 - **Agent** (`agent.go`): an immutable, stateless blueprint (model, instructions, tool names, limits), safe for concurrent use. Its ID is derived from `canonicalData()`, which includes a SHA-256 of each tool definition, so a changed tool description or schema changes the ID.
 - **Session** (`agent.go`): one conversation, stored as an append-only log of `Entry` values (`types.go`). Not safe for concurrent use. `Run`/`RunInto`/`Stream` drive the loop:
@@ -64,7 +65,7 @@ There are only three wire implementations. Every provider maps onto one of them:
 
 - Functional options: `AgentOption func(*Agent) error` and `SessionOption func(*Session) error`. Validate inside the option and return an error rather than panicking. `Must`/`MustSession` exist for examples and main functions.
 - Match the surrounding style: short doc comments on exported identifiers, few inline comments, errors wrapped with `%w` and context.
-- Minimum Go version is 1.25.8 (set by `glamour`; `openai-go` needs 1.25). Check a new dependency's `go` directive before adding it: `bubbletea` v2.0.10 needs Go 1.26, so it is pinned at v2.0.9. Don't use newer standard-library APIs; `go vet` checks this.
+- Minimum Go version is 1.25.8 (set by `glamour`; `openai-go` needs 1.25). Check a new dependency's `go` directive before adding it: `bubbletea` v2.0.10 needs Go 1.26, so it is pinned at v2.0.9, and `golang.org/x/oauth2` v0.36+ needs Go 1.26, so it is pinned at v0.35.0. Don't use newer standard-library APIs; `go vet` checks this.
 - Pre-v0.0.1: breaking changes are acceptable when they improve developer experience. Say so in the PR description.
 
 ## Testing
@@ -89,6 +90,7 @@ go test -tags evals ./evals/...    # live provider evals; needs API keys, don't 
 | `agent.go` | `Agent`, `Session`, `New`, `NewSession`, the run loop, tool dispatch, approvals |
 | `agent_option.go` | agent and session options, `WithSubAgent` |
 | `tools.go` | tool registry, `RegisterTool*`, `Toolset`/`AddToolset*`; tool input schemas come from Go types (`json` + `description` tags) |
+| `mcp.go`, `mcp_auth.go` | `ConfigureMCP`, `WithMCPs`, MCP transports and options; OAuth for remote servers and `TokenStore` |
 | `filesystem.go` | `Filesystem(root)` toolset (`"filesystem"`): file tools confined to a root with `os.Root`; tools that change files need approval |
 | `schema.go` | output schema validation and per-provider schema adaptation |
 | `state.go` | state deltas and `StateSnapshot`/`StateFromContext` |
