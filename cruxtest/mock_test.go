@@ -104,7 +104,7 @@ func TestOpenAIMock_StructuredOutput(t *testing.T) {
 	require.NoError(t, err)
 
 	var res SentimentResult
-	err = sess.RunInto(context.Background(), "I love Crux!", &res)
+	err = sess.RunInto(context.Background(), &res, "I love Crux!")
 	require.NoError(t, err)
 	require.Equal(t, "positive", res.Sentiment)
 	require.Equal(t, 0.98, res.Score)

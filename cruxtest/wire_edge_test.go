@@ -309,7 +309,7 @@ func TestNonObjectOutputSchema(t *testing.T) {
 		agent := newMockAgent(t, mock, crux.Gemini2_5Flash, crux.WithOutputSchemaFrom[[]listItem]())
 		s := crux.MustSession(crux.NewSession(t.Context(), agent))
 		var items []listItem
-		require.NoError(t, s.RunInto(t.Context(), "list", &items))
+		require.NoError(t, s.RunInto(t.Context(), &items, "list"))
 		require.Equal(t, []listItem{{"a"}, {"b"}}, items)
 	})
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -46,11 +47,18 @@ type ContentKind string
 const (
 	ContentKindText    ContentKind = "text"
 	ContentKindRefusal ContentKind = "refusal"
+	ContentKindFile    ContentKind = "file" // an Attachment
 )
 
 type ContentPart struct {
 	Kind ContentKind `json:"kind"`
 	Text string      `json:"text"`
+
+	// A file holds its bytes or, for URL attachments, its URL.
+	Name string `json:"name,omitempty"`
+	MIME string `json:"mime,omitempty"`
+	Data []byte `json:"data,omitempty"`
+	URL  string `json:"url,omitempty"`
 }
 
 type Entry struct {
@@ -75,28 +83,57 @@ type Entry struct {
 	Usage  *Usage            `json:"usage,omitempty"`  // tokens; never affects replay
 }
 
-func NewUserEntry(input any) (Entry, error) {
-	var text string
-	switch v := any(input).(type) {
-	case string:
-		text = v
-	case []byte:
-		text = string(v)
-	case json.RawMessage:
-		text = string(v)
-	case fmt.Stringer:
-		text = v.String()
-	default:
-		raw, err := json.Marshal(input)
-		if err != nil {
-			return Entry{}, fmt.Errorf("unsupported user input type %T: %w", input, err)
+// NewUserEntry builds the user entry Run records for inputs, in order: strings
+// and text, Attachments (read here), and other values sent as JSON. nil inputs
+// are skipped.
+func NewUserEntry(inputs ...any) (Entry, error) {
+	var content []ContentPart
+	for _, input := range inputs {
+		var text string
+		switch v := input.(type) {
+		case nil:
+			continue
+		case Attachment:
+			part, err := v.part()
+			if err != nil {
+				return Entry{}, err
+			}
+			content = append(content, part)
+			continue
+		case *Attachment:
+			if v == nil {
+				continue
+			}
+			part, err := v.part()
+			if err != nil {
+				return Entry{}, err
+			}
+			content = append(content, part)
+			continue
+		case string:
+			text = v
+		case []byte:
+			if !utf8.Valid(v) {
+				return Entry{}, errors.New("user input is binary; wrap it in crux.Data to send it as a file")
+			}
+			text = string(v)
+		case json.RawMessage:
+			text = string(v)
+		case fmt.Stringer:
+			text = v.String()
+		default:
+			raw, err := json.Marshal(input)
+			if err != nil {
+				return Entry{}, fmt.Errorf("unsupported user input type %T: %w", input, err)
+			}
+			text = string(raw)
 		}
-		text = string(raw)
+		content = append(content, ContentPart{Kind: ContentKindText, Text: text})
 	}
 	return Entry{
 		At:      time.Now().UTC(),
 		Kind:    KindUser,
-		Content: []ContentPart{{Kind: ContentKindText, Text: text}},
+		Content: content,
 	}, nil
 }
 

@@ -29,7 +29,7 @@ func TestStructuredOutputWireAndValidation(t *testing.T) {
 			sess, err := crux.NewSession(t.Context(), a)
 			require.NoError(t, err)
 			var answer structuredAnswer
-			require.NoError(t, sess.RunInto(context.Background(), "extract", &answer))
+			require.NoError(t, sess.RunInto(context.Background(), &answer, "extract"))
 			require.Equal(t, "ok", answer.Status)
 			require.Equal(t, 2, answer.Score)
 			_, err = sess.Run(context.Background(), "extract again")
@@ -135,10 +135,10 @@ func TestRunIntoValidatesBeforeMutatingTarget(t *testing.T) {
 	require.NoError(t, err)
 	sess, err := crux.NewSession(t.Context(), a)
 	require.NoError(t, err)
-	require.Error(t, sess.RunInto(context.Background(), "extract", nil))
+	require.Error(t, sess.RunInto(context.Background(), nil, "extract"))
 	mock.AssertTurnCount(t, 0)
 	answer := structuredAnswer{Status: "original", Score: 42}
-	err = sess.RunInto(context.Background(), "extract", &answer)
+	err = sess.RunInto(context.Background(), &answer, "extract")
 	require.ErrorIs(t, err, crux.ErrOutputValidation)
 	require.Equal(t, "original", answer.Status)
 	require.Equal(t, 42, answer.Score)
@@ -161,7 +161,7 @@ func TestMapOutputSchemaCompatibility(t *testing.T) {
 		sess, err := crux.NewSession(t.Context(), a)
 		require.NoError(t, err)
 		var res withMapAnswer
-		require.NoError(t, sess.RunInto(context.Background(), "get labels", &res))
+		require.NoError(t, sess.RunInto(context.Background(), &res, "get labels"))
 		require.Equal(t, "prod", res.Labels["env"])
 
 		var body map[string]any
@@ -182,7 +182,7 @@ func TestMapOutputSchemaCompatibility(t *testing.T) {
 		sess, err := crux.NewSession(t.Context(), a)
 		require.NoError(t, err)
 		var res withMapAnswer
-		err = sess.RunInto(context.Background(), "get labels", &res)
+		err = sess.RunInto(context.Background(), &res, "get labels")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "does not support dynamic map schemas")
 		mock.AssertTurnCount(t, 0)
@@ -226,7 +226,7 @@ func TestLargeNumberPrecisionPreserved(t *testing.T) {
 	sess, err := crux.NewSession(t.Context(), a)
 	require.NoError(t, err)
 	var res largeNumberAnswer
-	require.NoError(t, sess.RunInto(context.Background(), "get id", &res))
+	require.NoError(t, sess.RunInto(context.Background(), &res, "get id"))
 	require.Equal(t, uint64(9007199254740993), res.ID)
 
 	// Off-by-one rounded number must fail validation
@@ -255,7 +255,7 @@ func TestRawOutputSchemaAcceptsNullForOptional(t *testing.T) {
 	sess, err := crux.NewSession(t.Context(), a)
 	require.NoError(t, err)
 	var res rawSchemaAnswer
-	require.NoError(t, sess.RunInto(context.Background(), "status", &res))
+	require.NoError(t, sess.RunInto(context.Background(), &res, "status"))
 	require.Equal(t, "ok", res.Status)
 
 	mock.Expect().ReturnText(`{"status":null}`)

@@ -480,6 +480,18 @@ func toGeminiParts(e Item, calls map[string]*genai.FunctionCall) ([]*genai.Part,
 	switch e.Kind {
 	case KindUser, KindAssistant:
 		for _, part := range e.Content {
+			if text, ok := part.InlineText(); ok {
+				parts = append(parts, genai.NewPartFromText(text))
+				continue
+			}
+			if part.Kind == ContentKindFile {
+				if part.URL != "" {
+					parts = append(parts, genai.NewPartFromURI(part.URL, part.MIME))
+				} else {
+					parts = append(parts, genai.NewPartFromBytes(part.Data, part.MIME))
+				}
+				continue
+			}
 			if part.Kind != ContentKindText && part.Kind != ContentKindRefusal {
 				return nil, fmt.Errorf("unsupported content part kind %q", part.Kind)
 			}

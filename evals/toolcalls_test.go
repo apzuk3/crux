@@ -191,7 +191,7 @@ func executeToolCallsPromptStructuredOutput(t *testing.T, modelname string) {
 	require.NoError(t, err)
 
 	var report DeliveryReport
-	err = sess.RunInto(ctx, "What is the tracking number, tracking status, and estimated delivery for order ORD-9921?", &report)
+	err = sess.RunInto(ctx, &report, "What is the tracking number, tracking status, and estimated delivery for order ORD-9921?")
 	require.NoError(t, err)
 
 	require.Equal(t, "ORD-9921", report.OrderID)

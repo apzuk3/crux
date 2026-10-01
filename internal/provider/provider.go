@@ -8,7 +8,10 @@ package provider
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"mime"
 	"net/http"
 	"slices"
 	"strings"
@@ -90,11 +93,68 @@ type ContentKind string
 const (
 	ContentKindText    ContentKind = "text"
 	ContentKindRefusal ContentKind = "refusal"
+	ContentKindFile    ContentKind = "file"
 )
 
+// ContentPart is text, a refusal or a file. A file holds its bytes, or its
+// URL when the provider downloads it.
 type ContentPart struct {
 	Kind ContentKind
 	Text string
+	Name string
+	MIME string
+	Data []byte
+	URL  string
+}
+
+// IsImage reports whether the part is an image file.
+func (p ContentPart) IsImage() bool {
+	return p.Kind == ContentKindFile && strings.HasPrefix(p.MIME, "image/")
+}
+
+// InlineText returns a text file as text the model reads inline, wrapped in a
+// tag that names it. Every provider accepts it this way, whatever the format.
+func (p ContentPart) InlineText() (string, bool) {
+	if p.Kind != ContentKindFile || p.URL != "" || !isTextMIME(p.MIME) {
+		return "", false
+	}
+	if p.Name == "" {
+		return fmt.Sprintf("<file type=%q>\n%s\n</file>", p.MIME, p.Data), true
+	}
+	return fmt.Sprintf("<file name=%q type=%q>\n%s\n</file>", p.Name, p.MIME, p.Data), true
+}
+
+// fileName returns the part's name, or "file" with an extension for its type.
+func (p ContentPart) fileName() string {
+	if p.Name != "" {
+		return p.Name
+	}
+	if exts, _ := mime.ExtensionsByType(p.MIME); len(exts) > 0 {
+		return "file" + exts[0]
+	}
+	return "file"
+}
+
+// DataURL returns the file's bytes as a base64 data URL.
+func (p ContentPart) DataURL() string {
+	return "data:" + p.MIME + ";base64," + base64.StdEncoding.EncodeToString(p.Data)
+}
+
+func isTextMIME(mimeType string) bool {
+	switch mimeType {
+	case "application/json", "application/xml", "application/yaml", "application/x-yaml":
+		return true
+	}
+	return strings.HasPrefix(mimeType, "text/") || strings.HasSuffix(mimeType, "+json") || strings.HasSuffix(mimeType, "+xml")
+}
+
+// unsupportedFile is the error for a file a provider can't take.
+func unsupportedFile(provider string, p ContentPart) error {
+	how := "as bytes"
+	if p.URL != "" {
+		how = "by URL"
+	}
+	return fmt.Errorf("%s does not accept %s files %s", provider, p.MIME, how)
 }
 
 // Item mirrors the parts of a crux log entry that providers read and write.

@@ -85,6 +85,24 @@ Session options work too: `crux.CLI(agent, crux.WithStore(store), crux.WithSessi
 
 ## Features
 
+### Images and files
+
+Pass files to `Run`, `Stream` or `RunInto` next to text, in any order:
+
+```go
+answer, err := session.Run(ctx, "What's wrong with this chart?", crux.File("q3.png"))
+```
+
+| Source | Attachment |
+|---|---|
+| A path on disk | `crux.File("q3.png")` |
+| An `fs.FS`, such as `embed.FS` | `crux.FileFS(assets, "prompts/style.pdf")` |
+| Bytes | `crux.Data(b)` |
+| An `io.Reader`, such as an upload | `crux.Reader(f).WithName(header.Filename)` |
+| A URL the provider downloads | `crux.URL("https://example.com/cat.jpg")` |
+
+crux detects the type from the content, or from the name for formats the content doesn't reveal (CSV, Markdown, ...); `WithName` and `WithMIME` set them when it can't. Images and PDFs go to the model as images and documents, and text files as inline text, on every provider. Files are read when `Run` starts, at most 20 MB each, and stored in the session log, so a resumed or forked session sends the same bytes.
+
 ### Structured output
 
 ```go
@@ -99,7 +117,7 @@ agent := crux.Must(crux.New("forecaster", crux.OpenAIGPT5_4,
 ))
 
 var forecast Forecast
-err := session.RunInto(ctx, "Describe a spring day in Paris.", &forecast)
+err := session.RunInto(ctx, &forecast, "Describe a spring day in Paris.")
 ```
 
 ### Streaming
@@ -330,7 +348,7 @@ agent := crux.Must(crux.New("assistant", crux.ClaudeHaiku4_5,
 
 ## Examples
 
-See [`examples/`](examples): `basic` (multi-tool planner with structured output), `stream`, `store`, `fork`, `subagents`, `websearch`, `filesystem`, `lifecycle` (live trace with WithEntryHandler, approvals, per-run summary from the log), `cli` (a coding agent in the terminal chat), `mcp` (chat about your Linear issues through Linear's MCP server, with OAuth login), `network` (a network assistant with DNS, whois, HTTP, sockets and servers), `domains` (a terminal chat that proposes available domain names for an idea, checked by the network toolset with RDAP and whois), `oncall` (an on-call engineer with an investigator subagent and approved rollbacks, in the terminal chat).
+See [`examples/`](examples): `basic` (multi-tool planner with structured output), `attachments` (an embedded CSV, a chart drawn in memory, files from the command line and HTTP uploads), `stream`, `store`, `fork`, `subagents`, `websearch`, `filesystem`, `lifecycle` (live trace with WithEntryHandler, approvals, per-run summary from the log), `cli` (a coding agent in the terminal chat), `mcp` (chat about your Linear issues through Linear's MCP server, with OAuth login), `network` (a network assistant with DNS, whois, HTTP, sockets and servers), `domains` (a terminal chat that proposes available domain names for an idea, checked by the network toolset with RDAP and whois), `oncall` (an on-call engineer with an investigator subagent and approved rollbacks, in the terminal chat).
 
 ## Development
 

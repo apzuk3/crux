@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -416,6 +417,31 @@ func toAnthropicMessages(log []Item) ([]anthropic.MessageParam, error) {
 	return messages, nil
 }
 
+// toAnthropicFileBlock renders a file as an image, a PDF document or text.
+func toAnthropicFileBlock(part ContentPart) (anthropic.ContentBlockParamUnion, error) {
+	if text, ok := part.InlineText(); ok {
+		return anthropic.NewTextBlock(text), nil
+	}
+	switch {
+	case part.IsImage() && part.URL != "":
+		return anthropic.NewImageBlock(anthropic.URLImageSourceParam{URL: part.URL}), nil
+	case slices.Contains([]string{"image/jpeg", "image/png", "image/gif", "image/webp"}, part.MIME):
+		return anthropic.NewImageBlockBase64(part.MIME, base64.StdEncoding.EncodeToString(part.Data)), nil
+	case part.MIME == "application/pdf":
+		var block anthropic.ContentBlockParamUnion
+		if part.URL != "" {
+			block = anthropic.NewDocumentBlock(anthropic.URLPDFSourceParam{URL: part.URL})
+		} else {
+			block = anthropic.NewDocumentBlock(anthropic.Base64PDFSourceParam{Data: base64.StdEncoding.EncodeToString(part.Data)})
+		}
+		if part.Name != "" {
+			block.OfDocument.Title = anthropic.String(part.Name)
+		}
+		return block, nil
+	}
+	return anthropic.ContentBlockParamUnion{}, unsupportedFile("anthropic", part)
+}
+
 // toAnthropicContentBlockParamUnion renders an entry as content blocks.
 func toAnthropicContentBlockParamUnion(e Item) ([]anthropic.ContentBlockParamUnion, error) {
 	if raw := e.Opaque[anthropicContentBlockOpaqueKey]; len(raw) > 0 && e.Kind != KindUser && e.Kind != KindToolResult {
@@ -435,6 +461,14 @@ func toAnthropicContentBlockParamUnion(e Item) ([]anthropic.ContentBlockParamUni
 	switch e.Kind {
 	case KindUser, KindAssistant:
 		for _, part := range e.Content {
+			if part.Kind == ContentKindFile {
+				block, err := toAnthropicFileBlock(part)
+				if err != nil {
+					return nil, err
+				}
+				blocks = append(blocks, block)
+				continue
+			}
 			if part.Kind != ContentKindText && part.Kind != ContentKindRefusal {
 				return nil, fmt.Errorf("unsupported content part kind %q", part.Kind)
 			}

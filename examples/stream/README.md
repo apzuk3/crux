@@ -38,7 +38,7 @@ Only completed provider steps enter history. Tools execute internally and may
 lead to another turn; `Turn` starts at 1 for each invocation. Concatenating every
 text chunk may include commentary or repair attempts, so use `FinalOutput` after
 successful iteration for the final answer. Approval pauses yield
-`ErrApprovalNeeded`; approve/reject as usual, then call `Stream(ctx, nil)`.
+`ErrApprovalNeeded`; approve/reject as usual, then call `Stream(ctx)`.
 
 As with `Run`, do not operate on the same session concurrently or reenter it from
 the iteration body.

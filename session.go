@@ -217,16 +217,19 @@ func (s *Session) appendLogs(ctx context.Context, entries ...Entry) error {
 	return nil
 }
 
-// Run continues the retained conversation and returns its final text response.
-// User inputs, model entries, and tool results are retained even if a later step
-// fails, so retry a failed Run with Resume: calling Run again with the same
-// input would add it to the conversation twice. Run must not execute
-// concurrently with other operations on the session.
-func (s *Session) Run(ctx context.Context, input any) (string, error) {
-	return s.run(ctx, input, nil)
+// Run sends inputs as the next user message, continues the conversation, and
+// returns the final text response. Inputs are strings, Attachments (File,
+// Data, URL, ...) and other values sent as JSON, in order; with no inputs, Run
+// continues the conversation as it is. User inputs, model entries, and tool
+// results are retained even if a later step fails, so retry a failed Run with
+// Resume: calling Run again with the same inputs would add them to the
+// conversation twice. Run must not execute concurrently with other operations
+// on the session.
+func (s *Session) Run(ctx context.Context, inputs ...any) (string, error) {
+	return s.run(ctx, inputs, nil)
 }
 
-func (s *Session) run(ctx context.Context, input any, emit chunkSink) (text string, err error) {
+func (s *Session) run(ctx context.Context, inputs []any, emit chunkSink) (text string, err error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -235,7 +238,8 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (text stri
 		return "", ErrApprovalNeeded
 	}
 
-	if input == nil && len(s.logs) == 0 {
+	hasInput := slices.ContainsFunc(inputs, func(v any) bool { return v != nil })
+	if !hasInput && len(s.logs) == 0 {
 		return "", errors.New("cannot run agent with no input and empty history")
 	}
 
@@ -246,7 +250,7 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (text stri
 
 	repairsLeft := s.agent.maxRepairs
 	var repair error // a stored answer that fails validation is repaired like a new one
-	if input == nil {
+	if !hasInput {
 		if text, ok := s.FinalOutput(); ok {
 			if validator == nil {
 				return text, nil
@@ -263,17 +267,17 @@ func (s *Session) run(ctx context.Context, input any, emit chunkSink) (text stri
 	}
 
 	var userEntry *Entry
-	if input != nil {
+	if hasInput {
 		if s.hasUnexecutedToolCalls() {
 			return "", errors.New("cannot run agent with new user input while tool calls are pending execution; call Resume first")
 		}
 		// The user turn is part of the log, so every provider sees one shape and a
 		// resumed session needs nothing but its history.
-		entry, err := NewUserEntry(input)
+		entry, err := NewUserEntry(inputs...)
 		if err != nil {
 			return "", err
 		}
-		if strings.TrimSpace(entry.Text()) == "" {
+		if strings.TrimSpace(entry.Text()) == "" && !slices.ContainsFunc(entry.Content, func(p ContentPart) bool { return p.Kind == ContentKindFile }) {
 			return "", errors.New("user input produced empty text")
 		}
 		userEntry = &entry
@@ -485,7 +489,7 @@ func latestRefusal(entries []Entry) (string, bool) {
 }
 
 func (s *Session) Resume(ctx context.Context) (string, error) {
-	return s.Run(ctx, nil)
+	return s.Run(ctx)
 }
 
 // openToolCall is a tool call that has no result yet, with the user's
@@ -690,19 +694,20 @@ func (s *Session) decide(ctx context.Context, decision Approval) error {
 	}
 }
 
-// RunInto executes the agent and decodes its final response into target.
-// target must be a non-nil pointer. Anything that is not text is decoded as JSON.
-func (s *Session) RunInto(ctx context.Context, input any, target any) error {
+// RunInto runs like Run and decodes the final response into target, which
+// must be a non-nil pointer and comes before the inputs. Anything that is not
+// text is decoded as JSON.
+func (s *Session) RunInto(ctx context.Context, target any, inputs ...any) error {
 	if target == nil {
 		return errors.New("decode target cannot be nil")
 	}
 
 	rv := reflect.ValueOf(target)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
-		return fmt.Errorf("decode target must be a non-nil pointer, got %T", target)
+		return fmt.Errorf("decode target must be a non-nil pointer, got %T (RunInto takes the target before the inputs)", target)
 	}
 
-	text, err := s.Run(ctx, input)
+	text, err := s.Run(ctx, inputs...)
 	if err != nil {
 		return err
 	}
@@ -979,11 +984,12 @@ type chunkSink func(Chunk) error
 // Stream runs the conversation when iterated, yielding text and reasoning deltas.
 // Each iterator is single-use. Breaking iteration cancels the active request and
 // stops execution. Completed steps are retained; an interrupted step is not.
-// Tools and approvals behave as in Run; use nil input to resume after approval.
+// Inputs, tools and approvals behave as in Run; call it with no inputs to resume
+// after approval.
 // Deltas may include intermediate commentary and invalid output before a repair.
 // After successful iteration, FinalOutput returns the authoritative final answer.
 // Stream must not execute concurrently with other operations on the session.
-func (s *Session) Stream(ctx context.Context, input any) iter.Seq2[Chunk, error] {
+func (s *Session) Stream(ctx context.Context, inputs ...any) iter.Seq2[Chunk, error] {
 	used := false
 	return func(yield func(Chunk, error) bool) {
 		if used {
@@ -994,7 +1000,7 @@ func (s *Session) Stream(ctx context.Context, input any) iter.Seq2[Chunk, error]
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		stopped := false
-		_, err := s.run(ctx, input, func(chunk Chunk) error {
+		_, err := s.run(ctx, inputs, func(chunk Chunk) error {
 			if !yield(chunk, nil) {
 				stopped = true
 				cancel()

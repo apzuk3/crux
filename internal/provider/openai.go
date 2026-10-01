@@ -383,6 +383,50 @@ func toOpenAIResponseInput(log []Item) (responses.ResponseInputParam, error) {
 	return input, nil
 }
 
+// toOpenAIUserContent renders a user message: a string when it is only text,
+// otherwise a list with images and files.
+func toOpenAIUserContent(parts []ContentPart) (responses.EasyInputMessageContentUnionParam, error) {
+	if !slices.ContainsFunc(parts, func(p ContentPart) bool { return p.Kind == ContentKindFile }) {
+		var text strings.Builder
+		for _, part := range parts {
+			text.WriteString(part.Text)
+		}
+		return responses.EasyInputMessageContentUnionParam{OfString: param.NewOpt(text.String())}, nil
+	}
+	list := make(responses.ResponseInputMessageContentListParam, 0, len(parts))
+	for _, part := range parts {
+		text, inline := part.InlineText()
+		switch {
+		case part.Kind == ContentKindText:
+			text, inline = part.Text, true
+		case part.Kind != ContentKindFile:
+			return responses.EasyInputMessageContentUnionParam{}, fmt.Errorf("unsupported content part kind %q", part.Kind)
+		}
+		switch {
+		case inline:
+			list = append(list, responses.ResponseInputContentUnionParam{OfInputText: &responses.ResponseInputTextParam{Text: text}})
+		case part.IsImage():
+			image := &responses.ResponseInputImageParam{Detail: responses.ResponseInputImageDetailAuto}
+			if part.URL != "" {
+				image.ImageURL = param.NewOpt(part.URL)
+			} else {
+				image.ImageURL = param.NewOpt(part.DataURL())
+			}
+			list = append(list, responses.ResponseInputContentUnionParam{OfInputImage: image})
+		default:
+			file := &responses.ResponseInputFileParam{}
+			if part.URL != "" {
+				file.FileURL = param.NewOpt(part.URL)
+			} else {
+				file.FileData = param.NewOpt(part.DataURL())
+				file.Filename = param.NewOpt(part.fileName())
+			}
+			list = append(list, responses.ResponseInputContentUnionParam{OfInputFile: file})
+		}
+	}
+	return responses.EasyInputMessageContentUnionParam{OfInputItemContentList: list}, nil
+}
+
 // toOpenAIResponseInputItemUnionParam renders an entry as an input item.
 func toOpenAIResponseInputItemUnionParam(e Item) (responses.ResponseInputItemUnionParam, error) {
 	if raw, ok := e.Opaque[openAIOutputItemOpaqueKey]; ok && len(raw) > 0 {
@@ -391,12 +435,14 @@ func toOpenAIResponseInputItemUnionParam(e Item) (responses.ResponseInputItemUni
 
 	switch e.Kind {
 	case KindUser:
+		content, err := toOpenAIUserContent(e.Content)
+		if err != nil {
+			return responses.ResponseInputItemUnionParam{}, err
+		}
 		return responses.ResponseInputItemUnionParam{
 			OfMessage: &responses.EasyInputMessageParam{
-				Role: responses.EasyInputMessageRoleUser,
-				Content: responses.EasyInputMessageContentUnionParam{
-					OfString: param.NewOpt(e.Text()),
-				},
+				Role:    responses.EasyInputMessageRoleUser,
+				Content: content,
 			},
 		}, nil
 	case KindAssistant:

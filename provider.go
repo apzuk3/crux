@@ -160,7 +160,10 @@ func toItem(e Entry) provider.Item {
 		item.Content = make([]provider.ContentPart, 0, len(e.Content))
 	}
 	for _, part := range e.Content {
-		item.Content = append(item.Content, provider.ContentPart{Kind: provider.ContentKind(part.Kind), Text: part.Text})
+		item.Content = append(item.Content, provider.ContentPart{
+			Kind: provider.ContentKind(part.Kind), Text: part.Text,
+			Name: part.Name, MIME: part.MIME, Data: part.Data, URL: part.URL,
+		})
 	}
 	if e.Reasoning != nil {
 		item.Reasoning = &provider.Reasoning{Summary: e.Reasoning.Summary}
@@ -180,7 +183,10 @@ func fromItem(item provider.Item) Entry {
 		e.Content = make([]ContentPart, 0, len(item.Content))
 	}
 	for _, part := range item.Content {
-		e.Content = append(e.Content, ContentPart{Kind: ContentKind(part.Kind), Text: part.Text})
+		e.Content = append(e.Content, ContentPart{
+			Kind: ContentKind(part.Kind), Text: part.Text,
+			Name: part.Name, MIME: part.MIME, Data: part.Data, URL: part.URL,
+		})
 	}
 	if item.Reasoning != nil {
 		e.Reasoning = &Reasoning{Summary: item.Reasoning.Summary}

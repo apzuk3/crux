@@ -159,7 +159,7 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 				var out NullableOutput
 				prompt := `Return JSON for a person named "Alice". Include email "alice@example.com", score 95, and active true.`
 
-				err = sess.RunInto(ctx, prompt, &out)
+				err = sess.RunInto(ctx, &out, prompt)
 				require.NoError(t, err)
 				require.Equal(t, "Alice", out.Name)
 				require.NotNil(t, out.Email)
@@ -180,7 +180,7 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 				var out NumericOutput
 				prompt := `Return id=9007199254740993, big_id=123456789012345678, float_val=123.456, count=42.`
 
-				err = sess.RunInto(ctx, prompt, &out)
+				err = sess.RunInto(ctx, &out, prompt)
 				require.NoError(t, err)
 				require.Equal(t, uint64(9007199254740993), out.ID) // tests decodeJSONNumber + UseNumber()
 				require.Equal(t, uint64(123456789012345678), out.BigID)
@@ -199,7 +199,7 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 					var out NestedOutput
 					prompt := `Return title="Test", items=["a","b"], details={"x":1,"y":2}, and two children.`
 
-					err = sess.RunInto(ctx, prompt, &out)
+					err = sess.RunInto(ctx, &out, prompt)
 					require.NoError(t, err)
 					require.Equal(t, "Test", out.Title)
 					require.Len(t, out.Items, 2)
@@ -228,7 +228,7 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 				var out MarkdownWrappedOutput
 				prompt := `First think step by step, then output a JSON code block containing: status="success", message="hello from markdown", count=7. Wrap the final answer in a json code block.`
 
-				err = sess.RunInto(ctx, prompt, &out)
+				err = sess.RunInto(ctx, &out, prompt)
 				require.NoError(t, err, "should successfully extract JSON from markdown fence")
 				require.Equal(t, "success", out.Status)
 				require.Contains(t, out.Message, "markdown")

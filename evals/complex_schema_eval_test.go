@@ -17,7 +17,7 @@
 //
 // 3. Execution & Unmarshaling via agent.RunInto:
 //    - The agent processes unstructured natural language input and constrains its response to the JSON schema.
-//    - agent.RunInto(ctx, prompt, &report) decodes the model output directly into the target Go struct pointer.
+//    - agent.RunInto(ctx, &report, prompt) decodes the model output directly into the target Go struct pointer.
 //
 // 4. Exact Field & Nested Data Assertions:
 //    - Verifies all top-level scalar fields (Name, StartDate, LeadEmail), floating-point precision (Budget),
@@ -140,7 +140,7 @@ func Test_ComplexStructuredOutputValidation(t *testing.T) {
 			require.NoError(t, err)
 
 			var report ProjectReport
-			err = sess.RunInto(ctx, complexSchemaPrompt, &report)
+			err = sess.RunInto(ctx, &report, complexSchemaPrompt)
 			require.NoError(t, err, "sess.RunInto should execute and decode response into ProjectReport struct")
 
 			// Validate top-level scalar and numeric fields

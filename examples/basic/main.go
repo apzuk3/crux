@@ -261,11 +261,10 @@ This is a plan only; no tickets have been booked.`),
 
 	var output Output
 	session := crux.MustSession(crux.NewSession(context.Background(), agent))
-	err := session.RunInto(context.Background(),
+	err := session.RunInto(context.Background(), &output,
 		"Plan a day trip from New York for two adults on "+tripDate+". Compare Boston and Philadelphia, "+
 			"keep round-trip transport and activities under $300 total, and choose at least two activities "+
 			"suitable for the forecast. If an activity is unavailable, find a replacement.",
-		&output,
 	)
 	if err != nil {
 		log.Fatal(err)
