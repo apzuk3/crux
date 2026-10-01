@@ -4,6 +4,8 @@ import (
 	"errors"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/apzuk3/crux/internal/provider"
+	"github.com/apzuk3/crux/internal/schema"
 	"github.com/openai/openai-go/v3"
 )
 
@@ -762,8 +764,8 @@ func init() {
 			OpenAIGPT3_5Turbo16k0613,
 		},
 		envVars: []string{"OPENAI_API_KEY", "OPENAI_APIKEY", "OPENAI_KEY"},
-		step:    (*Agent).openAIstep,
-		schema:  adaptOpenAI,
+		step:    provider.OpenAI,
+		schema:  schema.AdaptOpenAI,
 	})
 
 	registerProvider(ProviderAnthropic, providerSpec{
@@ -783,8 +785,8 @@ func init() {
 		// default options send it as Authorization when no key is set.
 		// https://github.com/anthropics/anthropic-sdk-go/blob/v1.72.0/client.go
 		envVars: []string{"ANTHROPIC_API_KEY", "ANTHROPIC_APIKEY", "ANTHROPIC_KEY"},
-		step:    (*Agent).anthropicStep,
-		schema:  adaptAnthropic,
+		step:    provider.Anthropic,
+		schema:  schema.AdaptAnthropic,
 		prepare: prepareAnthropic,
 	})
 
@@ -807,8 +809,8 @@ func init() {
 			GeminiRoboticsER2Preview, GeminiRoboticsER1_6Preview,
 		},
 		envVars: []string{"GOOGLE_API_KEY", "GOOGLE_APIKEY", "GOOGLE_KEY", "GEMINI_API_KEY", "GEMINI_APIKEY", "GEMINI_KEY"},
-		step:    (*Agent).geminiStep,
-		schema:  adaptPermissive,
+		step:    provider.Gemini,
+		schema:  schema.AdaptPermissive,
 	})
 
 	registerProvider(ProviderXAI, providerSpec{
@@ -858,8 +860,8 @@ func init() {
 		},
 		envVars: []string{"XAI_API_KEY", "XAI_APIKEY", "XAI_KEY"},
 		baseURL: "https://api.x.ai/v1",
-		step:    (*Agent).openAIstep,
-		schema:  adaptOpenAI,
+		step:    provider.OpenAI,
+		schema:  schema.AdaptOpenAI,
 	})
 
 	registerProvider(ProviderDeepSeek, providerSpec{
@@ -868,8 +870,8 @@ func init() {
 		},
 		envVars: []string{"DEEPSEEK_API_KEY", "DEEPSEEK_APIKEY", "DEEPSEEK_KEY"},
 		baseURL: "https://api.deepseek.com",
-		step:    (*Agent).openAIstep, // stateless Responses with plain-text reasoning replay
-		schema:  adaptOpenAI,
+		step:    provider.OpenAI, // stateless Responses with plain-text reasoning replay
+		schema:  schema.AdaptOpenAI,
 		prepare: prepareDeepSeek,
 	})
 
@@ -1061,8 +1063,8 @@ func init() {
 		},
 		envVars: []string{"OPENROUTER_API_KEY", "OPENROUTER_APIKEY", "OPENROUTER_KEY"},
 		baseURL: "https://openrouter.ai/api/v1",
-		step:    (*Agent).openAIstep,
-		schema:  adaptOpenAI,
+		step:    provider.OpenAI,
+		schema:  schema.AdaptOpenAI,
 		prepare: prepareOpenRouter,
 	})
 
@@ -1301,8 +1303,8 @@ func init() {
 		},
 		envVars: []string{"OLLAMA_API_KEY", "OLLAMA_APIKEY", "OLLAMA_KEY"},
 		baseURL: "http://localhost:11434/v1",
-		step:    (*Agent).openAIstep,
-		schema:  adaptOpenAI,
+		step:    provider.OpenAI,
+		schema:  schema.AdaptOpenAI,
 		prepare: prepareOllama,
 	})
 }

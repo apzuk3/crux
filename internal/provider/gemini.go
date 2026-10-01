@@ -1,4 +1,4 @@
-package crux
+package provider
 
 import (
 	"bytes"
@@ -20,18 +20,18 @@ const geminiPartOpaqueKey = "gemini.content.part"
 // Candidate metadata is retained for sources/display, not replayed as a part.
 const geminiGroundingMetadataOpaqueKey = "gemini.candidate.grounding_metadata"
 
-func (a *Agent) newGeminiClient(ctx context.Context) (*genai.Client, error) {
+func newGeminiClient(ctx context.Context, req *Request) (*genai.Client, error) {
 	config := &genai.ClientConfig{Backend: genai.BackendGeminiAPI}
-	if a.apiKey != "" {
-		config.APIKey = a.apiKey
+	if req.APIKey != "" {
+		config.APIKey = req.APIKey
 	}
-	if a.baseURL != "" {
-		config.HTTPOptions.BaseURL = a.baseURL
+	if req.BaseURL != "" {
+		config.HTTPOptions.BaseURL = req.BaseURL
 	}
-	client := a.httpClient
+	client := req.HTTPClient
 	if client == nil {
 		// genai's own default client has no timeout at all.
-		client = defaultHTTPClient()
+		client = DefaultHTTPClient()
 	}
 	config.HTTPClient = client
 	// genai retries only when asked to. Match the OpenAI and Anthropic SDKs:
@@ -45,29 +45,29 @@ func (a *Agent) newGeminiClient(ctx context.Context) (*genai.Client, error) {
 }
 
 // geminiStep returns the model's ordered parts with usage attached.
-func (a *Agent) geminiStep(ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error) {
-	contents, err := toGeminiContents(log)
+func Gemini(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
+	contents, err := toGeminiContents(req.Log)
 	if err != nil {
 		return nil, err
 	}
-	tools, err := geminiTools(a.tools)
+	tools, err := geminiTools(req.Tools)
 	if err != nil {
 		return nil, err
 	}
 	config := &genai.GenerateContentConfig{Tools: tools}
-	if a.maxTokens > 0 {
-		config.MaxOutputTokens = int32(min(a.maxTokens, math.MaxInt32))
+	if req.MaxTokens > 0 {
+		config.MaxOutputTokens = int32(min(req.MaxTokens, math.MaxInt32))
 	}
-	if a.temperature != nil {
-		temperature := float32(*a.temperature)
+	if req.Temperature != nil {
+		temperature := float32(*req.Temperature)
 		config.Temperature = &temperature
 	}
-	if a.reasoning != "" {
-		config.ThinkingConfig = geminiThinking(a.model, a.reasoning)
+	if req.Reasoning != "" {
+		config.ThinkingConfig = geminiThinking(req.Model, req.Reasoning)
 	}
-	if a.searchOptions != nil {
+	if req.Search != nil {
 		config.Tools = append(config.Tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
-		if location := a.searchOptions.UserLocation; location != nil && location.Latitude != nil && location.Longitude != nil {
+		if location := req.Search.Location; location != nil && location.Latitude != nil && location.Longitude != nil {
 			config.ToolConfig = &genai.ToolConfig{
 				RetrievalConfig: &genai.RetrievalConfig{
 					LatLng: &genai.LatLng{Latitude: location.Latitude, Longitude: location.Longitude},
@@ -75,19 +75,15 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, emit chunkSink) ([]
 			}
 		}
 	}
-	if a.instructions != "" {
-		config.SystemInstruction = &genai.Content{Parts: []*genai.Part{genai.NewPartFromText(a.instructions)}}
+	if req.Instructions != "" {
+		config.SystemInstruction = &genai.Content{Parts: []*genai.Part{genai.NewPartFromText(req.Instructions)}}
 	}
-	if a.outputSchema != nil {
-		schema, err := wireSchemaFor(a.outputSchema, a.provider)
-		if err != nil {
-			return nil, err
-		}
+	if schema := req.OutputSchema; schema != nil {
 		// Gemini before 3 rejects structured output combined with tools, so
 		// the schema goes into the instructions instead; crux validates the
 		// answer either way.
 		// https://ai.google.dev/gemini-api/docs/structured-output
-		if len(config.Tools) == 0 || geminiStructuredOutputWithTools(a.model) {
+		if len(config.Tools) == 0 || geminiStructuredOutputWithTools(req.Model) {
 			config.ResponseMIMEType = "application/json"
 			config.ResponseJsonSchema = schema
 		} else {
@@ -103,15 +99,15 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, emit chunkSink) ([]
 		}
 	}
 	// The SDK constructor can fail, so initialization errors flow through Run.
-	client, err := a.newGeminiClient(ctx)
+	client, err := newGeminiClient(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("gemini client: %w", err)
 	}
 	var response *genai.GenerateContentResponse
 	if emit == nil {
-		response, err = client.Models.GenerateContent(ctx, a.model, contents, config)
+		response, err = client.Models.GenerateContent(ctx, req.Model, contents, config)
 	} else {
-		response, err = streamGemini(ctx, client, a.model, contents, config, emit)
+		response, err = streamGemini(ctx, client, req.Model, contents, config, emit)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("gemini generate content: %w", err)
@@ -120,7 +116,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, emit chunkSink) ([]
 		// A blocked prompt has no candidates, only prompt feedback:
 		// https://ai.google.dev/api/generate-content#BlockReason
 		if feedback := response.PromptFeedback; feedback != nil && feedback.BlockReason != "" {
-			return nil, fmt.Errorf("gemini: %w: prompt blocked: %s", ErrRefused, feedback.BlockReason)
+			return nil, refused("gemini", fmt.Sprintf("prompt blocked: %s", feedback.BlockReason))
 		}
 		return nil, errors.New("gemini returned no candidates")
 	}
@@ -133,7 +129,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, emit chunkSink) ([]
 	case genai.FinishReasonSafety, genai.FinishReasonProhibitedContent, genai.FinishReasonBlocklist,
 		genai.FinishReasonSPII, genai.FinishReasonRecitation, genai.FinishReasonImageSafety,
 		genai.FinishReasonImageProhibitedContent, genai.FinishReasonImageRecitation:
-		return nil, fmt.Errorf("gemini: %w: finish reason %s", ErrRefused, candidate.FinishReason)
+		return nil, refused("gemini", fmt.Sprintf("finish reason %s", candidate.FinishReason))
 	default:
 		return nil, fmt.Errorf("gemini response did not complete: finish reason %q", candidate.FinishReason)
 	}
@@ -142,7 +138,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, emit chunkSink) ([]
 	if candidate.Content != nil {
 		parts = foldGeminiSignatures(candidate.Content.Parts)
 	}
-	produced := make([]Entry, 0, len(parts)+1)
+	produced := make([]Item, 0, len(parts)+1)
 	for i, part := range parts {
 		entry, err := fromGeminiPart(part)
 		if err != nil {
@@ -154,7 +150,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, emit chunkSink) ([]
 		// Gemini can omit call IDs. Keep a local reference without changing
 		// the original part replayed to the API.
 		if entry.ToolCall != nil && entry.ToolCall.ID == "" {
-			entry.ToolCall.ID = fmt.Sprintf("gemini-call-%d-%d", len(log), i)
+			entry.ToolCall.ID = fmt.Sprintf("gemini-call-%d-%d", req.Seq, i)
 		}
 		produced = append(produced, entry)
 	}
@@ -162,7 +158,7 @@ func (a *Agent) geminiStep(ctx context.Context, log []Entry, emit chunkSink) ([]
 		// The model may stop (finish reason STOP) without saying anything;
 		// that is still a final answer, and its usage must not be lost.
 		// https://ai.google.dev/api/generate-content#FinishReason
-		produced = append(produced, Entry{At: now, Kind: KindAssistant})
+		produced = append(produced, Item{At: now, Kind: KindAssistant})
 	}
 	if candidate.GroundingMetadata != nil {
 		raw, err := json.Marshal(candidate.GroundingMetadata)
@@ -220,14 +216,14 @@ func geminiMajorVersion(model string) int {
 // thinking budget on Gemini 2.5, which has no levels. Thought summaries are
 // requested so they can stream.
 // https://ai.google.dev/gemini-api/docs/thinking
-func geminiThinking(model string, effort ReasoningEffort) *genai.ThinkingConfig {
+func geminiThinking(model string, effort string) *genai.ThinkingConfig {
 	if major := geminiMajorVersion(model); major > 0 && major < 3 {
-		budgets := map[ReasoningEffort]int32{
+		budgets := map[string]int32{
 			ReasoningOff: 0, ReasoningLow: 1024, ReasoningMedium: 8192, ReasoningHigh: 24576, ReasoningMax: 24576,
 		}
 		return &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(budgets[effort]), IncludeThoughts: effort != ReasoningOff}
 	}
-	levels := map[ReasoningEffort]genai.ThinkingLevel{
+	levels := map[string]genai.ThinkingLevel{
 		ReasoningOff:    genai.ThinkingLevelMinimal,
 		ReasoningLow:    genai.ThinkingLevelLow,
 		ReasoningMedium: genai.ThinkingLevelMedium,
@@ -237,7 +233,7 @@ func geminiThinking(model string, effort ReasoningEffort) *genai.ThinkingConfig 
 	return &genai.ThinkingConfig{ThinkingLevel: levels[effort], IncludeThoughts: effort != ReasoningOff}
 }
 
-func streamGemini(ctx context.Context, client *genai.Client, model string, contents []*genai.Content, config *genai.GenerateContentConfig, emit chunkSink) (*genai.GenerateContentResponse, error) {
+func streamGemini(ctx context.Context, client *genai.Client, model string, contents []*genai.Content, config *genai.GenerateContentConfig, emit Emit) (*genai.GenerateContentResponse, error) {
 	// Preserve streamed parts verbatim, including signature-only parts and tool
 	// calls. Joining their text for display must not discard replay metadata.
 	candidate := &genai.Candidate{Content: &genai.Content{Role: "model"}}
@@ -350,23 +346,23 @@ func geminiTools(selected []Tool) ([]*genai.Tool, error) {
 	}
 	declarations := make([]*genai.FunctionDeclaration, 0, len(selected))
 	for _, tool := range selected {
-		if tool.schema["type"] != "object" {
-			return nil, fmt.Errorf("gemini function %q requires an object parameter schema", tool.name)
+		if tool.Schema["type"] != "object" {
+			return nil, fmt.Errorf("gemini function %q requires an object parameter schema", tool.Name)
 		}
 		declarations = append(declarations, &genai.FunctionDeclaration{
-			Name: tool.name, Description: tool.description, ParametersJsonSchema: tool.schema,
+			Name: tool.Name, Description: tool.Description, ParametersJsonSchema: tool.Schema,
 		})
 	}
 	return []*genai.Tool{{FunctionDeclarations: declarations}}, nil
 }
 
-func fromGeminiPart(part *genai.Part) (Entry, error) {
+func fromGeminiPart(part *genai.Part) (Item, error) {
 	if part == nil {
-		return Entry{}, errors.New("gemini returned a nil part")
+		return Item{}, errors.New("gemini returned a nil part")
 	}
 	raw, err := json.Marshal(part)
 	if err != nil {
-		return Entry{}, fmt.Errorf("marshal Gemini part: %w", err)
+		return Item{}, fmt.Errorf("marshal Gemini part: %w", err)
 	}
 	opaque := map[string][]byte{geminiPartOpaqueKey: raw}
 	switch {
@@ -376,20 +372,20 @@ func fromGeminiPart(part *genai.Part) (Entry, error) {
 		if call.Args != nil {
 			args, err = json.Marshal(call.Args)
 			if err != nil {
-				return Entry{}, fmt.Errorf("marshal Gemini function arguments: %w", err)
+				return Item{}, fmt.Errorf("marshal Gemini function arguments: %w", err)
 			}
 		}
-		return Entry{Kind: KindToolCall, ToolCall: &ToolCall{ID: call.ID, Name: call.Name, Args: args}, Opaque: opaque}, nil
+		return Item{Kind: KindToolCall, ToolCall: &ToolCall{ID: call.ID, Name: call.Name, Args: args}, Opaque: opaque}, nil
 	case part.Thought:
-		return Entry{Kind: KindReasoning, Reasoning: &Reasoning{Summary: part.Text}, Opaque: opaque}, nil
+		return Item{Kind: KindReasoning, Reasoning: &Reasoning{Summary: part.Text}, Opaque: opaque}, nil
 	case part.Text != "":
-		return Entry{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: part.Text}}, Opaque: opaque}, nil
+		return Item{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: part.Text}}, Opaque: opaque}, nil
 	case len(part.ThoughtSignature) > 0:
-		return Entry{Kind: KindReasoning, Reasoning: &Reasoning{}, Opaque: opaque}, nil
+		return Item{Kind: KindReasoning, Reasoning: &Reasoning{}, Opaque: opaque}, nil
 	default:
 		// Other data, such as executable code or inline media, is kept and
 		// replayed verbatim. Part types: https://ai.google.dev/api/caching#Part
-		return Entry{Kind: KindProviderTool, Opaque: opaque}, nil
+		return Item{Kind: KindProviderTool, Opaque: opaque}, nil
 	}
 }
 
@@ -425,14 +421,11 @@ func geminiSignatureOnly(part *genai.Part) bool {
 }
 
 // toGeminiContents groups consecutive parts by role.
-func toGeminiContents(log []Entry) ([]*genai.Content, error) {
+func toGeminiContents(log []Item) ([]*genai.Content, error) {
 	var contents []*genai.Content
 	calls := make(map[string]*genai.FunctionCall)
 	for _, e := range log {
 		if e.Kind == KindProviderTool && len(e.Opaque[geminiPartOpaqueKey]) == 0 {
-			continue
-		}
-		if e.HiddenFromModel() {
 			continue
 		}
 		parts, err := toGeminiParts(e, calls)
@@ -475,7 +468,7 @@ func toGeminiContents(log []Entry) ([]*genai.Content, error) {
 var geminiStandInSignature, _ = base64.URLEncoding.DecodeString("skip_thought_signature_validator")
 
 // toGeminiParts renders an entry as content parts.
-func toGeminiParts(e Entry, calls map[string]*genai.FunctionCall) ([]*genai.Part, error) {
+func toGeminiParts(e Item, calls map[string]*genai.FunctionCall) ([]*genai.Part, error) {
 	if raw := e.Opaque[geminiPartOpaqueKey]; len(raw) > 0 && e.Kind != KindUser && e.Kind != KindToolResult {
 		var part genai.Part
 		if err := json.Unmarshal(raw, &part); err != nil {

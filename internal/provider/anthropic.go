@@ -1,4 +1,4 @@
-package crux
+package provider
 
 import (
 	"context"
@@ -19,21 +19,21 @@ const anthropicContentBlockOpaqueKey = "anthropic.message.content_block"
 // anthropicUnknownContentBlockOpaqueKey holds blocks the SDK cannot replay.
 const anthropicUnknownContentBlockOpaqueKey = "anthropic.message.unknown_content_block"
 
-func (a *Agent) newAnthropicClient() *anthropic.Client {
+func newAnthropicClient(req *Request) *anthropic.Client {
 	var opts []option.RequestOption
-	if a.apiKey != "" {
-		opts = append(opts, option.WithAPIKey(a.apiKey))
+	if req.APIKey != "" {
+		opts = append(opts, option.WithAPIKey(req.APIKey))
 	}
 
-	if a.baseURL != "" {
-		opts = append(opts, option.WithBaseURL(a.baseURL))
+	if req.BaseURL != "" {
+		opts = append(opts, option.WithBaseURL(req.BaseURL))
 	}
 
-	client := a.httpClient
+	client := req.HTTPClient
 	if client == nil {
 		// The SDK would fall back to http.DefaultClient, which never times out
 		// a server that accepts a streaming request but does not answer.
-		client = defaultHTTPClient()
+		client = DefaultHTTPClient()
 	}
 	opts = append(opts, option.WithHTTPClient(client))
 
@@ -47,31 +47,31 @@ const defaultAnthropicMaxTokens = 16384
 
 // anthropicStep returns ordered blocks with usage, resuming paused server turns
 // internally until the model finishes or requests a local tool.
-func (a *Agent) anthropicStep(ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error) {
-	messages, err := toAnthropicMessages(log)
+func Anthropic(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
+	messages, err := toAnthropicMessages(req.Log)
 	if err != nil {
 		return nil, err
 	}
-	tools, err := anthropicTools(a.tools)
+	tools, err := anthropicTools(req.Tools)
 	if err != nil {
 		return nil, err
 	}
 	params := anthropic.MessageNewParams{
-		Model: a.model, Messages: messages, Tools: tools,
+		Model: req.Model, Messages: messages, Tools: tools,
 		MaxTokens: defaultAnthropicMaxTokens,
 	}
-	if a.maxTokens > 0 {
-		params.MaxTokens = int64(a.maxTokens)
+	if req.MaxTokens > 0 {
+		params.MaxTokens = int64(req.MaxTokens)
 	}
-	if a.temperature != nil {
-		params.Temperature = anthropic.Float(*a.temperature)
+	if req.Temperature != nil {
+		params.Temperature = anthropic.Float(*req.Temperature)
 	}
-	if a.instructions != "" {
-		params.System = []anthropic.TextBlockParam{{Text: a.instructions}}
+	if req.Instructions != "" {
+		params.System = []anthropic.TextBlockParam{{Text: req.Instructions}}
 	}
-	if a.searchOptions != nil {
+	if req.Search != nil {
 		tool := &anthropic.WebSearchTool20250305Param{}
-		if location := a.searchOptions.UserLocation; location != nil {
+		if location := req.Search.Location; location != nil {
 			if location.Country != "" {
 				tool.UserLocation.Country = anthropic.String(location.Country)
 			}
@@ -89,25 +89,21 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, emit chunkSink) 
 			OfWebSearchTool20250305: tool,
 		})
 	}
-	if a.outputSchema != nil {
-		schema, err := wireSchemaFor(a.outputSchema, a.provider)
-		if err != nil {
-			return nil, err
-		}
+	if schema := req.OutputSchema; schema != nil {
 		params.OutputConfig = anthropic.OutputConfigParam{
 			Format: anthropic.JSONOutputFormatParam{Schema: schema},
 		}
 	}
-	if err := a.setAnthropicReasoning(&params); err != nil {
+	if err := setAnthropicReasoning(req, &params); err != nil {
 		return nil, err
 	}
 	setAnthropicCacheBreakpoints(&params)
-	client := a.newAnthropicClient()
+	client := newAnthropicClient(req)
 	now := time.Now().UTC()
 	// Bound server-side continuation independently of the agent's tool turns.
 	const maxContinuations = 10
 	var (
-		produced              []Entry
+		produced              []Item
 		totalInputTokens      int
 		totalOutputTokens     int
 		totalCacheReadTokens  int
@@ -118,7 +114,7 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, emit chunkSink) 
 	// judged from max_tokens, so those stream without emitting chunks.
 	if emit == nil {
 		if _, err := anthropic.CalculateNonStreamingTimeout(int(params.MaxTokens), params.Model, nil); err != nil {
-			emit = func(Chunk) error { return nil }
+			emit = func(ChunkKind, string) error { return nil }
 		}
 	}
 
@@ -138,7 +134,7 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, emit chunkSink) 
 		switch response.StopReason {
 		case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence, anthropic.StopReasonToolUse, anthropic.StopReasonPauseTurn:
 		case anthropic.StopReasonRefusal:
-			return nil, fmt.Errorf("anthropic: %w", ErrRefused)
+			return nil, refused("anthropic", "")
 		case anthropic.StopReasonMaxTokens:
 			return nil, fmt.Errorf("anthropic response hit the %d output token limit; raise it with crux.WithMaxTokens", params.MaxTokens)
 		default:
@@ -171,7 +167,7 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, emit chunkSink) 
 				// still a final answer, and its usage must not be lost. See
 				// "Empty responses with end_turn":
 				// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons
-				produced = append(produced, Entry{At: now, Kind: KindAssistant})
+				produced = append(produced, Item{At: now, Kind: KindAssistant})
 			}
 			produced[len(produced)-1].Response = &ResponseInfo{ID: response.ID}
 			produced[len(produced)-1].Usage = &Usage{
@@ -199,7 +195,7 @@ func (a *Agent) anthropicStep(ctx context.Context, log []Entry, emit chunkSink) 
 
 // anthropicThinkingBudgets are the thinking budgets of models without
 // adaptive thinking. A budget must be at least 1024 and below max_tokens.
-var anthropicThinkingBudgets = map[ReasoningEffort]int64{
+var anthropicThinkingBudgets = map[string]int64{
 	ReasoningLow: 2048, ReasoningMedium: 8192, ReasoningHigh: 16384, ReasoningMax: 32768,
 }
 
@@ -208,21 +204,21 @@ var anthropicThinkingBudgets = map[ReasoningEffort]int64{
 // it. Models that always think reject disabled thinking, so ReasoningOff uses
 // their lowest effort. The thinking summary is requested so it can stream.
 // https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
-func (a *Agent) setAnthropicReasoning(params *anthropic.MessageNewParams) error {
-	if a.reasoning == "" {
+func setAnthropicReasoning(req *Request, params *anthropic.MessageNewParams) error {
+	if req.Reasoning == "" {
 		return nil
 	}
-	major, minor, family := claudeVersion(a.model)
+	major, minor, family := claudeVersion(req.Model)
 	budgetThinking := major > 0 && (major < 4 || major == 4 && minor < 6)
 	alwaysThinks := family == "fable" || family == "mythos" || major == 5 && minor >= 5 || major > 5
 	switch {
-	case a.reasoning == ReasoningOff && alwaysThinks:
+	case req.Reasoning == ReasoningOff && alwaysThinks:
 		params.OutputConfig.Effort = anthropic.OutputConfigEffortLow
-	case a.reasoning == ReasoningOff:
+	case req.Reasoning == ReasoningOff:
 		params.Thinking = anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}}
 	case budgetThinking:
-		budget := anthropicThinkingBudgets[a.reasoning]
-		if a.maxTokens == 0 {
+		budget := anthropicThinkingBudgets[req.Reasoning]
+		if req.MaxTokens == 0 {
 			params.MaxTokens = budget + defaultAnthropicMaxTokens
 		}
 		budget = min(budget, params.MaxTokens-1)
@@ -234,7 +230,7 @@ func (a *Agent) setAnthropicReasoning(params *anthropic.MessageNewParams) error 
 		params.Thinking = anthropic.ThinkingConfigParamUnion{OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{
 			Display: anthropic.ThinkingConfigAdaptiveDisplaySummarized,
 		}}
-		params.OutputConfig.Effort = anthropic.OutputConfigEffort(a.reasoning)
+		params.OutputConfig.Effort = anthropic.OutputConfigEffort(req.Reasoning)
 	}
 	return nil
 }
@@ -287,7 +283,7 @@ func setAnthropicCacheBreakpoints(params *anthropic.MessageNewParams) {
 	}
 }
 
-func streamAnthropic(ctx context.Context, client *anthropic.Client, params anthropic.MessageNewParams, emit chunkSink) (*anthropic.Message, error) {
+func streamAnthropic(ctx context.Context, client *anthropic.Client, params anthropic.MessageNewParams, emit Emit) (*anthropic.Message, error) {
 	stream := client.Messages.NewStreaming(ctx, params)
 	defer stream.Close()
 	var response anthropic.Message
@@ -337,58 +333,58 @@ func streamAnthropic(ctx context.Context, client *anthropic.Client, params anthr
 func anthropicTools(selected []Tool) ([]anthropic.ToolUnionParam, error) {
 	tools := make([]anthropic.ToolUnionParam, 0, len(selected))
 	for _, tool := range selected {
-		if tool.schema["type"] != "object" {
-			return nil, fmt.Errorf("anthropic tool %q requires an object input schema", tool.name)
+		if tool.Schema["type"] != "object" {
+			return nil, fmt.Errorf("anthropic tool %q requires an object input schema", tool.Name)
 		}
-		raw, err := json.Marshal(tool.schema)
+		raw, err := json.Marshal(tool.Schema)
 		if err != nil {
-			return nil, fmt.Errorf("marshal tool %q schema: %w", tool.name, err)
+			return nil, fmt.Errorf("marshal tool %q schema: %w", tool.Name, err)
 		}
 		var schema anthropic.ToolInputSchemaParam
 		if err := json.Unmarshal(raw, &schema); err != nil {
-			return nil, fmt.Errorf("decode tool %q schema: %w", tool.name, err)
+			return nil, fmt.Errorf("decode tool %q schema: %w", tool.Name, err)
 		}
 		// The SDK's param decoder does not retain unknown schema keywords.
 		schema.ExtraFields = make(map[string]any)
-		for key, value := range tool.schema {
+		for key, value := range tool.Schema {
 			if key != "type" && key != "properties" && key != "required" {
 				schema.ExtraFields[key] = value
 			}
 		}
 		tools = append(tools, anthropic.ToolUnionParam{OfTool: &anthropic.ToolParam{
-			Name: tool.name, Description: anthropic.String(tool.description), InputSchema: schema,
+			Name: tool.Name, Description: anthropic.String(tool.Description), InputSchema: schema,
 		}})
 	}
 	return tools, nil
 }
 
-func fromAnthropicContentBlock(block anthropic.ContentBlockUnion) (Entry, error) {
+func fromAnthropicContentBlock(block anthropic.ContentBlockUnion) (Item, error) {
 	opaque := map[string][]byte{anthropicContentBlockOpaqueKey: []byte(block.RawJSON())}
 	switch v := block.AsAny().(type) {
 	case anthropic.TextBlock:
-		return Entry{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: v.Text}}, Opaque: opaque}, nil
+		return Item{Kind: KindAssistant, Content: []ContentPart{{Kind: ContentKindText, Text: v.Text}}, Opaque: opaque}, nil
 	case anthropic.ThinkingBlock:
-		return Entry{Kind: KindReasoning, Reasoning: &Reasoning{Summary: v.Thinking}, Opaque: opaque}, nil
+		return Item{Kind: KindReasoning, Reasoning: &Reasoning{Summary: v.Thinking}, Opaque: opaque}, nil
 	case anthropic.RedactedThinkingBlock:
-		return Entry{Kind: KindReasoning, Reasoning: &Reasoning{}, Opaque: opaque}, nil
+		return Item{Kind: KindReasoning, Reasoning: &Reasoning{}, Opaque: opaque}, nil
 	// Server tools run on Anthropic's side; their blocks are replayed as-is.
 	// https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools
 	case anthropic.ServerToolUseBlock, anthropic.WebSearchToolResultBlock, anthropic.WebFetchToolResultBlock,
 		anthropic.CodeExecutionToolResultBlock, anthropic.BashCodeExecutionToolResultBlock,
 		anthropic.TextEditorCodeExecutionToolResultBlock, anthropic.ToolSearchToolResultBlock, anthropic.ContainerUploadBlock:
-		return Entry{Kind: KindProviderTool, Opaque: opaque}, nil
+		return Item{Kind: KindProviderTool, Opaque: opaque}, nil
 	case anthropic.ToolUseBlock:
-		return Entry{Kind: KindToolCall, ToolCall: &ToolCall{
+		return Item{Kind: KindToolCall, ToolCall: &ToolCall{
 			ID: v.ID, Name: v.Name, Args: v.Input,
 		}, Opaque: opaque}, nil
 	default:
 		// Keep blocks this SDK does not know for inspection; they are not replayed.
-		return Entry{Kind: KindProviderTool, Opaque: map[string][]byte{anthropicUnknownContentBlockOpaqueKey: []byte(block.RawJSON())}}, nil
+		return Item{Kind: KindProviderTool, Opaque: map[string][]byte{anthropicUnknownContentBlockOpaqueKey: []byte(block.RawJSON())}}, nil
 	}
 }
 
 // toAnthropicMessages groups consecutive blocks by role.
-func toAnthropicMessages(log []Entry) ([]anthropic.MessageParam, error) {
+func toAnthropicMessages(log []Item) ([]anthropic.MessageParam, error) {
 	var messages []anthropic.MessageParam
 	appendBlocks := func(role anthropic.MessageParamRole, blocks ...anthropic.ContentBlockParamUnion) {
 		if len(blocks) == 0 {
@@ -402,9 +398,6 @@ func toAnthropicMessages(log []Entry) ([]anthropic.MessageParam, error) {
 	}
 	for _, e := range log {
 		if e.Kind == KindProviderTool && len(e.Opaque[anthropicContentBlockOpaqueKey]) == 0 {
-			continue
-		}
-		if e.HiddenFromModel() {
 			continue
 		}
 		if e.Kind == KindReasoning && len(e.Opaque[anthropicContentBlockOpaqueKey]) == 0 {
@@ -424,7 +417,7 @@ func toAnthropicMessages(log []Entry) ([]anthropic.MessageParam, error) {
 }
 
 // toAnthropicContentBlockParamUnion renders an entry as content blocks.
-func toAnthropicContentBlockParamUnion(e Entry) ([]anthropic.ContentBlockParamUnion, error) {
+func toAnthropicContentBlockParamUnion(e Item) ([]anthropic.ContentBlockParamUnion, error) {
 	if raw := e.Opaque[anthropicContentBlockOpaqueKey]; len(raw) > 0 && e.Kind != KindUser && e.Kind != KindToolResult {
 		var block anthropic.ContentBlockUnion
 		if err := json.Unmarshal(raw, &block); err != nil {

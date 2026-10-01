@@ -1,4 +1,4 @@
-package crux
+package network
 
 import (
 	"context"
@@ -18,12 +18,14 @@ const (
 	whoisMaxShown = 64 << 10
 )
 
-type whoisInput struct {
+// WhoisInput holds the arguments of Whois.
+type WhoisInput struct {
 	Query  string `json:"query" description:"Domain name, IP address or AS number (such as AS15169)"`
 	Server string `json:"server,omitempty" description:"Whois server to start at; default whois.iana.org"`
 }
 
-func (t *NetworkToolset) whois(ctx context.Context, in whoisInput) (string, error) {
+// Whois looks up whois registration data, following referrals.
+func (t *Tools) Whois(ctx context.Context, in WhoisInput) (string, error) {
 	query := strings.TrimSpace(in.Query)
 	if query == "" || strings.ContainsAny(query, "\r\n") {
 		return "", errors.New("query must be one line of text")
@@ -68,7 +70,7 @@ func whoisAddress(server string) string {
 	return net.JoinHostPort(server, "43")
 }
 
-func (t *NetworkToolset) whoisQuery(ctx context.Context, address, query string) (string, error) {
+func (t *Tools) whoisQuery(ctx context.Context, address, query string) (string, error) {
 	conn, err := t.dial(ctx, "tcp", address, false)
 	if err != nil {
 		return "", err

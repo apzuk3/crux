@@ -1,8 +1,8 @@
 package crux
 
 import (
-	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -142,34 +142,6 @@ type ToolCall struct {
 	Agent string `json:"agent,omitempty"`
 }
 
-// normalizeToolArgs keeps arguments that are not valid JSON as a JSON string,
-// so the entry can still be stored and the tool reports the problem to the model.
-func normalizeToolArgs(raw string) json.RawMessage {
-	if raw == "" || json.Valid([]byte(raw)) {
-		return json.RawMessage(raw)
-	}
-	quoted, _ := json.Marshal(raw)
-	return quoted
-}
-
-// rawArgs returns the arguments as the model sent them, undoing normalizeToolArgs.
-func (c *ToolCall) rawArgs() string {
-	var raw string
-	if len(c.Args) > 0 && c.Args[0] == '"' && json.Unmarshal(c.Args, &raw) == nil {
-		return raw
-	}
-	return string(c.Args)
-}
-
-// objectArgs returns the arguments as a JSON object, for providers that
-// reject anything else when history is replayed.
-func (c *ToolCall) objectArgs() json.RawMessage {
-	if trimmed := bytes.TrimSpace(c.Args); len(trimmed) > 0 && trimmed[0] == '{' {
-		return c.Args
-	}
-	return json.RawMessage(`{}`)
-}
-
 type ToolResult struct {
 	CallID string `json:"call_id"` // references ToolCall.ID
 	Output string `json:"output,omitempty"`
@@ -245,3 +217,22 @@ type Usage struct {
 	CacheReadTokens  int `json:"cache_read_tokens,omitempty"`
 	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
+
+var (
+	// ErrToolNotFound is returned when an agent selects a tool that is not registered.
+	ErrToolNotFound = errors.New("tool not found")
+	// ErrApprovalNeeded is returned by Run when a tool call waits for Approve or Reject.
+	ErrApprovalNeeded = errors.New("approval needed")
+	// ErrOutputValidation wraps output that does not match the agent's output schema.
+	ErrOutputValidation = errors.New("output validation failed")
+	// ErrSessionNotFound is returned by a Store that has no entries for a session.
+	ErrSessionNotFound = errors.New("session not found")
+	// ErrSessionConflict is returned by a Store when another writer already
+	// appended entries to the session. Load the session again with
+	// WithSessionID and retry.
+	ErrSessionConflict = errors.New("session was changed by another writer")
+	// ErrMaxTurns is returned by Run when the agent used all its turns without a final answer.
+	ErrMaxTurns = errors.New("max turns reached")
+	// ErrRefused is returned by Run when the model refuses the request.
+	ErrRefused = errors.New("model refused the request")
+)

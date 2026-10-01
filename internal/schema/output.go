@@ -1,4 +1,4 @@
-package crux
+package schema
 
 import (
 	"encoding/json"
@@ -25,29 +25,22 @@ func decodeJSONNumber(r io.Reader, target any) error {
 	return nil
 }
 
-// wireSchemaFor adapts a jsonschema.Schema for a specific provider's wire format.
-func wireSchemaFor(schema *jsonschema.Schema, provider Provider) (map[string]any, error) {
+// Wire turns an output schema into the map the provider adapters work on.
+// A nil schema gives nil.
+func Wire(schema *jsonschema.Schema) (map[string]any, error) {
 	if schema == nil {
 		return nil, nil
 	}
-
 	raw, err := json.Marshal(schema)
 	if err != nil {
 		return nil, fmt.Errorf("marshal output schema: %w", err)
 	}
-
 	var m map[string]any
 	if err := decodeJSONNumber(strings.NewReader(string(raw)), &m); err != nil {
 		return nil, fmt.Errorf("decode output schema: %w", err)
 	}
-
 	cleanBaseSchema(m)
-
-	spec, ok := providerSpecs[provider]
-	if !ok {
-		return m, nil
-	}
-	return spec.schema(m, provider)
+	return m, nil
 }
 
 func cleanBaseSchema(m map[string]any) {
@@ -55,7 +48,7 @@ func cleanBaseSchema(m map[string]any) {
 	delete(m, "$id")
 }
 
-// adaptOpenAI adapts schemas for OpenAI and OpenAI-compatible endpoints using strict structured outputs.
+// AdaptOpenAI adapts schemas for OpenAI and OpenAI-compatible endpoints using strict structured outputs.
 // Official documentation:
 //   - OpenAI Structured Outputs: https://platform.openai.com/docs/guides/structured-outputs
 //   - xAI API Reference: https://docs.x.ai/api
@@ -70,9 +63,9 @@ func cleanBaseSchema(m map[string]any) {
 //   - Dynamic map/dictionary schemas (arbitrary keys) are rejected in strict mode.
 //   - The root must be an object (Ollama excepted):
 //     https://platform.openai.com/docs/guides/structured-outputs#supported-schemas
-func adaptOpenAI(root map[string]any, provider Provider) (map[string]any, error) {
+func AdaptOpenAI(root map[string]any, provider string) (map[string]any, error) {
 	// Ollama does not enforce strict mode and accepts any root.
-	if provider != ProviderOllama {
+	if provider != "ollama" {
 		if typ, ok := root["type"]; ok && typ != "object" {
 			return nil, fmt.Errorf("%s structured outputs require an object at the root of the output schema, got type %v; wrap the value in a struct field", provider, typ)
 		}
@@ -126,7 +119,7 @@ func adaptOpenAI(root map[string]any, provider Provider) (map[string]any, error)
 	return root, err
 }
 
-// adaptAnthropic adapts schemas for Anthropic Claude structured outputs.
+// AdaptAnthropic adapts schemas for Anthropic Claude structured outputs.
 // Official documentation:
 //   - Anthropic Structured Outputs: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
 //
@@ -137,7 +130,7 @@ func adaptOpenAI(root map[string]any, provider Provider) (map[string]any, error)
 //     supported as schema keywords ("JSON Schema limitations" in the page
 //     above), so they move into the description of the schema that had them.
 //     Output validation still enforces them.
-func adaptAnthropic(root map[string]any, _ Provider) (map[string]any, error) {
+func AdaptAnthropic(root map[string]any, _ string) (map[string]any, error) {
 	err := walkSchemas(root, func(m map[string]any) error {
 		moveToDescription(m, anthropicUnsupportedKeywords)
 		if minItems, ok := m["minItems"]; ok && !isZeroOrOne(minItems) {
@@ -201,14 +194,14 @@ func isZeroOrOne(value any) bool {
 	return false
 }
 
-// adaptPermissive adapts schemas for providers supporting dynamic dictionaries (Google Gemini).
+// AdaptPermissive adapts schemas for providers supporting dynamic dictionaries (Google Gemini).
 // Official documentation:
 //   - Gemini Structured Outputs: https://ai.google.dev/gemini-api/docs/structured-output
 //
 // Requirements:
 //   - Supports dynamic map schemas via "additionalProperties".
 //   - For objects without specified additionalProperties, locks them with false.
-func adaptPermissive(root map[string]any, _ Provider) (map[string]any, error) {
+func AdaptPermissive(root map[string]any, _ string) (map[string]any, error) {
 	err := walkSchemas(root, func(m map[string]any) error {
 		isObject := m["type"] == "object" || m["properties"] != nil
 		if !isObject {
@@ -305,10 +298,10 @@ func allowsNull(prop map[string]any) bool {
 	return false
 }
 
-// compileValidator compiles a JSON Schema validator using Draft 2020-12.
+// CompileOutput compiles a JSON Schema validator using Draft 2020-12.
 // Optional properties also accept null, because that is how strict providers
-// are told to leave them out (see adaptOpenAI).
-func compileValidator(schema *jsonschema.Schema) (*sjs.Schema, error) {
+// are told to leave them out (see AdaptOpenAI).
+func CompileOutput(schema *jsonschema.Schema) (*sjs.Schema, error) {
 	if schema == nil {
 		return nil, nil
 	}
@@ -354,28 +347,29 @@ func compileValidator(schema *jsonschema.Schema) (*sjs.Schema, error) {
 	return compiler.Compile("output.json")
 }
 
-// validateOutput validates the output string against the pre-compiled validator.
-func validateOutput(validator *sjs.Schema, text string) error {
+// ValidateOutput validates the output string against the pre-compiled validator.
+// A nil validator accepts anything.
+func ValidateOutput(validator *sjs.Schema, text string) error {
 	if validator == nil {
 		return nil
 	}
-	for _, candidate := range jsonCandidates(text) {
+	for _, candidate := range JSONCandidates(text) {
 		var doc any
 		if decodeJSONNumber(strings.NewReader(candidate), &doc) != nil {
 			continue
 		}
 		if err := validator.Validate(doc); err != nil {
-			return fmt.Errorf("%w: %v", ErrOutputValidation, err)
+			return err
 		}
 		return nil
 	}
-	return fmt.Errorf("%w: invalid json: output could not be parsed as JSON", ErrOutputValidation)
+	return errors.New("invalid json: output could not be parsed as JSON")
 }
 
-// jsonCandidates returns the forms a model's JSON answer may take: the whole
+// JSONCandidates returns the forms a model's JSON answer may take: the whole
 // text, trimmed, and the content of a fenced code block (```json ... ```) in
 // it, if there is one.
-func jsonCandidates(text string) []string {
+func JSONCandidates(text string) []string {
 	clean := strings.TrimSpace(text)
 	candidates := []string{clean}
 	start := strings.Index(clean, "```")

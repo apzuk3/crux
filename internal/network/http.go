@@ -1,4 +1,4 @@
-package crux
+package network
 
 import (
 	"cmp"
@@ -18,7 +18,7 @@ import (
 // httpTransport returns the toolset's shared transport for public-only or
 // policy-checked requests. Proxies from the environment are not used: the
 // proxy would be dialed instead of the checked host.
-func (t *NetworkToolset) httpTransport(publicOnly bool) *http.Transport {
+func (t *Tools) httpTransport(publicOnly bool) *http.Transport {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.transports == nil {
@@ -40,7 +40,8 @@ func (t *NetworkToolset) httpTransport(publicOnly bool) *http.Transport {
 	return tr
 }
 
-type httpGetInput struct {
+// HTTPGetInput holds the arguments of HTTPGet.
+type HTTPGetInput struct {
 	URL             string            `json:"url" description:"http or https URL"`
 	Method          string            `json:"method,omitempty" description:"GET (default) or HEAD"`
 	Headers         map[string]string `json:"headers,omitempty" description:"Request headers"`
@@ -49,7 +50,8 @@ type httpGetInput struct {
 	MaxBytes        *int              `json:"max_bytes,omitempty" description:"Most body bytes to return; default 65536, at most 1048576"`
 }
 
-type httpRequestInput struct {
+// HTTPRequestInput holds the arguments of HTTPRequest.
+type HTTPRequestInput struct {
 	Method          string            `json:"method,omitempty" description:"HTTP method; default GET"`
 	URL             string            `json:"url" description:"http or https URL"`
 	Headers         map[string]string `json:"headers,omitempty" description:"Request headers"`
@@ -60,22 +62,24 @@ type httpRequestInput struct {
 	MaxBytes        *int              `json:"max_bytes,omitempty" description:"Most body bytes to return; default 65536, at most 1048576"`
 }
 
-func (t *NetworkToolset) httpGet(ctx context.Context, in httpGetInput) (string, error) {
+// HTTPGet fetches a public URL with GET or HEAD.
+func (t *Tools) HTTPGet(ctx context.Context, in HTTPGetInput) (string, error) {
 	method := cmp.Or(strings.ToUpper(in.Method), http.MethodGet)
 	if method != http.MethodGet && method != http.MethodHead {
 		return "", fmt.Errorf("http_get only sends GET or HEAD; use http_request for %s", method)
 	}
-	return t.doHTTP(ctx, httpRequestInput{
+	return t.doHTTP(ctx, HTTPRequestInput{
 		Method: method, URL: in.URL, Headers: in.Headers,
 		FollowRedirects: in.FollowRedirects, TimeoutMS: in.TimeoutMS, MaxBytes: in.MaxBytes,
 	}, true)
 }
 
-func (t *NetworkToolset) httpRequest(ctx context.Context, in httpRequestInput) (string, error) {
+// HTTPRequest sends any HTTP request to an allowed host.
+func (t *Tools) HTTPRequest(ctx context.Context, in HTTPRequestInput) (string, error) {
 	return t.doHTTP(ctx, in, false)
 }
 
-func (t *NetworkToolset) doHTTP(ctx context.Context, in httpRequestInput, publicOnly bool) (string, error) {
+func (t *Tools) doHTTP(ctx context.Context, in HTTPRequestInput, publicOnly bool) (string, error) {
 	u, err := url.Parse(in.URL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return "", fmt.Errorf("url %q must be an http or https URL", in.URL)
@@ -194,13 +198,15 @@ type httpRoute struct {
 	Body    string            `json:"body,omitempty" description:"Response body"`
 }
 
-type httpServeInput struct {
+// HTTPServeInput holds the arguments of HTTPServe.
+type HTTPServeInput struct {
 	Address       string      `json:"address" description:"host:port to listen on. A port alone, such as :8080, listens on 127.0.0.1; port 0 picks a free one"`
 	Routes        []httpRoute `json:"routes,omitempty" description:"Fixed responses by path"`
 	DefaultStatus int         `json:"default_status,omitempty" description:"Status for requests no route matches; default 404"`
 }
 
-func (t *NetworkToolset) httpServe(ctx context.Context, in httpServeInput) (string, error) {
+// HTTPServe starts an HTTP server with fixed responses.
+func (t *Tools) HTTPServe(ctx context.Context, in HTTPServeInput) (string, error) {
 	address, err := listenAddress("tcp", in.Address)
 	if err != nil {
 		return "", err

@@ -1,4 +1,7 @@
-package crux
+// Package network implements the network tools: DNS, whois, HTTP, sockets,
+// listeners and servers, with every dial checked against an address policy.
+// The crux package registers them as the "network" toolset.
+package network
 
 import (
 	"bytes"
@@ -10,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"net"
 	"net/http"
 	"net/netip"
@@ -27,26 +29,8 @@ import (
 	"github.com/coder/websocket"
 )
 
-// Network tool names.
 const (
-	NetDNSLookup   = "dns_lookup"
-	NetWhois       = "whois"
-	NetHTTPGet     = "http_get"
-	NetHTTPRequest = "http_request"
-	NetConnect     = "net_connect"
-	NetSend        = "net_send"
-	NetRead        = "net_read"
-	NetList        = "net_list"
-	NetClose       = "net_close"
-	NetListen      = "net_listen"
-	NetHTTPServe   = "http_serve"
-)
-
-// ToolsetNetwork is the name of the toolset registered by Network.
-const ToolsetNetwork = "network"
-
-const (
-	netMaxHandles        = 32
+	MaxHandles           = 32      // open handles per toolset
 	netMaxBuffer         = 1 << 20 // bytes buffered per handle
 	netDefaultReadWait   = time.Second
 	netMaxReadWait       = 30 * time.Second
@@ -60,146 +44,39 @@ const (
 	netMaxHTTPBytes      = 1 << 20
 )
 
-// netApprovalDefaults says which tools need approval: those that send data
-// the model chose or open a port. http_get only reaches public addresses.
-var netApprovalDefaults = map[string]bool{
-	NetDNSLookup:   false,
-	NetWhois:       false,
-	NetHTTPGet:     false,
-	NetHTTPRequest: true,
-	NetConnect:     true,
-	NetSend:        true,
-	NetRead:        false,
-	NetList:        false,
-	NetClose:       false,
-	NetListen:      true,
-	NetHTTPServe:   true,
-}
-
-// NetworkOption configures the Network toolset.
-type NetworkOption func(*networkConfig)
-
-type networkConfig struct {
-	private  bool
-	hosts    []string
-	approval []approvalRule
-}
-
-// WithNetworkPrivate sets whether the tools may reach loopback, private,
-// link-local (including cloud metadata at 169.254.169.254), CGNAT and
-// unique-local addresses, and unix sockets. The default is true. The check
-// is made on the address actually dialed, after DNS and on every redirect.
-// http_get never reaches them, whatever this says.
-func WithNetworkPrivate(allowed bool) NetworkOption {
-	return func(c *networkConfig) { c.private = allowed }
-}
-
-// WithNetworkHosts limits the tools to these hosts: exact names, wildcards
-// such as "*.example.com", IP addresses or CIDR ranges such as
-// "10.0.0.0/8". A host is allowed when its name matches, or when an address
-// it resolves to is in a listed range. Listening is not limited.
-func WithNetworkHosts(patterns ...string) NetworkOption {
-	return func(c *networkConfig) { c.hosts = append(c.hosts, patterns...) }
-}
-
-// WithNetworkApprovalNeeded sets whether the named tools, or all of them when
-// none are named, need approval. Later options win.
-func WithNetworkApprovalNeeded(needed bool, tools ...string) NetworkOption {
-	return func(c *networkConfig) {
-		c.approval = append(c.approval, approvalRule{needed: needed, tools: tools})
-	}
-}
-
-// NetworkToolset is the toolset returned by Network. Its connections,
-// listeners and servers are shared by every agent that uses it.
-type NetworkToolset struct {
-	config networkConfig
+// Tools holds the network tools' connections, listeners and servers. Its
+// methods are the tool handlers.
+type Tools struct {
+	private bool
+	hosts   []string
 
 	mu         sync.Mutex
 	policy     *netPolicy
 	handles    map[string]*netHandle
 	nextID     int
 	transports map[bool]*http.Transport // by public-only
-	register   sync.Once
-	regErr     error
+	initOnce   sync.Once
+	initErr    error
 }
 
-// Network returns a toolset for working with the network, the same on every
-// OS:
-//
-//   - dns_lookup and whois query DNS servers and whois servers;
-//   - http_get fetches public web pages; http_request sends any request;
-//   - net_connect opens a TCP, UDP, TLS, unix socket or WebSocket connection,
-//     net_send writes to it and net_read reads what arrived;
-//   - net_listen accepts connections on a port, and http_serve runs a small
-//     web server that answers with fixed responses and logs the requests;
-//   - net_list and net_close show and close what is open.
-//
-// Lookups, http_get and handle management run without approval; tools that
-// send data the model chose or open a port need approval (see
-// WithNetworkApprovalNeeded). Anything read from the network goes into the
-// model's context, so treat it as untrusted input.
-//
-// Close the toolset to close everything it has open. The tools belong to the
-// "network" toolset, so WithToolsets("network") gives an agent all of them.
-func Network(opts ...NetworkOption) *NetworkToolset {
-	config := networkConfig{private: true}
-	for _, opt := range opts {
-		opt(&config)
-	}
-	return &NetworkToolset{config: config, handles: make(map[string]*netHandle)}
+// New returns the tools. private allows loopback, private and link-local
+// addresses and unix sockets; hosts, when not empty, limits the tools to
+// those names, wildcards, addresses and CIDR ranges.
+func New(private bool, hosts []string) *Tools {
+	return &Tools{private: private, hosts: hosts, handles: make(map[string]*netHandle)}
 }
 
-// Register registers the network tools. It fails on an invalid host pattern
-// or an unknown tool name in WithNetworkApprovalNeeded.
-func (t *NetworkToolset) Register(registry ToolsRegistry) error {
-	t.register.Do(func() {
-		t.policy, t.regErr = newNetPolicy(t.config.private, t.config.hosts)
+// Init checks the host patterns. It must succeed before a tool is used.
+func (t *Tools) Init() error {
+	t.initOnce.Do(func() {
+		t.policy, t.initErr = newNetPolicy(t.private, t.hosts)
 	})
-	if t.regErr != nil {
-		return t.regErr
-	}
-	approval := maps.Clone(netApprovalDefaults)
-	for _, rule := range t.config.approval {
-		for _, name := range rule.tools {
-			if _, ok := approval[name]; !ok {
-				return fmt.Errorf("WithNetworkApprovalNeeded: unknown tool %q", name)
-			}
-		}
-		for name := range approval {
-			if len(rule.tools) == 0 || slices.Contains(rule.tools, name) {
-				approval[name] = rule.needed
-			}
-		}
-	}
-	reg := func(name string) []ToolOption {
-		return []ToolOption{WithToolset(ToolsetNetwork), WithApprovalNeeded(approval[name])}
-	}
-
-	registerNetTool(registry, NetDNSLookup, "Look up DNS records, like dig. Asks the system's DNS server unless server is given. Output lists the answer, authority and additional sections with TTLs.", t.dnsLookup, reg(NetDNSLookup)...)
-	registerNetTool(registry, NetWhois, "Look up whois registration data for a domain, IP address or AS number. Starts at whois.iana.org and follows referrals to the authoritative server.", t.whois, reg(NetWhois)...)
-	registerNetTool(registry, NetHTTPGet, "Fetch a URL with GET or HEAD. Only public internet addresses can be reached; use http_request for local or private hosts and for other methods.", t.httpGet, reg(NetHTTPGet)...)
-	registerNetTool(registry, NetHTTPRequest, "Send an HTTP request with any method, headers and body, to any allowed host including local ones.", t.httpRequest, reg(NetHTTPRequest)...)
-	registerNetTool(registry, NetConnect, "Open a connection and return its handle id. protocol is tcp, udp, tls, unix, unixgram, ws or wss. Incoming data is buffered until read with net_read; send with net_send.", t.connect, reg(NetConnect)...)
-	registerNetTool(registry, NetSend, "Send data on a connection handle.", t.send, reg(NetSend)...)
-	registerNetTool(registry, NetRead, "Read what has arrived on a handle, waiting up to timeout_ms for data. A connection returns its data; a listener returns newly accepted connections (each a new handle); an HTTP server returns the requests it received.", t.read, reg(NetRead)...)
-	registerNetTool(registry, NetList, "List open handles: connections, listeners and HTTP servers.", t.list, reg(NetList)...)
-	registerNetTool(registry, NetClose, "Close a handle.", t.closeHandle, reg(NetClose)...)
-	registerNetTool(registry, NetListen, "Listen for connections or datagrams and return the listener's handle id. A port alone, such as :8080, listens on 127.0.0.1; name 0.0.0.0:8080 to listen on every interface. Port 0 picks a free port.", t.listen, reg(NetListen)...)
-	registerNetTool(registry, NetHTTPServe, "Start an HTTP server that answers with fixed responses and logs every request; read the log with net_read. Routes use Go ServeMux paths, such as /api/ or /items/{id}. A port alone listens on 127.0.0.1.", t.httpServe, reg(NetHTTPServe)...)
-	return nil
-}
-
-func registerNetTool[In any](registry ToolsRegistry, name, description string, fn func(context.Context, In) (string, error), opts ...ToolOption) {
-	RegisterToolWithRegistry(registry, name, description, func(ctx context.Context, in In) (string, *StateDelta, error) {
-		out, err := fn(ctx, in)
-		return out, nil, err
-	}, opts...)
+	return t.initErr
 }
 
 // Close closes every connection, listener and server the toolset has open.
 // The toolset can still be used afterwards.
-func (t *NetworkToolset) Close() error {
+func (t *Tools) Close() error {
 	t.mu.Lock()
 	handles := make([]*netHandle, 0, len(t.handles))
 	for _, h := range t.handles {
@@ -288,7 +165,7 @@ func publicIP(ip netip.Addr) bool {
 }
 
 // dialer returns a dialer that checks every address it connects to for host.
-func (t *NetworkToolset) dialer(host string, publicOnly bool) *net.Dialer {
+func (t *Tools) dialer(host string, publicOnly bool) *net.Dialer {
 	return &net.Dialer{
 		Timeout: netDefaultTimeout,
 		Control: func(network, address string, _ syscall.RawConn) error {
@@ -305,7 +182,7 @@ func (t *NetworkToolset) dialer(host string, publicOnly bool) *net.Dialer {
 	}
 }
 
-func (t *NetworkToolset) dial(ctx context.Context, network, address string, publicOnly bool) (net.Conn, error) {
+func (t *Tools) dial(ctx context.Context, network, address string, publicOnly bool) (net.Conn, error) {
 	if strings.HasPrefix(network, "unix") {
 		if publicOnly || !t.policy.private {
 			return nil, errors.New("unix sockets are blocked with private addresses")
@@ -332,7 +209,7 @@ type netHandle struct {
 	created time.Time
 	buf     *netBuffer
 
-	send  func(ctx context.Context, data []byte, in netSendInput) error
+	send  func(ctx context.Context, data []byte, in SendInput) error
 	close func() error
 
 	mu       sync.Mutex
@@ -353,12 +230,12 @@ func (h *netHandle) idle() time.Duration {
 
 // add registers a handle under a new ID with the given prefix. It fails
 // when too many handles are open.
-func (t *NetworkToolset) add(prefix string, h *netHandle) error {
+func (t *Tools) add(prefix string, h *netHandle) error {
 	t.sweep()
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(t.handles) >= netMaxHandles {
-		return fmt.Errorf("too many open handles (%d); close some with net_close", netMaxHandles)
+	if len(t.handles) >= MaxHandles {
+		return fmt.Errorf("too many open handles (%d); close some with net_close", MaxHandles)
 	}
 	t.nextID++
 	h.id = fmt.Sprintf("%s-%d", prefix, t.nextID)
@@ -368,7 +245,7 @@ func (t *NetworkToolset) add(prefix string, h *netHandle) error {
 	return nil
 }
 
-func (t *NetworkToolset) handle(id string) (*netHandle, error) {
+func (t *Tools) handle(id string) (*netHandle, error) {
 	t.sweep()
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -380,7 +257,7 @@ func (t *NetworkToolset) handle(id string) (*netHandle, error) {
 	return h, nil
 }
 
-func (t *NetworkToolset) remove(id string) *netHandle {
+func (t *Tools) remove(id string) *netHandle {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	h := t.handles[id]
@@ -389,7 +266,7 @@ func (t *NetworkToolset) remove(id string) *netHandle {
 }
 
 // sweep closes handles that have not been used for netIdleTimeout.
-func (t *NetworkToolset) sweep() {
+func (t *Tools) sweep() {
 	t.mu.Lock()
 	var idle []*netHandle
 	for id, h := range t.handles {
@@ -498,7 +375,8 @@ func (b *netBuffer) buffered() int {
 	return b.size
 }
 
-type netReadInput struct {
+// ReadInput holds the arguments of Read.
+type ReadInput struct {
 	ID        string `json:"id" description:"Handle id from net_connect, net_listen, http_serve or net_list"`
 	TimeoutMS *int   `json:"timeout_ms,omitempty" description:"How long to wait for data, in milliseconds; default 1000, at most 30000"`
 	MaxBytes  *int   `json:"max_bytes,omitempty" description:"Most bytes to return; default 16384. The rest stays buffered for the next read"`
@@ -506,7 +384,8 @@ type netReadInput struct {
 	Encoding  string `json:"encoding,omitempty" description:"How to show the data: auto (text when printable, otherwise base64), text, hex or base64. Default auto"`
 }
 
-func (t *NetworkToolset) read(ctx context.Context, in netReadInput) (string, error) {
+// Read reads what has arrived on a handle.
+func (t *Tools) Read(ctx context.Context, in ReadInput) (string, error) {
 	h, err := t.handle(in.ID)
 	if err != nil {
 		return "", err
@@ -655,7 +534,8 @@ func printable(data []byte) bool {
 	return true
 }
 
-type netSendInput struct {
+// SendInput holds the arguments of Send.
+type SendInput struct {
 	ID       string `json:"id" description:"Handle id of an open connection"`
 	Data     string `json:"data" description:"Data to send"`
 	Encoding string `json:"encoding,omitempty" description:"How data is written: text (default), hex or base64, for binary data"`
@@ -663,7 +543,8 @@ type netSendInput struct {
 	Binary   bool   `json:"binary,omitempty" description:"For a WebSocket: send a binary message instead of a text one"`
 }
 
-func (t *NetworkToolset) send(ctx context.Context, in netSendInput) (string, error) {
+// Send sends data on a connection handle.
+func (t *Tools) Send(ctx context.Context, in SendInput) (string, error) {
 	h, err := t.handle(in.ID)
 	if err != nil {
 		return "", err
@@ -693,11 +574,13 @@ func (t *NetworkToolset) send(ctx context.Context, in netSendInput) (string, err
 	return fmt.Sprintf("sent %d bytes on %s", len(data), h.id), nil
 }
 
-type netCloseInput struct {
+// CloseInput holds the arguments of CloseHandle.
+type CloseInput struct {
 	ID string `json:"id" description:"Handle id to close"`
 }
 
-func (t *NetworkToolset) closeHandle(ctx context.Context, in netCloseInput) (string, error) {
+// CloseHandle closes a handle.
+func (t *Tools) CloseHandle(ctx context.Context, in CloseInput) (string, error) {
 	h := t.remove(in.ID)
 	if h == nil {
 		return "", fmt.Errorf("no open handle %q; net_list shows the open ones", in.ID)
@@ -708,9 +591,11 @@ func (t *NetworkToolset) closeHandle(ctx context.Context, in netCloseInput) (str
 	return "closed " + h.id, nil
 }
 
-type netListInput struct{}
+// ListInput holds the arguments of List.
+type ListInput struct{}
 
-func (t *NetworkToolset) list(ctx context.Context, _ netListInput) (string, error) {
+// List lists the open handles.
+func (t *Tools) List(ctx context.Context, _ ListInput) (string, error) {
 	t.sweep()
 	t.mu.Lock()
 	handles := make([]*netHandle, 0, len(t.handles))
@@ -739,7 +624,8 @@ func (t *NetworkToolset) list(ctx context.Context, _ netListInput) (string, erro
 	return strings.TrimRight(out.String(), "\n"), nil
 }
 
-type netConnectInput struct {
+// ConnectInput holds the arguments of Connect.
+type ConnectInput struct {
 	Protocol           string            `json:"protocol" description:"tcp, udp, tls, unix, unixgram, ws or wss"`
 	Address            string            `json:"address" description:"host:port, a socket path for unix, or a URL for ws and wss (ws://host/path)"`
 	TimeoutMS          *int              `json:"timeout_ms,omitempty" description:"Connection timeout in milliseconds; default 30000"`
@@ -748,7 +634,8 @@ type netConnectInput struct {
 	Headers            map[string]string `json:"headers,omitempty" description:"For ws and wss: headers for the handshake request"`
 }
 
-func (t *NetworkToolset) connect(ctx context.Context, in netConnectInput) (string, error) {
+// Connect opens a connection and returns its handle.
+func (t *Tools) Connect(ctx context.Context, in ConnectInput) (string, error) {
 	timeout := netDefaultTimeout
 	if in.TimeoutMS != nil {
 		if *in.TimeoutMS < 1 {
@@ -817,7 +704,7 @@ func describeTLS(state tls.ConnectionState) string {
 
 // connHandle wraps a connection and starts its reader. Packet connections
 // buffer each datagram as a message.
-func (t *NetworkToolset) connHandle(kind string, conn net.Conn, packets bool) *netHandle {
+func (t *Tools) connHandle(kind string, conn net.Conn, packets bool) *netHandle {
 	buf := newNetBuffer()
 	h := &netHandle{kind: kind, local: conn.LocalAddr().String(), remote: conn.RemoteAddr().String(), buf: buf}
 	var once sync.Once
@@ -830,7 +717,7 @@ func (t *NetworkToolset) connHandle(kind string, conn net.Conn, packets bool) *n
 		})
 		return err
 	}
-	h.send = func(ctx context.Context, data []byte, in netSendInput) error {
+	h.send = func(ctx context.Context, data []byte, in SendInput) error {
 		if in.To != "" {
 			return errors.New("to is only for UDP listeners")
 		}
@@ -862,7 +749,7 @@ func (t *NetworkToolset) connHandle(kind string, conn net.Conn, packets bool) *n
 	return h
 }
 
-func (t *NetworkToolset) connectWebSocket(ctx context.Context, in netConnectInput) (string, error) {
+func (t *Tools) connectWebSocket(ctx context.Context, in ConnectInput) (string, error) {
 	u, err := url.Parse(in.Address)
 	if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") || u.Host == "" {
 		return "", fmt.Errorf("address %q must be a ws:// or wss:// URL", in.Address)
@@ -905,7 +792,7 @@ func (t *NetworkToolset) connectWebSocket(ctx context.Context, in netConnectInpu
 		})
 		return err
 	}
-	h.send = func(ctx context.Context, data []byte, in netSendInput) error {
+	h.send = func(ctx context.Context, data []byte, in SendInput) error {
 		if in.To != "" {
 			return errors.New("to is only for UDP listeners")
 		}
@@ -941,7 +828,8 @@ func (t *NetworkToolset) connectWebSocket(ctx context.Context, in netConnectInpu
 	return fmt.Sprintf("%s: connected to %s (%s)", h.id, in.Address, resp.Status), nil
 }
 
-type netListenInput struct {
+// ListenInput holds the arguments of Listen.
+type ListenInput struct {
 	Protocol string `json:"protocol" description:"tcp, udp or unix"`
 	Address  string `json:"address" description:"host:port, or a socket path for unix. A port alone, such as :8080, listens on 127.0.0.1"`
 }
@@ -968,7 +856,8 @@ func listenAddress(protocol, address string) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
-func (t *NetworkToolset) listen(ctx context.Context, in netListenInput) (string, error) {
+// Listen listens for connections or datagrams.
+func (t *Tools) Listen(ctx context.Context, in ListenInput) (string, error) {
 	address, err := listenAddress(in.Protocol, in.Address)
 	if err != nil {
 		return "", err
@@ -1004,7 +893,7 @@ func (t *NetworkToolset) listen(ctx context.Context, in netListenInput) (string,
 
 // listenerHandle accepts connections in the background; each becomes a
 // handle of its own and is announced as a message.
-func (t *NetworkToolset) listenerHandle(protocol string, listener net.Listener) *netHandle {
+func (t *Tools) listenerHandle(protocol string, listener net.Listener) *netHandle {
 	buf := newNetBuffer()
 	h := &netHandle{kind: "listen-" + protocol, local: listener.Addr().String(), buf: buf}
 	var once sync.Once
@@ -1049,7 +938,7 @@ func packetListenerHandle(conn net.PacketConn) *netHandle {
 		})
 		return err
 	}
-	h.send = func(ctx context.Context, data []byte, in netSendInput) error {
+	h.send = func(ctx context.Context, data []byte, in SendInput) error {
 		if in.To == "" {
 			return errors.New("a UDP listener needs to, the address to send to")
 		}

@@ -1,0 +1,243 @@
+// Package provider holds the wire code of the three provider APIs crux
+// speaks: OpenAI Responses (also used by xAI, DeepSeek, OpenRouter and
+// Ollama), Anthropic Messages and Google GenAI. It knows nothing about crux:
+// the crux package turns an agent and its log into a Request and the Items a
+// Step returns back into log entries.
+package provider
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Step sends one request and returns what the model produced, in order. The
+// last item carries the response's Response and Usage. emit is nil when the
+// response is not streamed.
+type Step func(ctx context.Context, req *Request, emit Emit) ([]Item, error)
+
+// Request is everything a Step needs.
+type Request struct {
+	Provider     string
+	Model        string
+	Instructions string
+	APIKey       string
+	BaseURL      string
+	HTTPClient   *http.Client // nil uses the SDK's client or DefaultHTTPClient
+	Tools        []Tool
+	MaxTokens    int      // 0 uses the provider default
+	Temperature  *float64 // nil uses the provider default
+	Reasoning    string   // "" uses the provider default; see the Reasoning constants
+	Search       *Search  // nil disables web search
+	OutputSchema map[string]any
+	// Log holds the entries the model sees, oldest first.
+	Log []Item
+	// Seq is the length of the whole session log, for IDs that must not
+	// repeat across turns.
+	Seq int
+}
+
+// Reasoning efforts, as crux.ReasoningEffort spells them.
+const (
+	ReasoningOff    = "off"
+	ReasoningLow    = "low"
+	ReasoningMedium = "medium"
+	ReasoningHigh   = "high"
+	ReasoningMax    = "max"
+)
+
+// Tool is a function the model may call.
+type Tool struct {
+	Name        string
+	Description string
+	Schema      map[string]any
+}
+
+// Search turns on the provider's web search.
+type Search struct {
+	Location *Location // nil means no location is supplied
+}
+
+// Location mirrors crux.UserLocation.
+type Location struct {
+	Country   string
+	City      string
+	Region    string
+	Timezone  string
+	Latitude  *float64
+	Longitude *float64
+}
+
+// Kind is the kind of an Item: the kinds of crux log entries the model sees.
+type Kind uint8
+
+const (
+	KindUser Kind = iota + 1
+	KindAssistant
+	KindReasoning
+	KindToolCall
+	KindToolResult
+	KindProviderTool
+)
+
+type ContentKind string
+
+const (
+	ContentKindText    ContentKind = "text"
+	ContentKindRefusal ContentKind = "refusal"
+)
+
+type ContentPart struct {
+	Kind ContentKind
+	Text string
+}
+
+// Item mirrors the parts of a crux log entry that providers read and write.
+type Item struct {
+	At         time.Time
+	Kind       Kind
+	Content    []ContentPart
+	Reasoning  *Reasoning
+	ToolCall   *ToolCall
+	ToolResult *ToolResult
+	Response   *ResponseInfo
+	Opaque     map[string][]byte
+	Usage      *Usage
+}
+
+type Reasoning struct {
+	Summary string
+}
+
+type ToolCall struct {
+	ID   string
+	Name string
+	Args json.RawMessage
+}
+
+type ToolResult struct {
+	CallID string
+	Output string
+	Error  string
+}
+
+type ResponseInfo struct {
+	ID string
+}
+
+type Usage struct {
+	InputTokens      int
+	OutputTokens     int
+	CacheReadTokens  int
+	CacheWriteTokens int
+}
+
+// ChunkKind says what a streamed delta is.
+type ChunkKind string
+
+const (
+	ChunkText      ChunkKind = "text"
+	ChunkReasoning ChunkKind = "reasoning"
+)
+
+// Emit receives streamed deltas.
+type Emit func(kind ChunkKind, delta string) error
+
+func emitChunk(emit Emit, kind ChunkKind, delta string) error {
+	if delta == "" {
+		return nil
+	}
+	return emit(kind, delta)
+}
+
+// RefusedError reports that the model refused the request. The crux package
+// turns it into an error wrapping crux.ErrRefused.
+type RefusedError struct {
+	Provider string
+	Detail   string // empty when the provider gives none
+}
+
+func (e *RefusedError) Error() string {
+	if e.Detail == "" {
+		return e.Provider + ": model refused the request"
+	}
+	return e.Provider + ": model refused the request: " + e.Detail
+}
+
+func refused(provider, detail string) error {
+	return &RefusedError{Provider: provider, Detail: detail}
+}
+
+// DefaultHTTPClient is used when neither the agent nor the session sets a
+// client and the SDK would not supply its own. Like the OpenAI SDK's default, it
+// gives up on a server that accepts a request but never sends response headers;
+// the body is not limited, so long streams are unaffected. It is built on first
+// use, so a wrapped http.DefaultTransport (for tracing, say) is kept, though
+// then without the timeout. It is a variable so tests can replace it.
+var DefaultHTTPClient = sync.OnceValue(func() *http.Client {
+	return NewHTTPClient(10 * time.Minute)
+})
+
+// NewHTTPClient returns a client on a clone of http.DefaultTransport that
+// waits at most responseHeaderTimeout for response headers.
+func NewHTTPClient(responseHeaderTimeout time.Duration) *http.Client {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = transport.Clone()
+		transport.ResponseHeaderTimeout = responseHeaderTimeout
+		return &http.Client{Transport: transport}
+	}
+	return &http.Client{Transport: http.DefaultTransport}
+}
+
+// Text returns the concatenated textual content, excluding refusals.
+func (e Item) Text() string {
+	var text strings.Builder
+	for _, part := range e.Content {
+		if part.Kind == ContentKindText {
+			text.WriteString(part.Text)
+		}
+	}
+	return text.String()
+}
+
+// hasAnswerOrCall reports whether a model turn contains assistant content or a
+// tool call. A turn with only reasoning or provider-tool events still needs an
+// (empty) assistant entry, or it would never count as finished.
+func hasAnswerOrCall(items []Item) bool {
+	return slices.ContainsFunc(items, func(e Item) bool {
+		return e.Kind == KindAssistant || e.Kind == KindToolCall
+	})
+}
+
+// normalizeToolArgs keeps arguments that are not valid JSON as a JSON string,
+// so the entry can still be stored and the tool reports the problem to the model.
+func normalizeToolArgs(raw string) json.RawMessage {
+	if raw == "" || json.Valid([]byte(raw)) {
+		return json.RawMessage(raw)
+	}
+	quoted, _ := json.Marshal(raw)
+	return quoted
+}
+
+// rawArgs returns the arguments as the model sent them, undoing normalizeToolArgs.
+func (c *ToolCall) rawArgs() string {
+	var raw string
+	if len(c.Args) > 0 && c.Args[0] == '"' && json.Unmarshal(c.Args, &raw) == nil {
+		return raw
+	}
+	return string(c.Args)
+}
+
+// objectArgs returns the arguments as a JSON object, for providers that
+// reject anything else when history is replayed.
+func (c *ToolCall) objectArgs() json.RawMessage {
+	if trimmed := bytes.TrimSpace(c.Args); len(trimmed) > 0 && trimmed[0] == '{' {
+		return c.Args
+	}
+	return json.RawMessage(`{}`)
+}

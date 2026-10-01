@@ -1,4 +1,4 @@
-package crux
+package mcpclient
 
 import (
 	"context"
@@ -27,51 +27,17 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// OAuthConfig customises how crux authorizes with an MCPRemote server. The
-// zero value works for servers that support dynamic client registration: crux
-// registers itself, opens the browser on the server's login page, receives
-// the code on a loopback address and caches the token in a file.
+// OAuthConfig mirrors crux.OAuthConfig.
 type OAuthConfig struct {
-	// ClientID and ClientSecret identify a client registered with the
-	// authorization server ahead of time. Leave them empty to register
-	// dynamically.
 	ClientID     string
 	ClientSecret string
-	// Scopes to request. Empty uses the scopes the server asks for.
-	Scopes []string
-	// RedirectURL receives the authorization code. It must be a loopback
-	// http URL such as "http://127.0.0.1:8085/callback". Empty picks a free
-	// port; a pre-registered client usually needs a fixed one.
-	RedirectURL string
-	// OpenURL shows the user the login page. The default prints the URL to
-	// stderr and opens the browser.
-	OpenURL func(ctx context.Context, url string) error
-	// TokenStore keeps tokens between runs. The default stores them under
-	// the user's config directory (see NewFileTokenStore).
-	TokenStore TokenStore
+	Scopes       []string
+	RedirectURL  string
+	OpenURL      func(ctx context.Context, url string) error
+	TokenStore   TokenStore
 }
 
-// WithMCPOAuth customises the OAuth flow of an MCPRemote server. Without it,
-// the flow still runs with the zero OAuthConfig when the server asks for
-// authorization.
-func WithMCPOAuth(config OAuthConfig) MCPOption {
-	return func(c *mcpConfig) error {
-		if config.RedirectURL != "" {
-			if _, err := parseLoopbackURL(config.RedirectURL); err != nil {
-				return fmt.Errorf("OAuth redirect URL: %w", err)
-			}
-		}
-		if config.ClientSecret != "" && config.ClientID == "" {
-			return errors.New("OAuth client secret needs a client ID")
-		}
-		c.oauth = &config
-		return nil
-	}
-}
-
-// TokenStore keeps OAuth credentials for MCP servers, keyed by the server's
-// URL. The data holds secrets (access and refresh tokens), so store it as
-// such. Load returns nil data and no error when nothing is stored.
+// TokenStore mirrors crux.TokenStore.
 type TokenStore interface {
 	Load(ctx context.Context, key string) ([]byte, error)
 	Save(ctx context.Context, key string, data []byte) error
@@ -138,8 +104,8 @@ func (s *fileTokenStore) Save(_ context.Context, key string, data []byte) error 
 	return os.Rename(tmp.Name(), path)
 }
 
-// oauthCredentials is what the token store holds for one server.
-type oauthCredentials struct {
+// Credentials is what the token store holds for one server, as JSON.
+type Credentials struct {
 	Token        *oauth2.Token    `json:"token"`
 	TokenURL     string           `json:"token_url"`
 	AuthStyle    oauth2.AuthStyle `json:"auth_style,omitempty"`
@@ -149,7 +115,7 @@ type oauthCredentials struct {
 	Registered   bool             `json:"registered,omitempty"` // client ID came from dynamic registration
 }
 
-func (c *oauthCredentials) config() *oauth2.Config {
+func (c *Credentials) config() *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     c.ClientID,
 		ClientSecret: c.ClientSecret,
@@ -173,13 +139,15 @@ type oauthHandler struct {
 	authMu sync.Mutex // one authorization at a time
 	mu     sync.Mutex
 	loaded bool
-	creds  *oauthCredentials
+	creds  *Credentials
 	source oauth2.TokenSource
 }
 
 var _ auth.OAuthHandler = (*oauthHandler)(nil)
 
-func newOAuthHandler(server, resource string, config OAuthConfig, client *http.Client) *oauthHandler {
+// NewOAuthHandler returns the OAuth handler for the MCP endpoint resource of
+// the server named server.
+func NewOAuthHandler(server, resource string, config OAuthConfig, client *http.Client) auth.OAuthHandler {
 	if config.TokenStore == nil {
 		config.TokenStore = NewFileTokenStore("")
 	}
@@ -201,7 +169,7 @@ func (h *oauthHandler) TokenSource(ctx context.Context) (oauth2.TokenSource, err
 			return nil, fmt.Errorf("load OAuth token for mcp server %q: %w", h.server, err)
 		}
 		if data != nil {
-			var creds oauthCredentials
+			var creds Credentials
 			if err := json.Unmarshal(data, &creds); err == nil && creds.Token != nil {
 				h.setLocked(&creds)
 			}
@@ -210,13 +178,13 @@ func (h *oauthHandler) TokenSource(ctx context.Context) (oauth2.TokenSource, err
 	return h.source, nil
 }
 
-func (h *oauthHandler) setLocked(creds *oauthCredentials) {
+func (h *oauthHandler) setLocked(creds *Credentials) {
 	h.creds = creds
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, h.client)
 	h.source = &savingTokenSource{handler: h, base: creds.config().TokenSource(ctx, creds.Token), last: creds.Token}
 }
 
-func (h *oauthHandler) save(ctx context.Context, creds *oauthCredentials) error {
+func (h *oauthHandler) save(ctx context.Context, creds *Credentials) error {
 	data, err := json.Marshal(creds)
 	if err != nil {
 		return err
@@ -382,7 +350,7 @@ func (h *oauthHandler) resourceMetadata(ctx context.Context, metadataURL string)
 // listen opens the loopback listener the authorization code is sent to. It
 // reuses the port of a dynamically registered client when it can, so the
 // registration stays valid.
-func (h *oauthHandler) listen(creds *oauthCredentials) (net.Listener, *url.URL, error) {
+func (h *oauthHandler) listen(creds *Credentials) (net.Listener, *url.URL, error) {
 	redirect := h.config.RedirectURL
 	if redirect == "" && creds != nil && creds.Registered {
 		if l, u, err := listenOn(creds.RedirectURL); err == nil {
@@ -396,7 +364,7 @@ func (h *oauthHandler) listen(creds *oauthCredentials) (net.Listener, *url.URL, 
 }
 
 func listenOn(redirect string) (net.Listener, *url.URL, error) {
-	u, err := parseLoopbackURL(redirect)
+	u, err := ParseLoopbackURL(redirect)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -408,7 +376,9 @@ func listenOn(redirect string) (net.Listener, *url.URL, error) {
 	return listener, u, nil
 }
 
-func parseLoopbackURL(raw string) (*url.URL, error) {
+// ParseLoopbackURL checks that raw is a loopback http URL for the OAuth
+// redirect.
+func ParseLoopbackURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil, err
@@ -428,8 +398,8 @@ func parseLoopbackURL(raw string) (*url.URL, error) {
 
 // resolveClient returns the credentials to authorize with: the configured client,
 // the stored dynamic registration if it matches, or a new registration.
-func (h *oauthHandler) resolveClient(ctx context.Context, asm *oauthex.AuthServerMeta, stored *oauthCredentials, redirect *url.URL) (*oauthCredentials, error) {
-	next := &oauthCredentials{TokenURL: asm.TokenEndpoint, RedirectURL: redirect.String()}
+func (h *oauthHandler) resolveClient(ctx context.Context, asm *oauthex.AuthServerMeta, stored *Credentials, redirect *url.URL) (*Credentials, error) {
+	next := &Credentials{TokenURL: asm.TokenEndpoint, RedirectURL: redirect.String()}
 	switch {
 	case h.config.ClientID != "":
 		next.ClientID, next.ClientSecret = h.config.ClientID, h.config.ClientSecret

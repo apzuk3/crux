@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/apzuk3/crux/internal/mcpclient"
+	"github.com/apzuk3/crux/internal/schema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -148,7 +150,7 @@ func ConfigureMCP(ctx context.Context, name string, transport MCPTransport, opts
 // the tools with WithToolsetsRegistry(registry, name).
 func ConfigureMCPWithRegistry(ctx context.Context, registry ToolsRegistry, name string, transport MCPTransport, opts ...MCPOption) (*MCPServer, error) {
 	registry.mustBeInitialized()
-	if err := validateToolName(name); err != nil {
+	if err := schema.ValidateToolName(name); err != nil {
 		return nil, fmt.Errorf("mcp server: %w", err)
 	}
 	var config mcpConfig
@@ -181,8 +183,8 @@ func ConfigureMCPWithRegistry(ctx context.Context, registry ToolsRegistry, name 
 	return server, nil
 }
 
-func (c *mcpConfig) transport(name string, t MCPTransport) (mcp.Transport, *tailBuffer, error) {
-	stderr := &tailBuffer{max: 4 << 10}
+func (c *mcpConfig) transport(name string, t MCPTransport) (mcp.Transport, *mcpclient.TailBuffer, error) {
+	stderr := mcpclient.NewTailBuffer(4 << 10)
 	switch {
 	case t.sdk != nil:
 		return t.sdk, stderr, nil
@@ -209,7 +211,7 @@ func (c *mcpConfig) transport(name string, t MCPTransport) (mcp.Transport, *tail
 				base = http.DefaultTransport
 			}
 			withHeaders := *httpClient
-			withHeaders.Transport = headerTransport{base: base, header: c.header}
+			withHeaders.Transport = mcpclient.HeaderTransport{Base: base, Header: c.header}
 			remote.HTTPClient = &withHeaders
 		}
 		if c.oauth != nil || c.header.Get("Authorization") == "" {
@@ -217,7 +219,7 @@ func (c *mcpConfig) transport(name string, t MCPTransport) (mcp.Transport, *tail
 			if c.oauth != nil {
 				oauth = *c.oauth
 			}
-			remote.OAuthHandler = newOAuthHandler(name, t.url, oauth, httpClient)
+			remote.OAuthHandler = mcpclient.NewOAuthHandler(name, t.url, oauth.internal(), httpClient)
 		}
 		return remote, stderr, nil
 	default:
@@ -241,16 +243,16 @@ func (s *MCPServer) register(ctx context.Context, registry ToolsRegistry, config
 			return nil, fmt.Errorf("list tools: %w", err)
 		}
 		name := s.name + "_" + mcpToolNamePattern.ReplaceAllString(tool.Name, "_")
-		if err := validateToolName(name); err != nil {
+		if err := schema.ValidateToolName(name); err != nil {
 			return nil, fmt.Errorf("tool %q: %w", tool.Name, err)
 		}
 		if other, ok := taken[name]; ok {
 			return nil, fmt.Errorf("tools %q and %q both map to the name %q", other, tool.Name, name)
 		}
 		taken[name] = tool.Name
-		schema, err := mcpInputSchema(tool.InputSchema)
+		inputSchema, err := mcpInputSchema(tool.InputSchema)
 		if err == nil {
-			_, err = compileToolSchema(schema)
+			_, err = schema.Compile(inputSchema)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("tool %q: %w", tool.Name, err)
@@ -261,7 +263,7 @@ func (s *MCPServer) register(ctx context.Context, registry ToolsRegistry, config
 		}
 		readOnly := tool.Annotations != nil && tool.Annotations.ReadOnlyHint
 		byMCPName[tool.Name] = len(tools)
-		tools = append(tools, pending{mcpName: tool.Name, name: name, description: description, schema: schema, approval: !readOnly})
+		tools = append(tools, pending{mcpName: tool.Name, name: name, description: description, schema: inputSchema, approval: !readOnly})
 	}
 	if len(tools) == 0 {
 		return nil, errors.New("server has no tools")
@@ -313,8 +315,8 @@ func (s *MCPServer) register(ctx context.Context, registry ToolsRegistry, config
 
 // mcpInputSchema adapts a tool's input schema to what providers accept: an
 // object schema without a "$schema" keyword.
-func mcpInputSchema(schema any) (map[string]any, error) {
-	raw, err := json.Marshal(schema)
+func mcpInputSchema(value any) (map[string]any, error) {
+	raw, err := json.Marshal(value)
 	if err != nil {
 		return nil, fmt.Errorf("encode input schema: %w", err)
 	}
@@ -334,7 +336,7 @@ func mcpInputSchema(schema any) (map[string]any, error) {
 			object["properties"] = map[string]any{}
 		}
 	}
-	return inputSchemaFrom(object)
+	return schema.FromValue(object)
 }
 
 func (s *MCPServer) call(tool string) func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error) {
@@ -346,55 +348,9 @@ func (s *MCPServer) call(tool string) func(ctx context.Context, args json.RawMes
 		if err != nil {
 			return "", nil, fmt.Errorf("mcp server %q: %w", s.name, err)
 		}
-		output, err := renderMCPResult(result)
+		output, err := mcpclient.RenderResult(result)
 		return output, nil, err
 	}
-}
-
-// renderMCPResult turns a tool result into the text the model sees. Text and
-// text resources are passed on; other content is described. A result with no
-// text gives its structured content as JSON. A tool error becomes an error.
-func renderMCPResult(result *mcp.CallToolResult) (string, error) {
-	var parts []string
-	text := false
-	for _, content := range result.Content {
-		switch c := content.(type) {
-		case *mcp.TextContent:
-			parts = append(parts, c.Text)
-			text = true
-		case *mcp.ImageContent:
-			parts = append(parts, fmt.Sprintf("[image %s, %d bytes]", c.MIMEType, len(c.Data)))
-		case *mcp.AudioContent:
-			parts = append(parts, fmt.Sprintf("[audio %s, %d bytes]", c.MIMEType, len(c.Data)))
-		case *mcp.ResourceLink:
-			parts = append(parts, fmt.Sprintf("[resource %s]", c.URI))
-		case *mcp.EmbeddedResource:
-			if c.Resource == nil {
-				continue
-			}
-			if c.Resource.Text != "" {
-				parts = append(parts, c.Resource.Text)
-				text = true
-			} else {
-				parts = append(parts, fmt.Sprintf("[resource %s, %d bytes]", c.Resource.URI, len(c.Resource.Blob)))
-			}
-		}
-	}
-	if !text && result.StructuredContent != nil {
-		raw, err := json.Marshal(result.StructuredContent)
-		if err != nil {
-			return "", fmt.Errorf("encode structured content: %w", err)
-		}
-		parts = append(parts, string(raw))
-	}
-	output := strings.Join(parts, "\n")
-	if result.IsError {
-		if output == "" {
-			output = "tool failed"
-		}
-		return "", errors.New(output)
-	}
-	return output, nil
 }
 
 // WithMCPs gives the agent the tools of the MCP servers configured with
@@ -412,38 +368,70 @@ func WithMCPs(names ...string) AgentOption {
 	}
 }
 
-type headerTransport struct {
-	base   http.RoundTripper
-	header http.Header
+// OAuthConfig customises how crux authorizes with an MCPRemote server. The
+// zero value works for servers that support dynamic client registration: crux
+// registers itself, opens the browser on the server's login page, receives
+// the code on a loopback address and caches the token in a file.
+type OAuthConfig struct {
+	// ClientID and ClientSecret identify a client registered with the
+	// authorization server ahead of time. Leave them empty to register
+	// dynamically.
+	ClientID     string
+	ClientSecret string
+	// Scopes to request. Empty uses the scopes the server asks for.
+	Scopes []string
+	// RedirectURL receives the authorization code. It must be a loopback
+	// http URL such as "http://127.0.0.1:8085/callback". Empty picks a free
+	// port; a pre-registered client usually needs a fixed one.
+	RedirectURL string
+	// OpenURL shows the user the login page. The default prints the URL to
+	// stderr and opens the browser.
+	OpenURL func(ctx context.Context, url string) error
+	// TokenStore keeps tokens between runs. The default stores them under
+	// the user's config directory (see NewFileTokenStore).
+	TokenStore TokenStore
 }
 
-func (t headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req = req.Clone(req.Context())
-	for key, values := range t.header {
-		req.Header[key] = slices.Clone(values)
+// WithMCPOAuth customises the OAuth flow of an MCPRemote server. Without it,
+// the flow still runs with the zero OAuthConfig when the server asks for
+// authorization.
+func WithMCPOAuth(config OAuthConfig) MCPOption {
+	return func(c *mcpConfig) error {
+		if config.RedirectURL != "" {
+			if _, err := mcpclient.ParseLoopbackURL(config.RedirectURL); err != nil {
+				return fmt.Errorf("OAuth redirect URL: %w", err)
+			}
+		}
+		if config.ClientSecret != "" && config.ClientID == "" {
+			return errors.New("OAuth client secret needs a client ID")
+		}
+		c.oauth = &config
+		return nil
 	}
-	return t.base.RoundTrip(req)
 }
 
-// tailBuffer keeps the last max bytes written to it, for a server's stderr.
-type tailBuffer struct {
-	mu  sync.Mutex
-	max int
-	buf []byte
+// TokenStore keeps OAuth credentials for MCP servers, keyed by the server's
+// URL. The data holds secrets (access and refresh tokens), so store it as
+// such. Load returns nil data and no error when nothing is stored.
+type TokenStore interface {
+	Load(ctx context.Context, key string) ([]byte, error)
+	Save(ctx context.Context, key string, data []byte) error
 }
 
-func (b *tailBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.buf = append(b.buf, p...)
-	if over := len(b.buf) - b.max; over > 0 {
-		b.buf = b.buf[over:]
+// NewFileTokenStore stores credentials in dir, one file per server, readable
+// only by the current user. An empty dir uses crux/mcp under
+// os.UserConfigDir.
+func NewFileTokenStore(dir string) TokenStore {
+	return mcpclient.NewFileTokenStore(dir)
+}
+
+func (c OAuthConfig) internal() mcpclient.OAuthConfig {
+	return mcpclient.OAuthConfig{
+		ClientID:     c.ClientID,
+		ClientSecret: c.ClientSecret,
+		Scopes:       c.Scopes,
+		RedirectURL:  c.RedirectURL,
+		OpenURL:      c.OpenURL,
+		TokenStore:   c.TokenStore,
 	}
-	return len(p), nil
-}
-
-func (b *tailBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return strings.TrimSpace(string(b.buf))
 }

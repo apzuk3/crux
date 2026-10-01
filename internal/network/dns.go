@@ -1,4 +1,4 @@
-package crux
+package network
 
 import (
 	"context"
@@ -39,14 +39,16 @@ var dnsTypeNames = func() map[dnsmessage.Type]string {
 	return names
 }()
 
-type dnsLookupInput struct {
+// DNSLookupInput holds the arguments of DNSLookup.
+type DNSLookupInput struct {
 	Name   string `json:"name" description:"Domain name to look up, or an IP address for a PTR (reverse) lookup"`
 	Type   string `json:"type,omitempty" description:"Record type: A (default), AAAA, CNAME, MX, NS, TXT, SOA, SRV, PTR, CAA, HTTPS, SVCB or ANY"`
 	Server string `json:"server,omitempty" description:"DNS server to ask, such as 1.1.1.1 or ns1.example.com:53; default the system's resolver"`
 	TCP    bool   `json:"tcp,omitempty" description:"Query over TCP instead of UDP"`
 }
 
-func (t *NetworkToolset) dnsLookup(ctx context.Context, in dnsLookupInput) (string, error) {
+// DNSLookup looks up DNS records.
+func (t *Tools) DNSLookup(ctx context.Context, in DNSLookupInput) (string, error) {
 	typeName := strings.ToUpper(strings.TrimSpace(in.Type))
 	if typeName == "" {
 		typeName = "A"
@@ -101,7 +103,7 @@ func (t *NetworkToolset) dnsLookup(ctx context.Context, in dnsLookupInput) (stri
 // dnsExchange sends one query to server and formats the answer, retrying
 // over TCP when the UDP answer is truncated. The system's resolver is not
 // subject to the address policy; a server the model names is.
-func (t *NetworkToolset) dnsExchange(ctx context.Context, server string, name dnsmessage.Name, qtype dnsmessage.Type, useTCP, checked bool) (string, error) {
+func (t *Tools) dnsExchange(ctx context.Context, server string, name dnsmessage.Name, qtype dnsmessage.Type, useTCP, checked bool) (string, error) {
 	var id [2]byte
 	rand.Read(id[:])
 	query := dnsmessage.Message{
@@ -136,7 +138,7 @@ func (t *NetworkToolset) dnsExchange(ctx context.Context, server string, name dn
 	return formatDNS(resp, server, protocol, time.Since(start)), nil
 }
 
-func (t *NetworkToolset) dnsSend(ctx context.Context, protocol, server string, query []byte, id uint16, checked bool) (*dnsmessage.Message, error) {
+func (t *Tools) dnsSend(ctx context.Context, protocol, server string, query []byte, id uint16, checked bool) (*dnsmessage.Message, error) {
 	var conn net.Conn
 	var err error
 	if checked {

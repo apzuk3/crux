@@ -1,6 +1,6 @@
 //go:build windows
 
-package crux
+package network
 
 import (
 	"net/netip"

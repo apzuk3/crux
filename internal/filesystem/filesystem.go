@@ -1,4 +1,6 @@
-package crux
+// Package filesystem implements file tools confined to a root directory with
+// os.Root. The crux package registers them as the "filesystem" toolset.
+package filesystem
 
 import (
 	"bufio"
@@ -23,7 +25,7 @@ import (
 const (
 	fsMaxReadBytes       = 1 << 20  // read_file output cap
 	fsMaxMultiReadBytes  = 2 << 20  // read_multiple_files total output cap
-	fsMaxMultiReadFiles  = 50       // read_multiple_files path cap
+	MaxMultiReadFiles    = 50       // read_multiple_files path cap
 	fsMaxEntries         = 1000     // list_directory, directory_tree and glob result cap
 	fsMaxSearchOutput    = 64 << 10 // search_files_content output cap
 	fsMaxSearchFile      = 10 << 20 // files larger than this are skipped by search
@@ -44,97 +46,15 @@ var (
 	fsMaxRegexLine         = 32 << 10  // bytes of one line a regex search reads
 )
 
-// Filesystem tool names.
-const (
-	FsReadFile           = "read_file"
-	FsReadMultipleFiles  = "read_multiple_files"
-	FsListDirectory      = "list_directory"
-	FsDirectoryTree      = "directory_tree"
-	FsGlob               = "glob"
-	FsSearchFilesContent = "search_files_content"
-	FsWriteFile          = "write_file"
-	FsEditFile           = "edit_file"
-	FsCreateDirectory    = "create_directory"
-	FsRemoveDirectory    = "remove_directory"
-)
-
-// ToolsetFilesystem is the name of the toolset registered by Filesystem.
-const ToolsetFilesystem = "filesystem"
-
 var (
 	errIsDir      = errors.New("is a directory")
 	errNotRegular = errors.New("not a regular file")
 	errReadOnly   = errors.New("file is read-only")
 )
 
-// Filesystem returns a toolset of file tools confined to root. Paths the model
-// passes are relative to root (absolute paths are accepted when they are
-// inside it), and nothing outside root can be reached, including through
-// ".." or symlinks. Paths use forward slashes on every platform.
-//
-// Read-only tools: read_file, read_multiple_files, list_directory,
-// directory_tree, glob, search_files_content.
-// Tools that change files need approval: write_file, edit_file,
-// create_directory, remove_directory.
-//
-// Read-only tools run without approval, so the model can read any file under
-// root, including secrets such as .env files or private keys, and its content
-// is sent to the provider. Scope root narrowly to the files the agent needs.
-//
-// Output and work per call are bounded: large files, long listings and
-// searches are cut off with a note telling the model how to narrow the
-// request.
-//
-// The tools belong to the "filesystem" toolset, so WithToolsets("filesystem")
-// gives an agent all of them. Register fails when root is not an existing
-// directory.
-func Filesystem(root string) Toolset {
-	return &filesystemToolset{root: root}
-}
-
-type filesystemToolset struct {
-	root string
-}
-
-func (f *filesystemToolset) Register(registry ToolsRegistry) error {
-	root, err := filepath.Abs(f.root)
-	if err != nil {
-		return fmt.Errorf("filesystem root %q: %w", f.root, err)
-	}
-	info, err := os.Stat(root)
-	if err != nil {
-		return fmt.Errorf("filesystem root: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("filesystem root %q is not a directory", f.root)
-	}
-
-	t := &fsTools{root: root}
-	approval := WithApprovalNeeded(true)
-
-	registerFSTool(registry, FsReadFile, "Read a text file. The whole file is returned unless line (1-based start line) and limit (maximum number of lines) select a range.", t.readFile)
-	registerFSTool(registry, FsReadMultipleFiles, fmt.Sprintf("Read several text files at once (at most %d). Prefer this over sequential read_file calls.", fsMaxMultiReadFiles), t.readMultipleFiles)
-	registerFSTool(registry, FsListDirectory, "List the files and directories directly inside a directory.", t.listDirectory)
-	registerFSTool(registry, FsDirectoryTree, "Show a recursive tree of files and directories.", t.directoryTree)
-	registerFSTool(registry, FsGlob, "Find files whose path matches a glob pattern such as **/*.go or src/*.ts. ** matches any number of directories.", t.glob)
-	registerFSTool(registry, FsSearchFilesContent, "Search file contents for text or a regular expression. Returns matches as path:line:column: text.", t.searchFilesContent)
-	registerFSTool(registry, FsWriteFile, "Create a file, or completely overwrite an existing one. Missing parent directories are created.", t.writeFile, approval)
-	registerFSTool(registry, FsEditFile, "Edit a text file by replacing exact text. Each old_text must appear exactly once in the file; include enough surrounding text to make it unique. Edits are applied in order and either all succeed or none are written. In a file with CRLF line endings, an old_text that is only found once its \\n line endings become \\r\\n is matched that way, and the \\n line endings in its new_text are then written as \\r\\n too.", t.editFile, approval)
-	registerFSTool(registry, FsCreateDirectory, "Create one or more directories, including missing parents.", t.createDirectory, approval)
-	registerFSTool(registry, FsRemoveDirectory, "Remove one or more empty directories.", t.removeDirectory, approval)
-
-	return nil
-}
-
-func registerFSTool[In any](registry ToolsRegistry, name, description string, fn func(context.Context, In) (string, error), opts ...ToolOption) {
-	opts = append([]ToolOption{WithToolset(ToolsetFilesystem)}, opts...)
-	RegisterToolWithRegistry(registry, name, description, func(ctx context.Context, in In) (string, *StateDelta, error) {
-		out, err := fn(ctx, in)
-		return out, nil, err
-	}, opts...)
-}
-
-type fsTools struct {
+// Tools runs the file tools inside one root directory. Its methods are the
+// tool handlers.
+type Tools struct {
 	root string
 	// writeMu runs the tools that change files one at a time. Calls from one
 	// model turn run concurrently, and two edits of the same file would
@@ -142,10 +62,16 @@ type fsTools struct {
 	writeMu sync.Mutex
 }
 
+// New returns the tools for root, which must be an absolute path to an
+// existing directory.
+func New(root string) *Tools {
+	return &Tools{root: root}
+}
+
 // open opens the root for one tool call. os.Root keeps every operation inside
 // the root directory, including when symlinks point elsewhere. The error does
 // not name the host path, because it is sent to the model.
-func (t *fsTools) open() (*os.Root, error) {
+func (t *Tools) open() (*os.Root, error) {
 	root, err := os.OpenRoot(t.root)
 	if err != nil {
 		var pathErr *fs.PathError
@@ -159,7 +85,7 @@ func (t *fsTools) open() (*os.Root, error) {
 
 // resolve turns a model-supplied path into a clean path relative to the root,
 // using the OS separator.
-func (t *fsTools) resolve(name string) (string, error) {
+func (t *Tools) resolve(name string) (string, error) {
 	if name == "" {
 		name = "."
 	}
@@ -228,13 +154,15 @@ func openRegular(root *os.Root, rel string) (*os.File, fs.FileInfo, error) {
 	return f, info, nil
 }
 
-type readFileInput struct {
+// ReadFileInput holds the arguments of ReadFile.
+type ReadFileInput struct {
 	Path  string `json:"path" description:"File to read"`
 	Line  *int   `json:"line,omitempty" description:"1-based line to start reading from"`
 	Limit *int   `json:"limit,omitempty" description:"Maximum number of lines to read"`
 }
 
-func (t *fsTools) readFile(ctx context.Context, in readFileInput) (string, error) {
+// ReadFile reads a text file, or a range of its lines.
+func (t *Tools) ReadFile(ctx context.Context, in ReadFileInput) (string, error) {
 	if in.Line != nil && *in.Line < 1 {
 		return "", fmt.Errorf("line must be >= 1, got %d", *in.Line)
 	}
@@ -252,7 +180,7 @@ func (t *fsTools) readFile(ctx context.Context, in readFileInput) (string, error
 
 // readText reads a text file, returning at most maxBytes of content. Memory
 // use is bounded by maxBytes plus a small buffer, however long the lines are.
-func (t *fsTools) readText(ctx context.Context, root *os.Root, name string, line, limit *int, maxBytes int) (string, error) {
+func (t *Tools) readText(ctx context.Context, root *os.Root, name string, line, limit *int, maxBytes int) (string, error) {
 	rel, err := t.resolve(name)
 	if err != nil {
 		return "", err
@@ -335,16 +263,18 @@ func (t *fsTools) readText(ctx context.Context, root *os.Root, name string, line
 	return out.String(), nil
 }
 
-type readMultipleFilesInput struct {
+// ReadMultipleFilesInput holds the arguments of ReadMultipleFiles.
+type ReadMultipleFilesInput struct {
 	Paths []string `json:"paths" description:"Files to read"`
 }
 
-func (t *fsTools) readMultipleFiles(ctx context.Context, in readMultipleFilesInput) (string, error) {
+// ReadMultipleFiles reads several text files.
+func (t *Tools) ReadMultipleFiles(ctx context.Context, in ReadMultipleFilesInput) (string, error) {
 	if len(in.Paths) == 0 {
 		return "", errors.New("paths must not be empty")
 	}
-	if len(in.Paths) > fsMaxMultiReadFiles {
-		return "", fmt.Errorf("at most %d paths can be read at once, got %d; split them into several calls", fsMaxMultiReadFiles, len(in.Paths))
+	if len(in.Paths) > MaxMultiReadFiles {
+		return "", fmt.Errorf("at most %d paths can be read at once, got %d; split them into several calls", MaxMultiReadFiles, len(in.Paths))
 	}
 	root, err := t.open()
 	if err != nil {
@@ -385,11 +315,13 @@ func (t *fsTools) readMultipleFiles(ctx context.Context, in readMultipleFilesInp
 	return out.String(), nil
 }
 
-type listDirectoryInput struct {
+// ListDirectoryInput holds the arguments of ListDirectory.
+type ListDirectoryInput struct {
 	Path string `json:"path" description:"Directory to list"`
 }
 
-func (t *fsTools) listDirectory(ctx context.Context, in listDirectoryInput) (string, error) {
+// ListDirectory lists the entries directly inside a directory.
+func (t *Tools) ListDirectory(ctx context.Context, in ListDirectoryInput) (string, error) {
 	rel, err := t.resolve(in.Path)
 	if err != nil {
 		return "", err
@@ -520,12 +452,14 @@ func walkBudgetNote() string {
 	return fmt.Sprintf("[Stopped after visiting %d entries; results may be incomplete. Use a narrower path.]", fsMaxWalkEntries)
 }
 
-type directoryTreeInput struct {
+// DirectoryTreeInput holds the arguments of DirectoryTree.
+type DirectoryTreeInput struct {
 	Path     string `json:"path" description:"Directory to show"`
 	MaxDepth *int   `json:"max_depth,omitempty" description:"How many directory levels to descend; unlimited when omitted"`
 }
 
-func (t *fsTools) directoryTree(ctx context.Context, in directoryTreeInput) (string, error) {
+// DirectoryTree shows a recursive tree of a directory.
+func (t *Tools) DirectoryTree(ctx context.Context, in DirectoryTreeInput) (string, error) {
 	if in.MaxDepth != nil && *in.MaxDepth < 1 {
 		return "", fmt.Errorf("max_depth must be >= 1, got %d", *in.MaxDepth)
 	}
@@ -578,12 +512,14 @@ func (t *fsTools) directoryTree(ctx context.Context, in directoryTreeInput) (str
 	return out.String(), nil
 }
 
-type globInput struct {
+// GlobInput holds the arguments of Glob.
+type GlobInput struct {
 	Pattern string `json:"pattern" description:"Glob pattern relative to path, for example **/*.go"`
 	Path    string `json:"path,omitempty" description:"Directory to search from; defaults to the root"`
 }
 
-func (t *fsTools) glob(ctx context.Context, in globInput) (string, error) {
+// Glob finds files whose path matches a glob pattern.
+func (t *Tools) Glob(ctx context.Context, in GlobInput) (string, error) {
 	pattern, err := cleanGlob(strings.TrimPrefix(filepath.ToSlash(in.Pattern), "./"))
 	if err != nil {
 		return "", err
@@ -637,7 +573,8 @@ func (t *fsTools) glob(ctx context.Context, in globInput) (string, error) {
 	return out, nil
 }
 
-type searchFilesContentInput struct {
+// SearchFilesContentInput holds the arguments of SearchFilesContent.
+type SearchFilesContentInput struct {
 	Path            string   `json:"path,omitempty" description:"Directory to search from; defaults to the root"`
 	Query           string   `json:"query" description:"Text or regular expression to search for"`
 	IsRegex         bool     `json:"is_regex,omitempty" description:"Treat query as a regular expression (Go RE2 syntax)"`
@@ -645,7 +582,8 @@ type searchFilesContentInput struct {
 	ExcludePatterns []string `json:"exclude_patterns,omitempty" description:"Glob patterns for files or directories to skip, for example node_modules or **/*_test.go"`
 }
 
-func (t *fsTools) searchFilesContent(ctx context.Context, in searchFilesContentInput) (string, error) {
+// SearchFilesContent searches file contents for text or a regular expression.
+func (t *Tools) SearchFilesContent(ctx context.Context, in SearchFilesContentInput) (string, error) {
 	if in.Query == "" {
 		return "", errors.New("query must not be empty")
 	}
@@ -817,12 +755,14 @@ func compileSearchRegex(query string) (*regexp.Regexp, error) {
 	return re, nil
 }
 
-type writeFileInput struct {
+// WriteFileInput holds the arguments of WriteFile.
+type WriteFileInput struct {
 	Path    string `json:"path" description:"File to write"`
 	Content string `json:"content" description:"Full file content"`
 }
 
-func (t *fsTools) writeFile(ctx context.Context, in writeFileInput) (string, error) {
+// WriteFile creates or overwrites a file.
+func (t *Tools) WriteFile(ctx context.Context, in WriteFileInput) (string, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 	rel, err := t.resolve(in.Path)
@@ -854,12 +794,14 @@ type fileEdit struct {
 	NewText string `json:"new_text" description:"Replacement text"`
 }
 
-type editFileInput struct {
+// EditFileInput holds the arguments of EditFile.
+type EditFileInput struct {
 	Path  string     `json:"path" description:"File to edit"`
 	Edits []fileEdit `json:"edits" description:"Edits to apply in order"`
 }
 
-func (t *fsTools) editFile(ctx context.Context, in editFileInput) (string, error) {
+// EditFile replaces exact text in a file.
+func (t *Tools) EditFile(ctx context.Context, in EditFileInput) (string, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 	if len(in.Edits) == 0 {
@@ -1033,11 +975,13 @@ func errSymlinkWrite(root *os.Root, rel string) error {
 	return fmt.Errorf("is a symbolic link to %s; write to that file instead", target)
 }
 
-type directoriesInput struct {
+// DirectoriesInput holds the arguments of Directories (CreateDirectory and RemoveDirectory).
+type DirectoriesInput struct {
 	Paths []string `json:"paths" description:"Directories"`
 }
 
-func (t *fsTools) createDirectory(ctx context.Context, in directoriesInput) (string, error) {
+// CreateDirectory creates directories, including missing parents.
+func (t *Tools) CreateDirectory(ctx context.Context, in DirectoriesInput) (string, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 	root, err := t.open()
@@ -1063,7 +1007,8 @@ func (t *fsTools) createDirectory(ctx context.Context, in directoriesInput) (str
 	return strings.Join(out, "\n"), nil
 }
 
-func (t *fsTools) removeDirectory(ctx context.Context, in directoriesInput) (string, error) {
+// RemoveDirectory removes empty directories.
+func (t *Tools) RemoveDirectory(ctx context.Context, in DirectoriesInput) (string, error) {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
 	root, err := t.open()

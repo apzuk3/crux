@@ -2,11 +2,13 @@ package crux
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net/http"
-	"os"
-	"sync"
-	"time"
+
+	"github.com/apzuk3/crux/internal/provider"
+	"github.com/apzuk3/crux/internal/schema"
+	"github.com/invopop/jsonschema"
+	sjs "github.com/santhosh-tekuri/jsonschema/v5"
 )
 
 type Provider string
@@ -26,8 +28,8 @@ type providerSpec struct {
 	models  []string
 	envVars []string // checked in order for an API key
 	baseURL string   // "" uses the SDK default
-	step    func(a *Agent, ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error)
-	schema  func(root map[string]any, provider Provider) (map[string]any, error)
+	step    provider.Step
+	schema  func(root map[string]any, provider string) (map[string]any, error)
 	prepare func(a *Agent) error // optional; provider rules and defaults, run at the end of New
 }
 
@@ -56,30 +58,170 @@ func inferProvider(modelName string) Provider {
 	return matched
 }
 
-func firstEnv(names []string) string {
-	for _, name := range names {
-		if value := os.Getenv(name); value != "" {
-			return value
+// step sends one request to the provider. Credentials a base URL carries are
+// removed from the error, because provider SDKs print the request URL.
+func (a *Agent) step(ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error) {
+	spec, ok := providerSpecs[a.provider]
+	if !ok {
+		return nil, fmt.Errorf("unsupported provider %q", a.provider)
+	}
+	req, err := a.wireRequest(log)
+	if err != nil {
+		return nil, redactURLSecrets(err, a.baseURL)
+	}
+	var sink provider.Emit
+	if emit != nil {
+		sink = func(kind provider.ChunkKind, delta string) error {
+			return emit(Chunk{Kind: ChunkKind(kind), Delta: delta})
 		}
 	}
-	return ""
+	items, err := spec.step(ctx, req, sink)
+	if err != nil {
+		var refusal *provider.RefusedError
+		if errors.As(err, &refusal) {
+			if refusal.Detail != "" {
+				err = fmt.Errorf("%s: %w: %s", refusal.Provider, ErrRefused, refusal.Detail)
+			} else {
+				err = fmt.Errorf("%s: %w", refusal.Provider, ErrRefused)
+			}
+		}
+		return nil, redactURLSecrets(err, a.baseURL)
+	}
+	entries := make([]Entry, len(items))
+	for i, item := range items {
+		entries[i] = fromItem(item)
+	}
+	return entries, nil
 }
 
-// defaultHTTPClient is used when neither the agent nor the session sets a
-// client and the SDK would not supply its own. Like the OpenAI SDK's default, it
-// gives up on a server that accepts a request but never sends response headers;
-// the body is not limited, so long streams are unaffected. It is built on first
-// use, so a wrapped http.DefaultTransport (for tracing, say) is kept, though
-// then without the timeout.
-var defaultHTTPClient = sync.OnceValue(func() *http.Client {
-	return newHTTPClient(10 * time.Minute)
-})
-
-func newHTTPClient(responseHeaderTimeout time.Duration) *http.Client {
-	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
-		transport = transport.Clone()
-		transport.ResponseHeaderTimeout = responseHeaderTimeout
-		return &http.Client{Transport: transport}
+// wireRequest describes the agent's next request: its settings and the
+// entries of log the model sees.
+func (a *Agent) wireRequest(log []Entry) (*provider.Request, error) {
+	req := &provider.Request{
+		Provider:     string(a.provider),
+		Model:        a.model,
+		Instructions: a.instructions,
+		APIKey:       a.apiKey,
+		BaseURL:      a.baseURL,
+		HTTPClient:   a.httpClient,
+		MaxTokens:    a.maxTokens,
+		Temperature:  a.temperature,
+		Reasoning:    string(a.reasoning),
+		Seq:          len(log),
 	}
-	return &http.Client{Transport: http.DefaultTransport}
+	for _, tool := range a.tools {
+		req.Tools = append(req.Tools, provider.Tool{Name: tool.name, Description: tool.description, Schema: tool.schema})
+	}
+	if a.searchOptions != nil {
+		req.Search = &provider.Search{}
+		if l := a.searchOptions.UserLocation; l != nil {
+			req.Search.Location = &provider.Location{
+				Country: l.Country, City: l.City, Region: l.Region, Timezone: l.Timezone,
+				Latitude: l.Latitude, Longitude: l.Longitude,
+			}
+		}
+	}
+	if a.outputSchema != nil {
+		schema, err := wireSchemaFor(a.outputSchema, a.provider)
+		if err != nil {
+			return nil, err
+		}
+		req.OutputSchema = schema
+	}
+	req.Log = make([]provider.Item, 0, len(log))
+	for _, e := range log {
+		if !e.HiddenFromModel() {
+			req.Log = append(req.Log, toItem(e))
+		}
+	}
+	return req, nil
+}
+
+var itemKinds = map[Kind]provider.Kind{
+	KindUser:         provider.KindUser,
+	KindAssistant:    provider.KindAssistant,
+	KindReasoning:    provider.KindReasoning,
+	KindToolCall:     provider.KindToolCall,
+	KindToolResult:   provider.KindToolResult,
+	KindProviderTool: provider.KindProviderTool,
+}
+
+var entryKinds = func() map[provider.Kind]Kind {
+	kinds := make(map[provider.Kind]Kind, len(itemKinds))
+	for k, v := range itemKinds {
+		kinds[v] = k
+	}
+	return kinds
+}()
+
+func toItem(e Entry) provider.Item {
+	item := provider.Item{At: e.At, Kind: itemKinds[e.Kind], Opaque: e.Opaque}
+	if e.Content != nil {
+		item.Content = make([]provider.ContentPart, 0, len(e.Content))
+	}
+	for _, part := range e.Content {
+		item.Content = append(item.Content, provider.ContentPart{Kind: provider.ContentKind(part.Kind), Text: part.Text})
+	}
+	if e.Reasoning != nil {
+		item.Reasoning = &provider.Reasoning{Summary: e.Reasoning.Summary}
+	}
+	if c := e.ToolCall; c != nil {
+		item.ToolCall = &provider.ToolCall{ID: c.ID, Name: c.Name, Args: c.Args}
+	}
+	if r := e.ToolResult; r != nil {
+		item.ToolResult = &provider.ToolResult{CallID: r.CallID, Output: r.Output, Error: r.Error}
+	}
+	return item
+}
+
+func fromItem(item provider.Item) Entry {
+	e := Entry{At: item.At, Kind: entryKinds[item.Kind], Opaque: item.Opaque}
+	if item.Content != nil {
+		e.Content = make([]ContentPart, 0, len(item.Content))
+	}
+	for _, part := range item.Content {
+		e.Content = append(e.Content, ContentPart{Kind: ContentKind(part.Kind), Text: part.Text})
+	}
+	if item.Reasoning != nil {
+		e.Reasoning = &Reasoning{Summary: item.Reasoning.Summary}
+	}
+	if c := item.ToolCall; c != nil {
+		e.ToolCall = &ToolCall{ID: c.ID, Name: c.Name, Args: c.Args}
+	}
+	if r := item.ToolResult; r != nil {
+		e.ToolResult = &ToolResult{CallID: r.CallID, Output: r.Output, Error: r.Error}
+	}
+	if item.Response != nil {
+		e.Response = &ResponseInfo{ID: item.Response.ID}
+	}
+	if u := item.Usage; u != nil {
+		e.Usage = &Usage{
+			InputTokens:      u.InputTokens,
+			OutputTokens:     u.OutputTokens,
+			CacheReadTokens:  u.CacheReadTokens,
+			CacheWriteTokens: u.CacheWriteTokens,
+		}
+	}
+	return e
+}
+
+// wireSchemaFor adapts a jsonschema.Schema for a specific provider's wire format.
+func wireSchemaFor(s *jsonschema.Schema, provider Provider) (map[string]any, error) {
+	m, err := schema.Wire(s)
+	if m == nil || err != nil {
+		return m, err
+	}
+	spec, ok := providerSpecs[provider]
+	if !ok {
+		return m, nil
+	}
+	return spec.schema(m, string(provider))
+}
+
+// validateOutput validates the output string against the pre-compiled validator.
+func validateOutput(validator *sjs.Schema, text string) error {
+	if err := schema.ValidateOutput(validator, text); err != nil {
+		return fmt.Errorf("%w: %v", ErrOutputValidation, err)
+	}
+	return nil
 }

@@ -1,4 +1,4 @@
-package crux
+package provider
 
 import (
 	"context"
@@ -16,6 +16,13 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 )
 
+// Providers the OpenAI wire code treats specially, as crux.Provider spells them.
+const (
+	providerOpenAI     = "openai"
+	providerOpenRouter = "openrouter"
+	providerXAI        = "xai"
+)
+
 const openAIOutputItemOpaqueKey = "openai.response.output_item"
 
 // openAIUnknownOutputItemOpaqueKey holds output items that cannot be replayed.
@@ -30,15 +37,15 @@ const openAIProviderOpaqueKey = "openai.response.provider"
 // as Fork does when the provider changes, so a stored session can be resumed
 // with an agent on a different OpenAI-compatible provider. Entries recorded
 // without a provider are kept as they are.
-func withoutForeignOpenAIItems(log []Entry, provider Provider) []Entry {
-	foreign := func(e Entry) bool {
+func withoutForeignOpenAIItems(log []Item, provider string) []Item {
+	foreign := func(e Item) bool {
 		p, ok := e.Opaque[openAIProviderOpaqueKey]
-		return ok && Provider(p) != provider
+		return ok && string(p) != provider
 	}
 	if !slices.ContainsFunc(log, foreign) {
 		return log
 	}
-	out := make([]Entry, 0, len(log))
+	out := make([]Item, 0, len(log))
 	for _, e := range log {
 		if foreign(e) {
 			if e.Kind == KindProviderTool {
@@ -51,23 +58,23 @@ func withoutForeignOpenAIItems(log []Entry, provider Provider) []Entry {
 	return out
 }
 
-func (a *Agent) newOpenAIClient() *openai.Client {
+func newOpenAIClient(req *Request) *openai.Client {
 	var opts []option.RequestOption
-	if a.apiKey != "" {
-		opts = append(opts, option.WithAPIKey(a.apiKey))
+	if req.APIKey != "" {
+		opts = append(opts, option.WithAPIKey(req.APIKey))
 	}
-	if a.baseURL != "" {
-		opts = append(opts, option.WithBaseURL(a.baseURL))
+	if req.BaseURL != "" {
+		opts = append(opts, option.WithBaseURL(req.BaseURL))
 	}
-	client := a.httpClient
+	client := req.HTTPClient
 	if client != nil {
 		opts = append(opts, option.WithHTTPClient(client))
-	} else if a.provider != ProviderOpenAI {
+	} else if req.Provider != providerOpenAI {
 		// Construct the Responses service directly to avoid inheriting OpenAI
 		// credentials, organization, project, or custom headers from the environment.
-		opts = append(opts, option.WithHTTPClient(defaultHTTPClient()))
+		opts = append(opts, option.WithHTTPClient(DefaultHTTPClient()))
 	}
-	if a.provider != ProviderOpenAI {
+	if req.Provider != providerOpenAI {
 		return &openai.Client{Options: opts, Responses: responses.NewResponseService(opts...)}
 	}
 
@@ -76,46 +83,46 @@ func (a *Agent) newOpenAIClient() *openai.Client {
 }
 
 // openAIstep sends the log and returns the model's entries with usage attached.
-func (a *Agent) openAIstep(ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error) {
-	input, err := toOpenAIResponseInput(withoutForeignOpenAIItems(log, a.provider))
+func OpenAI(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
+	input, err := toOpenAIResponseInput(withoutForeignOpenAIItems(req.Log, req.Provider))
 	if err != nil {
 		return nil, err
 	}
 
 	params := responses.ResponseNewParams{
-		Model: openai.ResponsesModel(a.model),
+		Model: openai.ResponsesModel(req.Model),
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: input},
-		Tools: openAITools(a.tools),
+		Tools: openAITools(req.Tools),
 		Store: openai.Bool(false),
 	}
 
-	switch a.provider {
-	case ProviderOpenAI, ProviderOpenrouter, ProviderXAI:
+	switch req.Provider {
+	case providerOpenAI, providerOpenRouter, providerXAI:
 		// Nothing is kept server side, so reasoning travels with the log.
 		params.Include = []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent}
 	}
-	if a.instructions != "" {
-		params.Instructions = openai.String(a.instructions)
+	if req.Instructions != "" {
+		params.Instructions = openai.String(req.Instructions)
 	}
-	if a.maxTokens > 0 {
-		params.MaxOutputTokens = openai.Int(int64(a.maxTokens))
+	if req.MaxTokens > 0 {
+		params.MaxOutputTokens = openai.Int(int64(req.MaxTokens))
 	}
-	if a.temperature != nil {
-		params.Temperature = openai.Float(*a.temperature)
+	if req.Temperature != nil {
+		params.Temperature = openai.Float(*req.Temperature)
 	}
-	if a.reasoning != "" {
+	if req.Reasoning != "" {
 		// https://platform.openai.com/docs/guides/reasoning
-		params.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffort(a.reasoning)}
-		if a.reasoning == ReasoningOff {
+		params.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffort(req.Reasoning)}
+		if req.Reasoning == ReasoningOff {
 			params.Reasoning.Effort = shared.ReasoningEffortNone
-		} else if a.provider == ProviderOpenAI {
+		} else if req.Provider == providerOpenAI {
 			// Without a summary, OpenAI returns no readable reasoning.
 			params.Reasoning.Summary = shared.ReasoningSummaryAuto
 		}
 	}
-	if a.searchOptions != nil {
+	if req.Search != nil {
 		tool := responses.ToolParamOfWebSearch(responses.WebSearchToolTypeWebSearch)
-		if location := a.searchOptions.UserLocation; location != nil && a.provider == ProviderOpenAI {
+		if location := req.Search.Location; location != nil && req.Provider == providerOpenAI {
 			if location.Country != "" {
 				tool.OfWebSearch.UserLocation.Country = openai.String(location.Country)
 			}
@@ -134,12 +141,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, emit chunkSink) ([]
 		}
 		params.Tools = append(params.Tools, tool)
 	}
-	if a.outputSchema != nil {
-		schema, err := wireSchemaFor(a.outputSchema, a.provider)
-		if err != nil {
-			return nil, err
-		}
-
+	if schema := req.OutputSchema; schema != nil {
 		params.Text = responses.ResponseTextConfigParam{
 			Format: responses.ResponseFormatTextConfigUnionParam{
 				OfJSONSchema: &responses.ResponseFormatTextJSONSchemaConfigParam{
@@ -151,7 +153,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, emit chunkSink) ([]
 		}
 	}
 
-	client := a.newOpenAIClient()
+	client := newOpenAIClient(req)
 	var response *responses.Response
 	if emit == nil {
 		response, err = client.Responses.New(ctx, params)
@@ -159,37 +161,34 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, emit chunkSink) ([]
 		response, err = streamOpenAI(ctx, client, params, emit)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s responses: %w", a.provider, err)
+		return nil, fmt.Errorf("%s responses: %w", req.Provider, err)
 	}
 	// Scan all messages before converting items or executing any local tools.
 	for _, item := range response.Output {
 		if message, ok := item.AsAny().(responses.ResponseOutputMessage); ok {
 			for _, part := range message.Content {
 				if refusal, ok := part.AsAny().(responses.ResponseOutputRefusal); ok {
-					if refusal.Refusal != "" {
-						return nil, fmt.Errorf("%s: %w: %s", a.provider, ErrRefused, refusal.Refusal)
-					}
-					return nil, fmt.Errorf("%s: %w", a.provider, ErrRefused)
+					return nil, refused(req.Provider, refusal.Refusal)
 				}
 			}
 		}
 	}
 	if response.Error.Code != "" || response.Status == responses.ResponseStatusFailed {
-		return nil, fmt.Errorf("%s response failed: %s: %s", a.provider, response.Error.Code, response.Error.Message)
+		return nil, fmt.Errorf("%s response failed: %s: %s", req.Provider, response.Error.Code, response.Error.Message)
 	}
 	if response.Status != responses.ResponseStatusCompleted {
 		// incomplete_details.reason: https://platform.openai.com/docs/api-reference/responses/object
 		if response.IncompleteDetails.Reason == "content_filter" {
-			return nil, fmt.Errorf("%s: %w: content_filter", a.provider, ErrRefused)
+			return nil, refused(req.Provider, "content_filter")
 		}
 		if response.IncompleteDetails.Reason == "max_output_tokens" {
-			return nil, fmt.Errorf("%s response hit the output token limit; raise it with crux.WithMaxTokens", a.provider)
+			return nil, fmt.Errorf("%s response hit the output token limit; raise it with crux.WithMaxTokens", req.Provider)
 		}
-		return nil, fmt.Errorf("%s response did not complete: status %q, reason %q", a.provider, response.Status, response.IncompleteDetails.Reason)
+		return nil, fmt.Errorf("%s response did not complete: status %q, reason %q", req.Provider, response.Status, response.IncompleteDetails.Reason)
 	}
 
 	now := time.Now().UTC()
-	produced := make([]Entry, 0, len(response.Output))
+	produced := make([]Item, 0, len(response.Output))
 	for _, item := range response.Output {
 		entry, err := fromOpenAIResponseOutputItemUnion(item)
 		if err != nil {
@@ -201,14 +200,14 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, emit chunkSink) ([]
 		if entry.Opaque == nil {
 			entry.Opaque = make(map[string][]byte)
 		}
-		entry.Opaque[openAIProviderOpaqueKey] = []byte(a.provider)
+		entry.Opaque[openAIProviderOpaqueKey] = []byte(req.Provider)
 		produced = append(produced, entry)
 	}
 
 	if !hasAnswerOrCall(produced) {
 		// A completed response with no output is an empty final answer; its
 		// usage must not be lost. https://platform.openai.com/docs/api-reference/responses/object
-		produced = append(produced, Entry{At: now, Kind: KindAssistant})
+		produced = append(produced, Item{At: now, Kind: KindAssistant})
 	}
 
 	// Usage is reported per response, so it hangs on the last thing the model
@@ -226,7 +225,7 @@ func (a *Agent) openAIstep(ctx context.Context, log []Entry, emit chunkSink) ([]
 	return produced, nil
 }
 
-func streamOpenAI(ctx context.Context, client *openai.Client, params responses.ResponseNewParams, emit chunkSink) (*responses.Response, error) {
+func streamOpenAI(ctx context.Context, client *openai.Client, params responses.ResponseNewParams, emit Emit) (*responses.Response, error) {
 	stream := client.Responses.NewStreaming(ctx, params)
 	defer stream.Close()
 	var response *responses.Response
@@ -280,9 +279,9 @@ func openAITools(tools []Tool) []responses.ToolUnionParam {
 	for _, tool := range tools {
 		params = append(params, responses.ToolUnionParam{
 			OfFunction: &responses.FunctionToolParam{
-				Name:        tool.name,
-				Description: openai.String(tool.description),
-				Parameters:  tool.schema,
+				Name:        tool.Name,
+				Description: openai.String(tool.Description),
+				Parameters:  tool.Schema,
 				Strict:      openai.Bool(false),
 			},
 		})
@@ -290,7 +289,7 @@ func openAITools(tools []Tool) []responses.ToolUnionParam {
 	return params
 }
 
-func fromOpenAIResponseOutputItemUnion(item responses.ResponseOutputItemUnion) (Entry, error) {
+func fromOpenAIResponseOutputItemUnion(item responses.ResponseOutputItemUnion) (Item, error) {
 	opaque := map[string][]byte{
 		openAIOutputItemOpaqueKey: []byte(item.RawJSON()),
 	}
@@ -320,9 +319,9 @@ func fromOpenAIResponseOutputItemUnion(item responses.ResponseOutputItemUnion) (
 			for _, part := range content {
 				text.WriteString(part.Text)
 			}
-			return Entry{Kind: KindReasoning, Reasoning: &Reasoning{Summary: text.String()}, Opaque: opaque}, nil
+			return Item{Kind: KindReasoning, Reasoning: &Reasoning{Summary: text.String()}, Opaque: opaque}, nil
 		}
-		return Entry{
+		return Item{
 			Kind:    KindAssistant,
 			Content: content,
 			Opaque:  opaque,
@@ -334,7 +333,7 @@ func fromOpenAIResponseOutputItemUnion(item responses.ResponseOutputItemUnion) (
 		for _, part := range v.Summary {
 			summary = append(summary, part.Text)
 		}
-		return Entry{
+		return Item{
 			Kind: KindReasoning,
 			Reasoning: &Reasoning{
 				Summary: strings.Join(summary, "\n\n"),
@@ -342,9 +341,9 @@ func fromOpenAIResponseOutputItemUnion(item responses.ResponseOutputItemUnion) (
 			Opaque: opaque,
 		}, nil
 	case responses.ResponseFunctionWebSearch:
-		return Entry{Kind: KindProviderTool, Opaque: opaque}, nil
+		return Item{Kind: KindProviderTool, Opaque: opaque}, nil
 	case responses.ResponseFunctionToolCall:
-		return Entry{
+		return Item{
 			Kind: KindToolCall,
 			ToolCall: &ToolCall{
 				ID:   v.CallID,
@@ -355,20 +354,17 @@ func fromOpenAIResponseOutputItemUnion(item responses.ResponseOutputItemUnion) (
 		}, nil
 	default:
 		// Keep items this SDK does not know for inspection; they are not replayed.
-		return Entry{Kind: KindProviderTool, Opaque: map[string][]byte{openAIUnknownOutputItemOpaqueKey: []byte(item.RawJSON())}}, nil
+		return Item{Kind: KindProviderTool, Opaque: map[string][]byte{openAIUnknownOutputItemOpaqueKey: []byte(item.RawJSON())}}, nil
 	}
 }
 
 // toOpenAIResponseInput renders a log as the input of the next request.
-func toOpenAIResponseInput(log []Entry) (responses.ResponseInputParam, error) {
+func toOpenAIResponseInput(log []Item) (responses.ResponseInputParam, error) {
 	input := make(responses.ResponseInputParam, 0, len(log))
 
 	for _, e := range log {
 		if e.Kind == KindProviderTool && len(e.Opaque[openAIOutputItemOpaqueKey]) == 0 {
 			continue
-		}
-		if e.HiddenFromModel() {
-			continue // tool-written state or approval event, never shown to the model
 		}
 		if e.Kind == KindReasoning && len(e.Opaque[openAIOutputItemOpaqueKey]) == 0 {
 			continue // Foreign reasoning cannot be replayed without provider data.
@@ -388,7 +384,7 @@ func toOpenAIResponseInput(log []Entry) (responses.ResponseInputParam, error) {
 }
 
 // toOpenAIResponseInputItemUnionParam renders an entry as an input item.
-func toOpenAIResponseInputItemUnionParam(e Entry) (responses.ResponseInputItemUnionParam, error) {
+func toOpenAIResponseInputItemUnionParam(e Item) (responses.ResponseInputItemUnionParam, error) {
 	if raw, ok := e.Opaque[openAIOutputItemOpaqueKey]; ok && len(raw) > 0 {
 		return openAIInputItemFromOutputItem(raw)
 	}
