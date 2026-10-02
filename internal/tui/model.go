@@ -15,8 +15,12 @@ import (
 )
 
 type (
-	eventMsg   Event
-	runDoneMsg struct{ err error }
+	eventMsg     Event
+	runDoneMsg   struct{ err error }
+	compactedMsg struct {
+		compacted bool
+		err       error
+	}
 	decidedMsg struct {
 		id  string
 		err error
@@ -221,6 +225,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case runDoneMsg:
 		cmds = append(cmds, m.runDone(msg.err))
 
+	case compactedMsg:
+		m.running, m.flash = false, ""
+		switch {
+		case msg.err != nil:
+			m.addNotice(noticeError, msg.err.Error())
+		case !msg.compacted:
+			m.addNotice(noticeInfo, "Nothing to compact yet.")
+		}
+		m.dirty = true
+
 	case decidedMsg:
 		cmds = append(cmds, m.decided(msg))
 
@@ -396,6 +410,12 @@ func (m *model) submit() tea.Cmd {
 	case "/help":
 		m.addNotice(noticeInfo, helpText)
 		return nil
+	case "/compact":
+		if m.running || m.deciding {
+			m.flash = "wait for the agent to finish"
+			return nil
+		}
+		return m.compact()
 	}
 	if text == "/model" || strings.HasPrefix(text, "/model ") {
 		return m.openPicker(strings.TrimSpace(strings.TrimPrefix(text, "/model")))
@@ -407,6 +427,19 @@ func (m *model) submit() tea.Cmd {
 		return nil
 	}
 	return m.send(text)
+}
+
+// compact summarises the conversation in the background.
+func (m *model) compact() tea.Cmd {
+	m.running = true
+	m.flash = "compacting the conversation…"
+	m.runs.Add(1)
+	backend, ctx := m.backend, m.ctx
+	return func() tea.Msg {
+		defer m.runs.Done()
+		compacted, err := backend.Compact(ctx)
+		return compactedMsg{compacted: compacted, err: err}
+	}
 }
 
 // send shows the prompt and starts a run with it.

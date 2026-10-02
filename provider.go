@@ -31,6 +31,9 @@ type providerSpec struct {
 	step    provider.Step
 	schema  func(root map[string]any, provider string) (map[string]any, error)
 	prepare func(a *Agent) error // optional; provider rules and defaults, run at the end of New
+	// contextWindow returns a model's context window in tokens, or 0 when
+	// unknown. Optional; WithContextWindow overrides it.
+	contextWindow func(model string) int
 }
 
 var providerSpecs = map[Provider]providerSpec{}
@@ -84,6 +87,8 @@ func (a *Agent) step(ctx context.Context, log []Entry, emit chunkSink) ([]Entry,
 			} else {
 				err = fmt.Errorf("%s: %w", refusal.Provider, ErrRefused)
 			}
+		} else if provider.IsContextTooLong(err) {
+			err = fmt.Errorf("%w: %w", ErrContextTooLong, err)
 		}
 		return nil, redactURLSecrets(err, a.baseURL)
 	}
@@ -109,8 +114,21 @@ func (a *Agent) wireRequest(log []Entry) (*provider.Request, error) {
 		Reasoning:    string(a.reasoning),
 		Seq:          len(log),
 	}
+	added := make(map[*toolInstructions]bool)
 	for _, tool := range a.tools {
 		req.Tools = append(req.Tools, provider.Tool{Name: tool.name, Description: tool.description, Schema: tool.schema})
+		if tool.instructions == nil || added[tool.instructions] {
+			continue
+		}
+		added[tool.instructions] = true
+		text, err := tool.instructions.text()
+		if err != nil {
+			return nil, fmt.Errorf("instructions of tool %q: %w", tool.name, err)
+		}
+		if text != "" && req.Instructions != "" {
+			req.Instructions += "\n\n"
+		}
+		req.Instructions += text
 	}
 	if a.searchOptions != nil {
 		req.Search = &provider.Search{}
@@ -128,11 +146,10 @@ func (a *Agent) wireRequest(log []Entry) (*provider.Request, error) {
 		}
 		req.OutputSchema = schema
 	}
-	req.Log = make([]provider.Item, 0, len(log))
-	for _, e := range log {
-		if !e.HiddenFromModel() {
-			req.Log = append(req.Log, toItem(e))
-		}
+	view := modelView(log)
+	req.Log = make([]provider.Item, 0, len(view))
+	for _, e := range view {
+		req.Log = append(req.Log, toItem(e))
 	}
 	return req, nil
 }

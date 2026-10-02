@@ -62,15 +62,34 @@ const ToolsetFilesystem = "filesystem"
 // searches are cut off with a note telling the model how to narrow the
 // request.
 //
+// An AGENTS.md at root is added to the instructions of every request from an
+// agent with any of these tools, read again before each request, so the
+// agent follows the directory's conventions as coding agents do. Turn this
+// off with WithFilesystemAgentsFile(false).
+//
 // The tools belong to the "filesystem" toolset, so WithToolsets("filesystem")
 // gives an agent all of them. Register fails when root is not an existing
 // directory.
-func Filesystem(root string) Toolset {
-	return &filesystemToolset{root: root}
+func Filesystem(root string, opts ...FilesystemOption) Toolset {
+	f := &filesystemToolset{root: root, agentsFile: true}
+	for _, opt := range opts {
+		opt(f)
+	}
+	return f
+}
+
+// FilesystemOption configures the Filesystem toolset.
+type FilesystemOption func(*filesystemToolset)
+
+// WithFilesystemAgentsFile sets whether the AGENTS.md at the root is added to
+// the agent's instructions. The default is true.
+func WithFilesystemAgentsFile(enabled bool) FilesystemOption {
+	return func(f *filesystemToolset) { f.agentsFile = enabled }
 }
 
 type filesystemToolset struct {
-	root string
+	root       string
+	agentsFile bool
 }
 
 func (f *filesystemToolset) Register(registry ToolsRegistry) error {
@@ -89,6 +108,11 @@ func (f *filesystemToolset) Register(registry ToolsRegistry) error {
 	t := filesystem.New(root)
 	approval := WithApprovalNeeded(true)
 	inSet := WithToolset(ToolsetFilesystem)
+	if f.agentsFile {
+		// One option for every tool, so AGENTS.md is added once per request.
+		inToolset, agents := inSet, withInstructions(t.AgentsInstructions)
+		inSet = func(tool *Tool) { inToolset(tool); agents(tool) }
+	}
 
 	registerTextTool(registry, FsReadFile, "Read a text file. The whole file is returned unless line (1-based start line) and limit (maximum number of lines) select a range.", t.ReadFile, inSet)
 	registerTextTool(registry, FsReadMultipleFiles, fmt.Sprintf("Read several text files at once (at most %d). Prefer this over sequential read_file calls.", filesystem.MaxMultiReadFiles), t.ReadMultipleFiles, inSet)

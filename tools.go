@@ -30,8 +30,9 @@ type Tool struct {
 	invoke         func(ctx context.Context, args json.RawMessage) (string, *StateDelta, error)
 	approvalNeeded bool
 	toolset        string
-	schemaErr      error  // from WithInputSchema, reported at registration
-	subAgent       *Agent // set for WithSubAgent tools
+	instructions   *toolInstructions // added to the agent's instructions on each request
+	schemaErr      error             // from WithInputSchema, reported at registration
+	subAgent       *Agent            // set for WithSubAgent tools
 }
 
 type ToolOption func(*Tool)
@@ -47,6 +48,23 @@ func WithApprovalNeeded(approvalNeeded bool) ToolOption {
 func WithToolset(name string) ToolOption {
 	return func(tool *Tool) {
 		tool.toolset = name
+	}
+}
+
+// toolInstructions produces text for the instructions of each request.
+type toolInstructions struct {
+	text func() (string, error)
+}
+
+// withInstructions makes the tool add fn's text to the instructions of every
+// request from an agent that has the tool. fn runs before each request, so
+// the text can change between turns; it is not part of the agent's ID. Give
+// one option to several tools to add the text once for an agent with any of
+// them.
+func withInstructions(fn func() (string, error)) ToolOption {
+	instructions := &toolInstructions{text: fn}
+	return func(tool *Tool) {
+		tool.instructions = instructions
 	}
 }
 

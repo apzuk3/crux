@@ -71,6 +71,7 @@ const (
 	EventToolStarted                    // Call.ID
 	EventToolResult                     // Call.ID, Output, Err, Denied, Duration
 	EventApproval                       // Call.ID, Approved
+	EventCompacted                      // Text: what the model no longer sees in full
 )
 
 // Event is something that happened in the session or one of its subagents.
@@ -109,6 +110,9 @@ type Backend interface {
 	// SwitchModel continues the conversation with another model and returns
 	// the ID of the session it continues in.
 	SwitchModel(ctx context.Context, provider, model string) (sessionID string, err error)
+	// Compact summarises the older part of the conversation and reports
+	// whether there was anything to summarise.
+	Compact(ctx context.Context) (bool, error)
 }
 
 // App is a running chat.

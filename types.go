@@ -33,7 +33,7 @@ const (
 	KindToolCall
 	KindToolResult
 	KindStateDelta
-	_                // reserved for conversation compaction
+	KindCompaction   // the model no longer sees earlier entries in full; Compaction says how
 	KindProviderTool // server-executed tool event retained in Opaque
 	KindApproval
 	KindRunStarted  // a Run, Resume or Stream began work
@@ -75,9 +75,10 @@ type Entry struct {
 	Delta      *StateDelta `json:"delta,omitempty"`
 	Approval   *Approval   `json:"approval,omitempty"`
 
-	Run      *RunStatus    `json:"run,omitempty"`
-	Turn     *TurnInfo     `json:"turn,omitempty"`
-	Response *ResponseInfo `json:"response,omitempty"` // on the last entry of a model response
+	Run        *RunStatus    `json:"run,omitempty"`
+	Turn       *TurnInfo     `json:"turn,omitempty"`
+	Compaction *Compaction   `json:"compaction,omitempty"`
+	Response   *ResponseInfo `json:"response,omitempty"` // on the last entry of a model response
 
 	Opaque map[string][]byte `json:"opaque,omitempty"` // provider adornments; dropped on provider switch
 	Usage  *Usage            `json:"usage,omitempty"`  // tokens; never affects replay
@@ -153,7 +154,7 @@ func (e Entry) Text() string {
 // (like state deltas, user approvals or lifecycle records) that is not sent to
 // LLM providers.
 func (e Entry) HiddenFromModel() bool {
-	return e.Kind == KindStateDelta || e.Kind == KindApproval || e.Kind.lifecycle()
+	return e.Kind == KindStateDelta || e.Kind == KindApproval || e.Kind == KindCompaction || e.Kind.lifecycle()
 }
 
 // lifecycle reports whether entries of this kind only record the progress of
@@ -229,6 +230,15 @@ type TurnInfo struct {
 	Model    string    `json:"model"`
 }
 
+// Compaction is recorded on a KindCompaction entry; the entries it covers
+// stay in the log, but the model sees less of them. Every compaction omits
+// large tool outputs and files up to Through. One with a Summary also
+// replaces those entries with it. Usage counts the summary request.
+type Compaction struct {
+	Through uint64 `json:"through"`           // the Seq of the last entry it covers
+	Summary string `json:"summary,omitempty"` // empty when only outputs were omitted
+}
+
 // ResponseInfo describes one model response. ID is the provider's response
 // ID, for looking the request up with the provider. FirstTokenAfter is the
 // time from sending the request to the first streamed delta; it is zero when
@@ -268,6 +278,9 @@ var (
 	// appended entries to the session. Load the session again with
 	// WithSessionID and retry.
 	ErrSessionConflict = errors.New("session was changed by another writer")
+	// ErrContextTooLong wraps a provider error saying the request exceeds the
+	// model's context window, when compacting the session could not help.
+	ErrContextTooLong = errors.New("context window exceeded")
 	// ErrMaxTurns is returned by Run when the agent used all its turns without a final answer.
 	ErrMaxTurns = errors.New("max turns reached")
 	// ErrRefused is returned by Run when the model refuses the request.

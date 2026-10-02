@@ -39,6 +39,10 @@ type Agent struct {
 	maxTokens   int             // 0 uses the provider default
 	temperature *float64        // nil uses the provider default
 	reasoning   ReasoningEffort // "" uses the provider default
+
+	// Context
+	compaction    CompactionOptions
+	contextWindow int // 0 uses the model's known window
 }
 
 // SearchOptions configures provider-executed web search.
@@ -136,6 +140,13 @@ func (a *Agent) canonicalData() []byte {
 		"search_options": a.searchOptions,
 		"output_schema":  a.outputSchema,
 		"reasoning":      a.reasoning,
+	}
+	// Added only when set, so agents that keep the defaults keep their IDs.
+	if a.compaction != (CompactionOptions{}) {
+		data["compaction"] = a.compaction
+	}
+	if a.contextWindow != 0 {
+		data["context_window"] = a.contextWindow
 	}
 	raw, _ := json.Marshal(data)
 	return raw
@@ -563,6 +574,8 @@ func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {
 		fork.apiKey = a.apiKey
 		fork.tools = slices.Clone(a.tools)
 		fork.searchOptions = cloneSearchOptions(a.searchOptions)
+		fork.compaction = a.compaction
+		fork.contextWindow = a.contextWindow
 		return nil
 	})
 
@@ -578,6 +591,9 @@ func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {
 			}
 		}
 
+		if fork.model != a.model && fork.contextWindow == a.contextWindow {
+			fork.contextWindow = 0 // set for the old model
+		}
 		if fork.provider != a.provider {
 			if fork.apiKey == a.apiKey {
 				fork.apiKey = ""

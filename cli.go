@@ -100,6 +100,13 @@ func (c *cli) Decide(ctx context.Context, id string, approve bool) error {
 	return c.session.Reject(ctx, id, "")
 }
 
+// Compact summarises the older part of the conversation.
+func (c *cli) Compact(ctx context.Context) (bool, error) {
+	n := len(c.session.logs)
+	err := c.session.Compact(ctx)
+	return len(c.session.logs) > n, err
+}
+
 // SwitchModel continues the conversation with another model, in a fork of
 // the session that keeps the history and every entry handler.
 func (c *cli) SwitchModel(ctx context.Context, provider, model string) (string, error) {
@@ -199,6 +206,14 @@ func (c *cli) event(s *Session, e Entry) (tui.Event, bool) {
 		ev.Kind = tui.EventToolResult
 		ev.Call.ID = e.ToolResult.CallID
 		ev.Output, ev.Err, ev.Denied, ev.Duration = e.ToolResult.Output, e.ToolResult.Error, e.ToolResult.Denied, e.Duration
+	case KindCompaction:
+		if e.Compaction == nil {
+			return ev, false
+		}
+		ev.Kind, ev.Text = tui.EventCompacted, "Context compacted: older tool outputs and files are omitted for the model."
+		if e.Compaction.Summary != "" {
+			ev.Text = "Context compacted: older messages were summarised for the model."
+		}
 	case KindApproval:
 		if e.Approval == nil {
 			return ev, false

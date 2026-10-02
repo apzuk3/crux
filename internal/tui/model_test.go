@@ -26,6 +26,8 @@ func (f *fakeBackend) Run(ctx context.Context, input string) error {
 	return nil
 }
 
+func (f *fakeBackend) Compact(context.Context) (bool, error) { return true, nil }
+
 func (f *fakeBackend) Pending() []Call {
 	f.mu.Lock()
 	defer f.mu.Unlock()

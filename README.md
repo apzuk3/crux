@@ -188,6 +188,27 @@ Authentication:
 
 Tools are listed once, when the server is configured. Resources, prompts and sampling are not supported yet.
 
+### Skills
+
+A skill is a folder with a `SKILL.md`: YAML frontmatter with a `name` and a `description`, then markdown instructions, plus any files the instructions refer to (`references/`, `assets/`, …). It's the [Agent Skills](https://agentskills.io) format used by Claude, Codex and Google ADK. `AddSkills(dir)` registers the skills in `dir`; agents use them with `WithSkills`.
+
+```go
+if err := crux.AddSkills("./skills"); err != nil { // ./skills/<name>/SKILL.md
+	log.Fatal(err)
+}
+agent := crux.Must(crux.New("assistant", crux.OpenAIGPT5_4, crux.WithSkills()))
+```
+
+Every request tells the model which skills exist (names and descriptions only); it loads the instructions of a skill it needs. Skills work the same on every provider.
+
+| Tool | What it does | Approval |
+|---|---|---|
+| `load_skill` | a skill's instructions and the list of its other files | no |
+| `load_skill_resource` | one of a skill's other files | no |
+| `save_skill` | create a skill, or update one (replaces its `SKILL.md`, keeps other frontmatter fields and files) | yes |
+
+The list of skills is read before each request, so a skill saved in one session is available to every session from its next request. Skill names are lowercase letters, digits and hyphens and must match their folder. `AddSkills` fails on an invalid skill; one that becomes invalid later is left out of the list. Scripts in a skill are not run.
+
 ### Filesystem tools
 
 `Filesystem(root)` is a built-in toolset for reading and editing files under `root`. Nothing outside `root` can be reached (not through `..`, absolute paths or symlinks), paths use `/` on every OS, and it works the same on Linux, macOS and Windows. Tools that change files refuse paths that go through a symlink, so the change lands on the path that was approved.
@@ -211,6 +232,8 @@ agent := crux.Must(crux.New("coder", crux.OpenAIGPT5_4, crux.WithToolsets("files
 | `edit_file` | replace exact, unique text in a file | yes |
 | `create_directory` | create directories | yes |
 | `remove_directory` | remove empty directories | yes |
+
+If `root` has an `AGENTS.md`, it's added to the instructions of every request from an agent with any of these tools, so the agent follows the project's conventions as coding agents do. It's read before each request, so edits apply right away. Turn it off with `crux.Filesystem(root, crux.WithFilesystemAgentsFile(false))`.
 
 Read-only tools run without approval, so the model can read any file under `root` (including `.env` files and keys) and its content is sent to the provider. Point `root` at the narrowest directory the agent needs. Each call is bounded (1 MB per file read, capped listings, walks and searches), and output that hits a limit ends with a note telling the model how to narrow the request. Writes and edits replace the file atomically.
 
@@ -294,6 +317,23 @@ The store is the source of truth: an entry joins the session only once the store
 
 If two `Session` values for the same ID write to one store (for example two requests for the same chat), the second write fails with `ErrSessionConflict`. Load the session again with `WithSessionID` and retry.
 
+### Long conversations
+
+Sessions stay within the model's context window on their own. When a request would pass 80% of the window, crux first omits large tool outputs and files the model has already read, and if that is not enough, the model summarises the older turns. A request the provider rejects as too long is compacted and sent again. The log keeps everything: a `KindCompaction` entry records what the model no longer sees in full.
+
+```go
+crux.New("agent", model,
+	crux.WithCompaction(crux.CompactAt(0.7), crux.CompactWith(crux.ClaudeHaiku4_5)), // tune it
+)
+crux.New("agent", model, crux.WithoutCompaction())             // fail with ErrContextTooLong instead
+crux.New("agent", "llama3.2", crux.WithProvider(crux.ProviderOllama),
+	crux.WithContextWindow(32_000))                                // for models crux doesn't know
+
+session.Compact(ctx) // summarise everything before the latest message now
+```
+
+In the terminal chat, `/compact` does the same.
+
 ### Reasoning
 
 ```go
@@ -311,7 +351,7 @@ forked, err := session.Fork(ctx, crux.WithModel(crux.Gemini3_8Flash), crux.WithP
 
 ### Errors
 
-`Run` returns sentinel errors you can check with `errors.Is`: `ErrApprovalNeeded`, `ErrMaxTurns`, `ErrRefused`, `ErrOutputValidation`, `ErrSessionConflict`. A tool that returns an error or panics does not stop the run, and neither do arguments that don't match the tool's input type. The error is sent to the model as the tool result so it can recover.
+`Run` returns sentinel errors you can check with `errors.Is`: `ErrApprovalNeeded`, `ErrMaxTurns`, `ErrRefused`, `ErrOutputValidation`, `ErrSessionConflict`, `ErrContextTooLong`. A tool that returns an error or panics does not stop the run, and neither do arguments that don't match the tool's input type. The error is sent to the model as the tool result so it can recover.
 
 If `Run` fails after your input was recorded (a network error, say), retry with `Resume`. Calling `Run` again with the same input adds it to the conversation twice.
 
@@ -348,7 +388,7 @@ agent := crux.Must(crux.New("assistant", crux.ClaudeHaiku4_5,
 
 ## Examples
 
-See [`examples/`](examples): `basic` (multi-tool planner with structured output), `attachments` (an embedded CSV, a chart drawn in memory, files from the command line and HTTP uploads), `stream`, `store`, `fork`, `subagents`, `websearch`, `filesystem`, `lifecycle` (live trace with WithEntryHandler, approvals, per-run summary from the log), `cli` (a coding agent in the terminal chat), `mcp` (chat about your Linear issues through Linear's MCP server, with OAuth login), `network` (a network assistant with DNS, whois, HTTP, sockets and servers), `domains` (a terminal chat that proposes available domain names for an idea, checked by the network toolset with RDAP and whois), `oncall` (an on-call engineer with an investigator subagent and approved rollbacks, in the terminal chat).
+See [`examples/`](examples): `basic` (multi-tool planner with structured output), `attachments` (an embedded CSV, a chart drawn in memory, files from the command line and HTTP uploads), `stream`, `store`, `fork`, `subagents`, `websearch`, `filesystem`, `skills` (a terminal chat with a commit-message skill that can save new skills), `lifecycle` (live trace with WithEntryHandler, approvals, per-run summary from the log), `cli` (a coding agent in the terminal chat), `mcp` (chat about your Linear issues through Linear's MCP server, with OAuth login), `network` (a network assistant with DNS, whois, HTTP, sockets and servers), `domains` (a terminal chat that proposes available domain names for an idea, checked by the network toolset with RDAP and whois), `oncall` (an on-call engineer with an investigator subagent and approved rollbacks, in the terminal chat).
 
 ## Development
 

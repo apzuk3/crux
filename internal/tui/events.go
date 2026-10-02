@@ -114,6 +114,11 @@ func (m *model) apply(e Event, replay bool) tea.Cmd {
 			m.blocks = append(m.blocks, &block{kind: blockAssistant, agent: e.Agent, text: e.Text})
 		}
 
+	case EventCompacted:
+		if top {
+			m.addNotice(noticeInfo, e.Text)
+		}
+
 	case EventRefusal:
 		if top {
 			m.finishLive()

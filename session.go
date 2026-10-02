@@ -331,10 +331,9 @@ func (s *Session) run(ctx context.Context, inputs []any, emit chunkSink) (text s
 			return "", ErrApprovalNeeded // a subagent stopped for approval
 		}
 
-		if err := s.appendLogs(ctx, Entry{Kind: KindTurnStarted, Turn: s.agent.turnInfo()}); err != nil {
-			return "", err
-		}
-		start := time.Now()
+		// The request usually still fits when compaction fails, so it is sent
+		// anyway; the failure is reported only if the request fails too.
+		compactErr := s.maybeCompact(ctx)
 		var sink chunkSink
 		var firstToken time.Time
 		if emit != nil {
@@ -346,9 +345,25 @@ func (s *Session) run(ctx context.Context, inputs []any, emit chunkSink) (text s
 				return emit(chunk)
 			}
 		}
-		produced, err := s.agent.step(ctx, s.logs, sink)
-		if err != nil {
-			return "", err
+		var start time.Time
+		var produced []Entry
+		for attempt := 0; ; attempt++ {
+			if err := s.appendLogs(ctx, Entry{Kind: KindTurnStarted, Turn: s.agent.turnInfo()}); err != nil {
+				return "", err
+			}
+			start = time.Now()
+			produced, err = s.agent.step(ctx, s.logs, sink)
+			if err == nil {
+				break
+			}
+			// A request too large for the model is sent again after compacting.
+			retry, err := s.recoverContext(ctx, err, attempt)
+			if !retry {
+				if compactErr != nil {
+					err = errors.Join(err, compactErr)
+				}
+				return "", err
+			}
 		}
 		if len(produced) > 0 {
 			last := &produced[len(produced)-1]
@@ -440,7 +455,7 @@ func (s *Session) FinalOutput() (string, bool) {
 	start := len(s.logs)
 	for i, v := range slices.Backward(s.logs) {
 		kind := v.Kind
-		if kind == KindUser || kind == KindToolResult || (v.HiddenFromModel() && !kind.lifecycle()) {
+		if kind == KindUser || kind == KindToolResult || (v.HiddenFromModel() && !kind.lifecycle() && kind != KindCompaction) {
 			start = i + 1
 			break
 		}

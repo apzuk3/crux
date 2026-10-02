@@ -161,3 +161,50 @@ func TestFilesystemIndividualTools(t *testing.T) {
 	require.NotContains(t, body, fmt.Sprintf(`"name":%q`, crux.FsWriteFile))
 	require.NotContains(t, body, fmt.Sprintf(`"name":%q`, crux.FsEditFile))
 }
+
+func TestFilesystemAgentsFile(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("Run go test before you finish."), 0o644))
+
+	reg := crux.NewToolsRegistry()
+	require.NoError(t, crux.AddToolsetWithRegistry(reg, crux.Filesystem(root)))
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnText("one")
+	mock.Expect().ReturnText("two")
+	agent, err := crux.New("coder", crux.OpenAIGPT5_6Sol, append(mock.AgentOptions(),
+		crux.WithInstructions("You are a coder."), crux.WithToolsetsRegistry(reg, "filesystem"))...)
+	require.NoError(t, err)
+	sess, err := crux.NewSession(t.Context(), agent)
+	require.NoError(t, err)
+
+	_, err = sess.Run(t.Context(), "hi")
+	require.NoError(t, err)
+	body := mock.Requests()[0].BodyString()
+	require.Contains(t, body, "You are a coder.")
+	require.Equal(t, 1, strings.Count(body, "Run go test before you finish."), "added once, though every tool carries it")
+
+	// The file is read before each request.
+	require.NoError(t, os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("Use tabs."), 0o644))
+	_, err = sess.Run(t.Context(), "again")
+	require.NoError(t, err)
+	require.Contains(t, mock.Requests()[1].BodyString(), "Use tabs.")
+
+	// Off with the option, and absent when there is no file.
+	for _, ts := range []crux.Toolset{
+		crux.Filesystem(root, crux.WithFilesystemAgentsFile(false)),
+		crux.Filesystem(t.TempDir()),
+	} {
+		reg := crux.NewToolsRegistry()
+		require.NoError(t, crux.AddToolsetWithRegistry(reg, ts))
+		mock := cruxtest.NewMock()
+		mock.Expect().ReturnText("ok")
+		agent, err := crux.New("coder", crux.OpenAIGPT5_6Sol, append(mock.AgentOptions(),
+			crux.WithToolsRegistry([]string{"read_file"}, reg))...)
+		require.NoError(t, err)
+		sess, err := crux.NewSession(t.Context(), agent)
+		require.NoError(t, err)
+		_, err = sess.Run(t.Context(), "hi")
+		require.NoError(t, err)
+		require.NotContains(t, mock.Requests()[0].BodyString(), "agents_md")
+	}
+}

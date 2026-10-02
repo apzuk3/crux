@@ -229,6 +229,30 @@ func (e *RefusedError) Error() string {
 	return e.Provider + ": model refused the request: " + e.Detail
 }
 
+// IsContextTooLong reports whether err is a provider saying the request is
+// larger than the model accepts. Providers return these as plain 400s, so the
+// message is all there is to go on.
+func IsContextTooLong(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{
+		"context_length_exceeded",    // OpenAI
+		"maximum context length",     // OpenAI, DeepSeek, OpenRouter
+		"maximum prompt length",      // xAI
+		"prompt is too long",         // Anthropic
+		"request_too_large",          // Anthropic, request body over its size limit
+		"exceeds the context window", // OpenAI-compatible servers
+	} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	// Gemini: "The input token count (N) exceeds the maximum number of tokens allowed (M)."
+	return strings.Contains(msg, "input token count") && strings.Contains(msg, "exceeds the maximum")
+}
+
 func refused(provider, detail string) error {
 	return &RefusedError{Provider: provider, Detail: detail}
 }

@@ -2,6 +2,7 @@ package crux
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/apzuk3/crux/internal/provider"
@@ -763,9 +764,10 @@ func init() {
 			OpenAIGPT3_5Turbo0125,
 			OpenAIGPT3_5Turbo16k0613,
 		},
-		envVars: []string{"OPENAI_API_KEY", "OPENAI_APIKEY", "OPENAI_KEY"},
-		step:    provider.OpenAI,
-		schema:  schema.AdaptOpenAI,
+		envVars:       []string{"OPENAI_API_KEY", "OPENAI_APIKEY", "OPENAI_KEY"},
+		step:          provider.OpenAI,
+		schema:        schema.AdaptOpenAI,
+		contextWindow: openAIWindow,
 	})
 
 	registerProvider(ProviderAnthropic, providerSpec{
@@ -784,10 +786,11 @@ func init() {
 		// ANTHROPIC_AUTH_TOKEN is a bearer token, not an API key; the SDK's
 		// default options send it as Authorization when no key is set.
 		// https://github.com/anthropics/anthropic-sdk-go/blob/v1.72.0/client.go
-		envVars: []string{"ANTHROPIC_API_KEY", "ANTHROPIC_APIKEY", "ANTHROPIC_KEY"},
-		step:    provider.Anthropic,
-		schema:  schema.AdaptAnthropic,
-		prepare: prepareAnthropic,
+		envVars:       []string{"ANTHROPIC_API_KEY", "ANTHROPIC_APIKEY", "ANTHROPIC_KEY"},
+		step:          provider.Anthropic,
+		schema:        schema.AdaptAnthropic,
+		contextWindow: anthropicWindow,
+		prepare:       prepareAnthropic,
 	})
 
 	registerProvider(ProviderGoogle, providerSpec{
@@ -808,9 +811,10 @@ func init() {
 			GeminiEmbedding2Preview, GeminiEmbedding001,
 			GeminiRoboticsER2Preview, GeminiRoboticsER1_6Preview,
 		},
-		envVars: []string{"GOOGLE_API_KEY", "GOOGLE_APIKEY", "GOOGLE_KEY", "GEMINI_API_KEY", "GEMINI_APIKEY", "GEMINI_KEY"},
-		step:    provider.Gemini,
-		schema:  schema.AdaptPermissive,
+		envVars:       []string{"GOOGLE_API_KEY", "GOOGLE_APIKEY", "GOOGLE_KEY", "GEMINI_API_KEY", "GEMINI_APIKEY", "GEMINI_KEY"},
+		step:          provider.Gemini,
+		schema:        schema.AdaptPermissive,
+		contextWindow: geminiWindow,
 	})
 
 	registerProvider(ProviderXAI, providerSpec{
@@ -858,21 +862,23 @@ func init() {
 			XAIGrokCodeFast,
 			XAIGrokCodeFast1_0825,
 		},
-		envVars: []string{"XAI_API_KEY", "XAI_APIKEY", "XAI_KEY"},
-		baseURL: "https://api.x.ai/v1",
-		step:    provider.OpenAI,
-		schema:  schema.AdaptOpenAI,
+		envVars:       []string{"XAI_API_KEY", "XAI_APIKEY", "XAI_KEY"},
+		baseURL:       "https://api.x.ai/v1",
+		step:          provider.OpenAI,
+		schema:        schema.AdaptOpenAI,
+		contextWindow: xAIWindow,
 	})
 
 	registerProvider(ProviderDeepSeek, providerSpec{
 		models: []string{
 			DeepSeekFlash,
 		},
-		envVars: []string{"DEEPSEEK_API_KEY", "DEEPSEEK_APIKEY", "DEEPSEEK_KEY"},
-		baseURL: "https://api.deepseek.com",
-		step:    provider.OpenAI, // stateless Responses with plain-text reasoning replay
-		schema:  schema.AdaptOpenAI,
-		prepare: prepareDeepSeek,
+		envVars:       []string{"DEEPSEEK_API_KEY", "DEEPSEEK_APIKEY", "DEEPSEEK_KEY"},
+		baseURL:       "https://api.deepseek.com",
+		step:          provider.OpenAI, // stateless Responses with plain-text reasoning replay
+		schema:        schema.AdaptOpenAI,
+		contextWindow: deepSeekWindow,
+		prepare:       prepareDeepSeek,
 	})
 
 	registerProvider(ProviderOpenrouter, providerSpec{
@@ -1061,11 +1067,12 @@ func init() {
 			OpenRouterInferenceNetSchematronV2Turbo,
 			OpenRouterInferenceNetSchematronV2Small,
 		},
-		envVars: []string{"OPENROUTER_API_KEY", "OPENROUTER_APIKEY", "OPENROUTER_KEY"},
-		baseURL: "https://openrouter.ai/api/v1",
-		step:    provider.OpenAI,
-		schema:  schema.AdaptOpenAI,
-		prepare: prepareOpenRouter,
+		envVars:       []string{"OPENROUTER_API_KEY", "OPENROUTER_APIKEY", "OPENROUTER_KEY"},
+		baseURL:       "https://openrouter.ai/api/v1",
+		step:          provider.OpenAI,
+		schema:        schema.AdaptOpenAI,
+		contextWindow: openRouterWindow,
+		prepare:       prepareOpenRouter,
 	})
 
 	registerProvider(ProviderOllama, providerSpec{
@@ -1310,6 +1317,84 @@ func init() {
 }
 
 // prepareAnthropic rejects settings the Messages API refuses.
+// Context windows in input tokens, used to decide when to compact. They are
+// deliberately conservative, by model family, so a newer model compacts a
+// little early rather than late; checked on 2026-10-01. A wrong guess is
+// recovered from when the provider rejects a request as too long.
+
+func openAIWindow(model string) int {
+	for _, w := range []struct {
+		prefix string
+		tokens int
+	}{
+		{"gpt-3.5", 16_385},
+		{"gpt-4-32k", 32_768},
+		{"gpt-4.1", 1_000_000},
+		{"gpt-4o", 128_000}, {"chatgpt-4o", 128_000}, {"gpt-4-turbo", 128_000},
+		{"gpt-4-1106", 128_000}, {"gpt-4-0125", 128_000}, {"gpt-4-vision", 128_000},
+		{"o1-mini", 128_000}, {"o1-preview", 128_000}, {"codex-mini", 128_000},
+		{"gpt-4", 8_192},
+		{"o1", 200_000}, {"o3", 200_000}, {"o4", 200_000},
+		{"gpt-5", 272_000}, {"gpt-6", 272_000},
+	} {
+		if strings.HasPrefix(model, w.prefix) {
+			return w.tokens
+		}
+	}
+	return 0
+}
+
+func anthropicWindow(model string) int {
+	if strings.HasPrefix(model, "claude-") {
+		return 200_000
+	}
+	return 0
+}
+
+func geminiWindow(model string) int {
+	switch {
+	case !strings.HasPrefix(model, "gemini-"), strings.Contains(model, "embedding"):
+		return 0
+	case strings.Contains(model, "-tts"):
+		return 8_192
+	case strings.Contains(model, "-image"):
+		return 32_768
+	case strings.Contains(model, "live"), strings.Contains(model, "audio"), strings.Contains(model, "computer-use"):
+		return 128_000
+	}
+	return 1_048_576
+}
+
+func xAIWindow(model string) int {
+	switch {
+	case strings.HasPrefix(model, "grok-4"), strings.HasPrefix(model, "grok-code"), strings.HasPrefix(model, "grok-build"):
+		return 256_000
+	case strings.HasPrefix(model, "grok-3"):
+		return 131_072
+	}
+	return 0
+}
+
+func deepSeekWindow(string) int { return 128_000 }
+
+// openRouterWindow uses the window of the model's own provider.
+func openRouterWindow(model string) int {
+	vendor, name, _ := strings.Cut(model, "/")
+	switch vendor {
+	case "openai":
+		return openAIWindow(name)
+	case "anthropic":
+		return anthropicWindow(name)
+	case "google":
+		return geminiWindow(name)
+	case "x-ai":
+		return xAIWindow(name)
+	case "deepseek":
+		return deepSeekWindow(name)
+	}
+	return 0
+}
+
 func prepareAnthropic(a *Agent) error {
 	if a.temperature != nil && a.reasoning != "" && a.reasoning != ReasoningOff {
 		return errors.New("anthropic does not accept a temperature while the model reasons; remove WithTemperature or use WithReasoning(ReasoningOff)")

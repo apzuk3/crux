@@ -380,7 +380,7 @@ func (m *model) renderWelcome(w int) string {
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, content)
 }
 
-const helpText = `Commands: /model [filter] switches models · /clear clears the screen · /quit exits · /help shows this.
+const helpText = `Commands: /model [filter] switches models · /compact summarises older messages to save context · /clear clears the screen · /quit exits · /help shows this.
 Keys: enter send · ctrl+o switch model · shift+enter or ctrl+j new line · ↑ recall last prompt · esc interrupt · pgup/pgdn scroll · tab browse tools · ctrl+r show thoughts · ctrl+b toggle sidebar · ctrl+c quit.
 While approving: y approve · n reject · a approve all · esc reject all.`
 
