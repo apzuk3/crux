@@ -312,6 +312,23 @@ The coordinator sees a tool named `agent_researcher` that takes a `task` string.
 
 If a subagent calls a tool that needs approval, the parent's `Run` returns `ErrApprovalNeeded` too. `PendingApprovals` lists the subagent's calls, with `Agent` set to the subagent's name, and `Approve`, `Reject` and `Resume` on the parent session continue the subagent where it stopped. This also works after the session is loaded again from a store.
 
+### Spawning agents
+
+`WithAgentSpawning` lets the model create agents itself: it gets a `spawn_agent` tool that takes a `name`, `instructions`, a `task` and the `tools` the new agent may use, and returns the agent's answer.
+
+```go
+coordinator := crux.Must(crux.New("coordinator", crux.ClaudeSonnet5,
+	crux.WithTools([]string{"search", "fetch"}),
+	crux.WithAgentSpawning(
+		crux.WithSpawnModels(crux.ClaudeSonnet5, crux.ClaudeHaiku4_5), // the model may pick one; the first is the default
+		crux.WithSpawnMaxTurns(5),
+		crux.WithSpawnConcurrency(2), // at most two spawned agents run at once; the rest wait
+	),
+))
+```
+
+By default a spawned agent may use the parent's tools and model, with the parent's turn limit. `WithSpawnTools` (or `WithSpawnToolsRegistry`) sets the tools it may get instead, including ones the parent doesn't have. Spawned agents can't spawn agents themselves, and they run like subagents, so approvals work the same way.
+
 ### Persisting and resuming sessions
 
 Sessions are kept in memory by default. To keep them, use any `crux.Store`. `crux.NewGORMStore` works with any GORM driver:
@@ -446,7 +463,7 @@ agent := crux.Must(crux.New("assistant", crux.ClaudeHaiku4_5,
 
 ## Examples
 
-See [`examples/`](examples): `basic` (multi-tool planner with structured output), `attachments` (an embedded CSV, a chart drawn in memory, files from the command line and HTTP uploads), `stream`, `store`, `fork`, `subagents`, `websearch`, `filesystem`, `skills` (a terminal chat with a commit-message skill that can save new skills), `lifecycle` (live trace with WithEntryHandler, approvals, per-run summary from the log), `cli` (a coding agent in the terminal chat), `mcp` (chat about your Linear issues through Linear's MCP server, with OAuth login), `network` (a network assistant with DNS, whois, HTTP, sockets and servers), `domains` (a terminal chat that proposes available domain names for an idea, checked by the network toolset with RDAP and whois), `oncall` (an on-call engineer with an investigator subagent and approved rollbacks, in the terminal chat).
+See [`examples/`](examples): `basic` (multi-tool planner with structured output), `attachments` (an embedded CSV, a chart drawn in memory, files from the command line and HTTP uploads), `stream`, `store`, `fork`, `subagents`, `spawning` (a coordinator that writes its own agents, with an approved report sent by one of them), `websearch`, `filesystem`, `skills` (a terminal chat with a commit-message skill that can save new skills), `lifecycle` (live trace with WithEntryHandler, approvals, per-run summary from the log), `cli` (a coding agent in the terminal chat), `mcp` (chat about your Linear issues through Linear's MCP server, with OAuth login), `network` (a network assistant with DNS, whois, HTTP, sockets and servers), `domains` (a terminal chat that proposes available domain names for an idea, checked by the network toolset with RDAP and whois), `oncall` (an on-call engineer with an investigator subagent and approved rollbacks, in the terminal chat).
 
 ## Development
 

@@ -34,6 +34,7 @@ type Tool struct {
 	instructions   *toolInstructions // added to the agent's instructions on each request
 	schemaErr      error             // from WithInputSchema, reported at registration
 	subAgent       *Agent            // set for WithSubAgent tools
+	spawn          *spawnConfig      // set for the WithAgentSpawning tool
 	timeout        time.Duration     // 0 means no limit
 	sequential     bool              // calls run one at a time, in the model's order
 }

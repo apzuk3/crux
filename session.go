@@ -126,10 +126,14 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 func (s *Session) loadWaitingChildren(ctx context.Context) error {
 	for _, open := range s.openToolCalls() {
 		index := slices.IndexFunc(s.agent.tools, func(tool Tool) bool { return tool.name == open.call.Name })
-		if index < 0 || s.agent.tools[index].subAgent == nil {
+		if index < 0 || s.agent.tools[index].kind != toolKindSubagent {
 			continue
 		}
-		child, err := NewSession(context.WithValue(ctx, sessionContextKey{}, s), s.agent.tools[index].subAgent,
+		agent, _, err := s.subAgentFor(s.agent.tools[index], open.call)
+		if err != nil {
+			continue // the call fails when it runs
+		}
+		child, err := NewSession(context.WithValue(ctx, sessionContextKey{}, s), agent,
 			WithSessionID(childSessionID(s.id, open.key())), WithStore(s.store))
 		if err != nil {
 			return fmt.Errorf("load subagent session of call %q: %w", open.call.ID, err)
@@ -553,6 +557,9 @@ func (s *Session) hasUnexecutedToolCalls() bool {
 	return len(s.openToolCalls()) > 0
 }
 
+// maxConcurrentToolCalls is how many calls from one model turn run at once.
+const maxConcurrentToolCalls = 8
+
 func (s *Session) executeUnexecutedToolCalls(ctx context.Context) ([]Entry, error) {
 	if len(s.PendingApprovals()) > 0 {
 		return nil, nil
@@ -594,8 +601,8 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) ([]Entry, erro
 	// maxConcurrentToolCalls at a time, and see the same state; their results
 	// are recorded in the order the model requested them. Calls of sequential
 	// tools run one after another in that order, as one of the concurrent
-	// tasks, each seeing the state the calls before it left.
-	const maxConcurrentToolCalls = 8
+	// tasks, each seeing the state the calls before it left. Spawn calls
+	// have their own queue (WithSpawnConcurrency).
 	state := s.StateSnapshot()
 	ran := make([]bool, len(unexecuted))
 	waiting := make([]*Session, len(unexecuted))
@@ -606,6 +613,31 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) ([]Entry, erro
 		if s.agent.toolIsSequential(unexecuted[i].call.Name) {
 			sequential = append(sequential, i)
 		}
+	}
+	var spawns []int
+	var spawnLimit int
+	for _, i := range run {
+		if limit, ok := s.agent.spawnConcurrency(unexecuted[i].call.Name); ok {
+			spawns = append(spawns, i)
+			spawnLimit = limit
+		}
+	}
+	if len(spawns) > 0 {
+		spawnSlots := make(chan struct{}, spawnLimit)
+		wg.Go(func() {
+			for _, i := range spawns {
+				select {
+				case spawnSlots <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				ran[i] = true
+				wg.Go(func() {
+					defer func() { <-spawnSlots }()
+					results[i], waiting[i] = s.dispatch(ctx, unexecuted[i], state)
+				})
+			}
+		})
 	}
 	if len(sequential) > 0 {
 		select {
@@ -631,7 +663,7 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) ([]Entry, erro
 	}
 calls:
 	for _, i := range run {
-		if slices.Contains(sequential, i) {
+		if slices.Contains(sequential, i) || slices.Contains(spawns, i) {
 			continue
 		}
 		select {
@@ -791,7 +823,7 @@ func (s *Session) dispatch(ctx context.Context, open openToolCall, snapshot map[
 	var output string
 	var delta *StateDelta
 	var err error
-	if tool.subAgent != nil {
+	if tool.kind == toolKindSubagent {
 		output, delta, waiting, err = s.runSubAgent(toolCtx, tool, open)
 		if waiting != nil {
 			return nil, waiting
@@ -833,28 +865,25 @@ func (s *Session) dispatch(ctx context.Context, open openToolCall, snapshot map[
 	return resp, nil
 }
 
-// runSubAgent runs the subagent of a WithSubAgent tool on the task in the
-// call's arguments. The subagent's session ID derives from the call, so a call
-// that stopped for approval, or whose result was not stored, continues in the
-// same session instead of starting over. When that session stops for approval
-// it is returned as waiting.
+// runSubAgent runs the subagent of a WithSubAgent or spawn tool on the task
+// in the call's arguments. The subagent's session ID derives from the call,
+// so a call that stopped for approval, or whose result was not stored,
+// continues in the same session instead of starting over. When that session
+// stops for approval it is returned as waiting.
 func (s *Session) runSubAgent(ctx context.Context, tool Tool, open openToolCall) (output string, delta *StateDelta, waiting *Session, err error) {
-	input, err := schema.DecodeArgs[subAgentInput](tool.name, open.call.Args, subAgentArgsValidator())
+	agent, task, err := s.subAgentFor(tool, open.call)
 	if err != nil {
 		return "", nil, nil, err
 	}
-	if strings.TrimSpace(input.Task) == "" {
-		return "", nil, nil, fmt.Errorf("subagent %q needs a non-empty task", tool.subAgent.name)
-	}
 
-	child, err := NewSession(ctx, tool.subAgent, WithSessionID(childSessionID(s.id, open.key())))
+	child, err := NewSession(ctx, agent, WithSessionID(childSessionID(s.id, open.key())))
 	if err != nil {
 		return "", nil, nil, err
 	}
 	if len(child.logs) > 0 {
 		output, err = child.Resume(ctx)
 	} else {
-		output, err = child.Run(ctx, input.Task)
+		output, err = child.Run(ctx, task)
 	}
 	if errors.Is(err, ErrApprovalNeeded) {
 		return "", nil, child, nil
@@ -862,7 +891,25 @@ func (s *Session) runSubAgent(ctx context.Context, tool Tool, open openToolCall)
 	if err != nil {
 		return "", nil, nil, err
 	}
-	return output, &StateDelta{Set: map[string]any{tool.subAgent.name: output}}, nil, nil
+	if tool.spawn != nil {
+		return output, nil, nil, nil // the model chose the name, so it is no state key
+	}
+	return output, &StateDelta{Set: map[string]any{agent.name: output}}, nil, nil
+}
+
+// subAgentFor returns the agent a subagent tool call runs and its task.
+func (s *Session) subAgentFor(tool Tool, call *ToolCall) (*Agent, string, error) {
+	if tool.spawn != nil {
+		return s.agent.spawnedAgent(tool, call.Args)
+	}
+	input, err := schema.DecodeArgs[subAgentInput](tool.name, call.Args, subAgentArgsValidator())
+	if err != nil {
+		return nil, "", err
+	}
+	if strings.TrimSpace(input.Task) == "" {
+		return nil, "", fmt.Errorf("subagent %q needs a non-empty task", tool.subAgent.name)
+	}
+	return tool.subAgent, input.Task, nil
 }
 
 // invokeTool runs a tool and turns a panic into an error, so one faulty tool

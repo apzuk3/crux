@@ -83,6 +83,9 @@ func New(name, model string, opts ...AgentOption) (*Agent, error) {
 	if err := agent.checkToolChoice(); err != nil {
 		return nil, err
 	}
+	if err := agent.prepareSpawning(); err != nil {
+		return nil, err
+	}
 
 	if agent.provider == "" {
 		return nil, fmt.Errorf("cannot infer provider from model %q, please pass through crux.WithProvider", agent.model)
@@ -160,6 +163,11 @@ func (a *Agent) canonicalData() []byte {
 	}
 	if a.parallel != nil {
 		data["parallel_tool_calls"] = *a.parallel
+	}
+	for _, t := range a.tools {
+		if t.spawn != nil && t.spawn.maxTurns != 0 {
+			data["spawn_max_turns"] = t.spawn.maxTurns
+		}
 	}
 	raw, _ := json.Marshal(data)
 	return raw
