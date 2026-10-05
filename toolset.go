@@ -58,6 +58,9 @@ const ToolsetFilesystem = "filesystem"
 // root, including secrets such as .env files or private keys, and its content
 // is sent to the provider. Scope root narrowly to the files the agent needs.
 //
+// Calls from one model turn run one at a time, in the order the model wrote
+// them, so creating a directory and then writing a file into it works.
+//
 // Output and work per call are bounded: large files, long listings and
 // searches are cut off with a note telling the model how to narrow the
 // request.
@@ -107,11 +110,14 @@ func (f *filesystemToolset) Register(registry ToolsRegistry) error {
 
 	t := filesystem.New(root)
 	approval := WithApprovalNeeded(true)
-	inSet := WithToolset(ToolsetFilesystem)
+	// Every file tool is sequential, so calls from one turn see each other's
+	// changes in the order the model wrote them.
+	inToolset, sequential := WithToolset(ToolsetFilesystem), WithSequential()
+	inSet := func(tool *Tool) { inToolset(tool); sequential(tool) }
 	if f.agentsFile {
 		// One option for every tool, so AGENTS.md is added once per request.
-		inToolset, agents := inSet, withInstructions(t.AgentsInstructions)
-		inSet = func(tool *Tool) { inToolset(tool); agents(tool) }
+		inSequentialSet, agents := inSet, withInstructions(t.AgentsInstructions)
+		inSet = func(tool *Tool) { inSequentialSet(tool); agents(tool) }
 	}
 
 	registerTextTool(registry, FsReadFile, "Read a text file. The whole file is returned unless line (1-based start line) and limit (maximum number of lines) select a range.", t.ReadFile, inSet)
@@ -163,6 +169,10 @@ var netApprovalDefaults = map[string]bool{
 	NetListen:      true,
 	NetHTTPServe:   true,
 }
+
+// netSequential lists the tools that act on an open handle. Their calls from
+// one turn run in the model's order, so a read follows the send before it.
+var netSequential = map[string]bool{NetSend: true, NetRead: true, NetClose: true}
 
 // NetworkOption configures the Network toolset.
 type NetworkOption func(*networkConfig)
@@ -221,6 +231,10 @@ type NetworkToolset struct {
 // WithNetworkApprovalNeeded). Anything read from the network goes into the
 // model's context, so treat it as untrusted input.
 //
+// net_send, net_read and net_close calls from one model turn run one at a
+// time in the order the model wrote them, so a read sees the reply to a send
+// before it.
+//
 // Close the toolset to close everything it has open. The tools belong to the
 // "network" toolset, so WithToolsets("network") gives an agent all of them.
 func Network(opts ...NetworkOption) *NetworkToolset {
@@ -251,7 +265,11 @@ func (t *NetworkToolset) Register(registry ToolsRegistry) error {
 		}
 	}
 	reg := func(name string) []ToolOption {
-		return []ToolOption{WithToolset(ToolsetNetwork), WithApprovalNeeded(approval[name])}
+		opts := []ToolOption{WithToolset(ToolsetNetwork), WithApprovalNeeded(approval[name])}
+		if netSequential[name] {
+			opts = append(opts, WithSequential())
+		}
+		return opts
 	}
 
 	registerTextTool(registry, NetDNSLookup, "Look up DNS records, like dig. Asks the system's DNS server unless server is given. Output lists the answer, authority and additional sections with TTLs.", t.tools.DNSLookup, reg(NetDNSLookup)...)

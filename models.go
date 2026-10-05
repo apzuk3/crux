@@ -813,6 +813,7 @@ func init() {
 		},
 		envVars:       []string{"GOOGLE_API_KEY", "GOOGLE_APIKEY", "GOOGLE_KEY", "GEMINI_API_KEY", "GEMINI_APIKEY", "GEMINI_KEY"},
 		step:          provider.Gemini,
+		prepare:       prepareGoogle,
 		schema:        schema.AdaptPermissive,
 		contextWindow: geminiWindow,
 	})
@@ -1396,8 +1397,21 @@ func openRouterWindow(model string) int {
 }
 
 func prepareAnthropic(a *Agent) error {
-	if a.temperature != nil && a.reasoning != "" && a.reasoning != ReasoningOff {
+	reasons := a.reasoning != "" && a.reasoning != ReasoningOff
+	if a.temperature != nil && reasons {
 		return errors.New("anthropic does not accept a temperature while the model reasons; remove WithTemperature or use WithReasoning(ReasoningOff)")
+	}
+	_, forcesTool := a.toolChoice.tool()
+	if (forcesTool || a.toolChoice == ToolChoiceRequired) && reasons {
+		return errors.New("anthropic cannot force a tool call while the model reasons; use WithReasoning(ReasoningOff) or ToolChoiceAuto")
+	}
+	return nil
+}
+
+// prepareGoogle rejects settings the Gemini API has no equivalent for.
+func prepareGoogle(a *Agent) error {
+	if a.parallel != nil && !*a.parallel {
+		return errors.New("gemini has no setting to turn off parallel tool calls; remove WithParallelToolCalls(false)")
 	}
 	return nil
 }

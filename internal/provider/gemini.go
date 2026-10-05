@@ -37,11 +37,31 @@ func newGeminiClient(ctx context.Context, req *Request) (*genai.Client, error) {
 	// genai retries only when asked to. Match the OpenAI and Anthropic SDKs:
 	// two retries of 408, 429, 5xx and connection errors, with backoff.
 	config.HTTPOptions.RetryOptions = &genai.HTTPRetryOptions{
-		Attempts:     genai.Ptr[int32](3),
+		Attempts:     genai.Ptr(int32(req.retries() + 1)),
 		InitialDelay: genai.Ptr(0.5),
 		MaxDelay:     genai.Ptr(8.0),
 	}
 	return genai.NewClient(ctx, config)
+}
+
+// geminiFunctionCalling maps the tool choice onto the function calling mode.
+// Gemini has no setting for parallel calls; crux rejects one when the agent
+// is created.
+func geminiFunctionCalling(req *Request) *genai.FunctionCallingConfig {
+	if len(req.Tools) == 0 {
+		return nil
+	}
+	switch req.ToolChoice {
+	case ToolChoiceAuto:
+		return &genai.FunctionCallingConfig{Mode: genai.FunctionCallingConfigModeAuto}
+	case ToolChoiceRequired:
+		return &genai.FunctionCallingConfig{Mode: genai.FunctionCallingConfigModeAny}
+	case ToolChoiceNone:
+		return &genai.FunctionCallingConfig{Mode: genai.FunctionCallingConfigModeNone}
+	case ToolChoiceTool:
+		return &genai.FunctionCallingConfig{Mode: genai.FunctionCallingConfigModeAny, AllowedFunctionNames: []string{req.ToolName}}
+	}
+	return nil
 }
 
 // geminiStep returns the model's ordered parts with usage attached.
@@ -77,6 +97,12 @@ func Gemini(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 	}
 	if req.Instructions != "" {
 		config.SystemInstruction = &genai.Content{Parts: []*genai.Part{genai.NewPartFromText(req.Instructions)}}
+	}
+	if calling := geminiFunctionCalling(req); calling != nil {
+		if config.ToolConfig == nil {
+			config.ToolConfig = &genai.ToolConfig{}
+		}
+		config.ToolConfig.FunctionCallingConfig = calling
 	}
 	if schema := req.OutputSchema; schema != nil {
 		// Gemini before 3 rejects structured output combined with tools, so

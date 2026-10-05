@@ -173,7 +173,7 @@ func (s *Session) summarise(ctx context.Context, explicit bool) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	produced, err := compactor.step(ctx, []Entry{prompt}, nil)
+	produced, err := compactor.step(ctx, []Entry{prompt}, nil, false)
 	if err != nil {
 		return false, fmt.Errorf("compact session: %w", err)
 	}
@@ -254,6 +254,7 @@ func (a *Agent) compactor() (*Agent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("compaction model: %w", err)
 	}
+	compactor.maxRetries = a.maxRetries
 	return compactor, nil
 }
 

@@ -78,7 +78,7 @@ Session options work too: `crux.CLI(agent, crux.WithStore(store), crux.WithSessi
 
 | | |
 |---|---|
-| **Tool** | A Go function `func(ctx, In) (Out, error)` registered with `RegisterTool`. Tools live in a registry (the default one or your own `NewToolsRegistry`), not inside an agent, so any package can contribute tools. Registering a name twice panics. When the model calls several tools in one turn, they run concurrently (at most 8 at a time). |
+| **Tool** | A Go function `func(ctx, In) (Out, error)` registered with `RegisterTool`. Tools live in a registry (the default one or your own `NewToolsRegistry`), not inside an agent, so any package can contribute tools. Registering a name twice panics. When the model calls several tools in one turn, they run concurrently (at most 8 at a time), so a tool must be safe to call from several goroutines; `WithSequential` runs a tool's calls in order instead. |
 | **Agent** | An immutable blueprint: model, instructions, and the names of the tools it may use. It is safe to share across goroutines. |
 | **Session** | One conversation with an agent. It holds an append-only log of entries (user input, assistant text, tool calls and results). It must not be used from multiple goroutines at once. |
 | **Store** | Where a session's log is persisted. The default is in memory. |
@@ -281,6 +281,24 @@ if errors.Is(err, crux.ErrApprovalNeeded) {
 }
 ```
 
+### Tool timeouts
+
+```go
+crux.RegisterTool("fetch_report", "Fetch a report", fetchReport, crux.WithToolTimeout(30*time.Second))
+```
+
+When the time is up, the tool's context is cancelled and the model gets `tool "fetch_report" timed out after 30s` as the result, so the run goes on. A tool that ignores its context is left running in the background and its result is discarded.
+
+### Tools whose order matters
+
+When the model calls several tools in one turn, they run concurrently: the model hasn't seen any of their results yet, so none can depend on another's output. Side effects can still depend on order, such as creating a directory and then writing a file into it. Calls of a tool registered with `WithSequential` run one at a time, in the order the model wrote them, and each sees the state changes of the calls before it; calls of other tools still run alongside them.
+
+```go
+crux.RegisterTool("append_row", "Append a row to the sheet", appendRow, crux.WithSequential())
+```
+
+The filesystem tools and `net_send`, `net_read` and `net_close` are sequential already.
+
 ### Subagents
 
 ```go
@@ -342,6 +360,17 @@ agent := crux.Must(crux.New("planner", crux.ClaudeOpus4_8, crux.WithReasoning(cr
 
 `WithReasoning` takes `ReasoningOff`, `ReasoningLow`, `ReasoningMedium`, `ReasoningHigh` or `ReasoningMax` and maps it to each provider's setting (Anthropic adaptive thinking and effort, or a thinking budget before Claude 4.6; OpenAI reasoning effort; Gemini thinking level, or a budget on Gemini 2.5). Readable reasoning is requested where the provider offers it, so `Stream` yields `ChunkReasoning` chunks. Without the option, each provider uses its default.
 
+### Tool choice
+
+```go
+agent := crux.Must(crux.New("extractor", crux.OpenAIGPT5_4,
+	crux.WithTools([]string{"save_contact"}),
+	crux.WithToolChoice(crux.ToolChoiceTool("save_contact")), // or ToolChoiceRequired, ToolChoiceNone
+))
+```
+
+The choice applies to the first request after each new input. The requests that follow the tool results let the model decide again, so it can answer instead of calling tools until `WithMaxTurns`. `WithParallelToolCalls(false)` limits the model to one tool call per turn on every request; Gemini has no such setting and rejects it. Anthropic can't force a tool call while the model reasons, so `New` rejects `ToolChoiceRequired` or `ToolChoiceTool` together with `WithReasoning` other than `ReasoningOff`.
+
 ### Forking
 
 ```go
@@ -353,7 +382,36 @@ forked, err := session.Fork(ctx, crux.WithModel(crux.Gemini3_8Flash), crux.WithP
 
 `Run` returns sentinel errors you can check with `errors.Is`: `ErrApprovalNeeded`, `ErrMaxTurns`, `ErrRefused`, `ErrOutputValidation`, `ErrSessionConflict`, `ErrContextTooLong`. A tool that returns an error or panics does not stop the run, and neither do arguments that don't match the tool's input type. The error is sent to the model as the tool result so it can recover.
 
+Failed provider requests (connection errors, timeouts, rate limits and server errors) are retried twice with backoff before `Run` returns the error. `WithMaxRetries(n)` changes that; `WithMaxRetries(0)` turns it off.
+
 If `Run` fails after your input was recorded (a network error, say), retry with `Resume`. Calling `Run` again with the same input adds it to the conversation twice.
+
+### Logging and tracing
+
+Everything a run does is an entry in the session log: when it started and how it ended (`KindRunStarted`, `KindRunFinished`), each provider request (`KindTurnStarted`), each tool start and result, and token `Usage`. `WithEntryHandler` sees each entry as it is stored, including those of subagents, so logs, metrics and traces are a handler away:
+
+```go
+logEntries := crux.WithEntryHandler(func(ctx context.Context, s *crux.Session, e crux.Entry) {
+	attrs := []any{"session", s.ID(), "agent", s.Agent().Name(), "seq", e.Seq}
+	switch e.Kind {
+	case crux.KindTurnStarted:
+		slog.InfoContext(ctx, "model request", append(attrs, "model", e.Turn.Model)...)
+	case crux.KindToolResult:
+		if e.ToolResult.Error != "" {
+			slog.WarnContext(ctx, "tool failed", append(attrs, "error", e.ToolResult.Error, "took", e.Duration)...)
+		}
+	case crux.KindRunFinished:
+		slog.InfoContext(ctx, "run finished", append(attrs, "outcome", e.Run.Outcome, "error", e.Run.Error)...)
+	}
+	if e.Usage != nil {
+		slog.InfoContext(ctx, "tokens", append(attrs, "input", e.Usage.InputTokens, "output", e.Usage.OutputTokens)...)
+	}
+})
+
+session, err := crux.NewSession(ctx, agent, logEntries)
+```
+
+For OpenTelemetry, start a span on `KindRunStarted` and end it on `KindRunFinished`, with a child span from each `KindTurnStarted` to the response's last entry (it carries `Response`). [`examples/lifecycle`](examples/lifecycle) traces a run live and rebuilds a summary of each run from the stored log.
 
 ## Providers
 
@@ -371,7 +429,7 @@ The provider is inferred from known model constants (`crux.ClaudeSonnet5`, `crux
 
 Anthropic requests cache the prompt automatically, so each turn of a run reads the conversation so far from the cache instead of paying for it again.
 
-Common agent options: `WithInstructions`, `WithTools`, `WithToolsets`, `WithMaxTurns`, `WithMaxTokens`, `WithTemperature`, `WithReasoning`, `WithOutputSchemaFrom`, `WithWebSearch`, `WithAPIKey`, `WithBaseURL`, `WithHTTPClient`.
+Common agent options: `WithInstructions`, `WithTools`, `WithToolsets`, `WithMaxTurns`, `WithMaxTokens`, `WithTemperature`, `WithReasoning`, `WithToolChoice`, `WithParallelToolCalls`, `WithOutputSchemaFrom`, `WithWebSearch`, `WithAPIKey`, `WithBaseURL`, `WithHTTPClient`, `WithMaxRetries`.
 
 ## Testing your agents
 
@@ -396,6 +454,8 @@ See [`examples/`](examples): `basic` (multi-tool planner with structured output)
 go test ./...                      # unit tests, no network
 go test -tags evals ./evals/...    # live evaluations; needs provider API keys
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request, and [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## License
 

@@ -352,7 +352,7 @@ func (s *Session) run(ctx context.Context, inputs []any, emit chunkSink) (text s
 				return "", err
 			}
 			start = time.Now()
-			produced, err = s.agent.step(ctx, s.logs, sink)
+			produced, err = s.agent.step(ctx, s.logs, sink, turn == 0 && userEntry != nil)
 			if err == nil {
 				break
 			}
@@ -592,15 +592,48 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) ([]Entry, erro
 
 	// Calls from one model turn run concurrently, at most
 	// maxConcurrentToolCalls at a time, and see the same state; their results
-	// are recorded in the order the model requested them.
+	// are recorded in the order the model requested them. Calls of sequential
+	// tools run one after another in that order, as one of the concurrent
+	// tasks, each seeing the state the calls before it left.
 	const maxConcurrentToolCalls = 8
 	state := s.StateSnapshot()
 	ran := make([]bool, len(unexecuted))
 	waiting := make([]*Session, len(unexecuted))
 	slots := make(chan struct{}, maxConcurrentToolCalls)
 	var wg sync.WaitGroup
+	var sequential []int
+	for _, i := range run {
+		if s.agent.toolIsSequential(unexecuted[i].call.Name) {
+			sequential = append(sequential, i)
+		}
+	}
+	if len(sequential) > 0 {
+		select {
+		case slots <- struct{}{}:
+			wg.Go(func() {
+				defer func() { <-slots }()
+				state := cloneState(state)
+				for _, i := range sequential {
+					if ctx.Err() != nil {
+						return
+					}
+					ran[i] = true
+					results[i], waiting[i] = s.dispatch(ctx, unexecuted[i], state)
+					for _, e := range results[i] {
+						if e.Kind == KindStateDelta {
+							applyDelta(state, e.Delta)
+						}
+					}
+				}
+			})
+		case <-ctx.Done():
+		}
+	}
 calls:
 	for _, i := range run {
+		if slices.Contains(sequential, i) {
+			continue
+		}
 		select {
 		case slots <- struct{}{}:
 		case <-ctx.Done():
@@ -834,7 +867,42 @@ func (s *Session) runSubAgent(ctx context.Context, tool Tool, open openToolCall)
 
 // invokeTool runs a tool and turns a panic into an error, so one faulty tool
 // is reported to the model instead of crashing the program.
-func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (output string, delta *StateDelta, err error) {
+// invokeTool runs the tool, stopping waiting for it after its timeout.
+func invokeTool(ctx context.Context, tool Tool, args json.RawMessage) (string, *StateDelta, error) {
+	if tool.timeout <= 0 {
+		return callTool(ctx, tool, args)
+	}
+	timedOut := fmt.Errorf("tool %q timed out after %v", tool.name, tool.timeout)
+	ctx, cancel := context.WithTimeoutCause(ctx, tool.timeout, timedOut)
+	defer cancel()
+	type result struct {
+		output string
+		delta  *StateDelta
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		output, delta, err := callTool(ctx, tool, args)
+		done <- result{output, delta, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil && context.Cause(ctx) == timedOut {
+			return "", nil, timedOut
+		}
+		return r.output, r.delta, r.err
+	case <-ctx.Done():
+		if context.Cause(ctx) == timedOut {
+			return "", nil, timedOut
+		}
+		// The run was cancelled: wait for the tool, as without a timeout.
+		r := <-done
+		return r.output, r.delta, r.err
+	}
+}
+
+// callTool runs the tool, turning a panic into an error.
+func callTool(ctx context.Context, tool Tool, args json.RawMessage) (output string, delta *StateDelta, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			output, delta = "", nil
@@ -1045,17 +1113,22 @@ type stateContextKey struct{}
 func (s *Session) StateSnapshot() map[string]any {
 	state := make(map[string]any)
 	for _, entry := range s.logs {
-		if entry.Kind != KindStateDelta || entry.Delta == nil {
-			continue
-		}
-
-		maps.Copy(state, entry.Delta.Set)
-
-		for _, key := range entry.Delta.Delete {
-			delete(state, key)
+		if entry.Kind == KindStateDelta {
+			applyDelta(state, entry.Delta)
 		}
 	}
 	return cloneState(state)
+}
+
+// applyDelta changes state as delta says. The values are not copied.
+func applyDelta(state map[string]any, delta *StateDelta) {
+	if delta == nil {
+		return
+	}
+	maps.Copy(state, delta.Set)
+	for _, key := range delta.Delete {
+		delete(state, key)
+	}
 }
 
 // ContextWithState attaches a snapshot of state to a child context. Copying

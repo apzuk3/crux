@@ -63,12 +63,14 @@ func inferProvider(modelName string) Provider {
 
 // step sends one request to the provider. Credentials a base URL carries are
 // removed from the error, because provider SDKs print the request URL.
-func (a *Agent) step(ctx context.Context, log []Entry, emit chunkSink) ([]Entry, error) {
+// first reports the first request after new input, the only one WithToolChoice
+// applies to.
+func (a *Agent) step(ctx context.Context, log []Entry, emit chunkSink, first bool) ([]Entry, error) {
 	spec, ok := providerSpecs[a.provider]
 	if !ok {
 		return nil, fmt.Errorf("unsupported provider %q", a.provider)
 	}
-	req, err := a.wireRequest(log)
+	req, err := a.wireRequest(log, first)
 	if err != nil {
 		return nil, redactURLSecrets(err, a.baseURL)
 	}
@@ -100,8 +102,9 @@ func (a *Agent) step(ctx context.Context, log []Entry, emit chunkSink) ([]Entry,
 }
 
 // wireRequest describes the agent's next request: its settings and the
-// entries of log the model sees.
-func (a *Agent) wireRequest(log []Entry) (*provider.Request, error) {
+// entries of log the model sees. The tool choice is sent only on the first
+// request after new input.
+func (a *Agent) wireRequest(log []Entry, first bool) (*provider.Request, error) {
 	req := &provider.Request{
 		Provider:     string(a.provider),
 		Model:        a.model,
@@ -112,7 +115,16 @@ func (a *Agent) wireRequest(log []Entry) (*provider.Request, error) {
 		MaxTokens:    a.maxTokens,
 		Temperature:  a.temperature,
 		Reasoning:    string(a.reasoning),
+		Parallel:     a.parallel,
+		MaxRetries:   a.maxRetries,
 		Seq:          len(log),
+	}
+	if first {
+		if name, ok := a.toolChoice.tool(); ok {
+			req.ToolChoice, req.ToolName = provider.ToolChoiceTool, name
+		} else {
+			req.ToolChoice = string(a.toolChoice)
+		}
 	}
 	added := make(map[*toolInstructions]bool)
 	for _, tool := range a.tools {

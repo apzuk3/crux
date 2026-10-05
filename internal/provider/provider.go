@@ -36,7 +36,13 @@ type Request struct {
 	MaxTokens    int      // 0 uses the provider default
 	Temperature  *float64 // nil uses the provider default
 	Reasoning    string   // "" uses the provider default; see the Reasoning constants
-	Search       *Search  // nil disables web search
+	// ToolChoice is "" (the model decides) or one of the ToolChoice
+	// constants; ToolChoiceTool forces the tool named ToolName.
+	ToolChoice   string
+	ToolName     string
+	Parallel     *bool   // nil uses the provider default
+	MaxRetries   *int    // nil retries twice
+	Search       *Search // nil disables web search
 	OutputSchema map[string]any
 	// Log holds the entries the model sees, oldest first.
 	Log []Item
@@ -53,6 +59,22 @@ const (
 	ReasoningHigh   = "high"
 	ReasoningMax    = "max"
 )
+
+// Tool choices, as crux.ToolChoice spells them.
+const (
+	ToolChoiceAuto     = "auto"
+	ToolChoiceRequired = "required"
+	ToolChoiceNone     = "none"
+	ToolChoiceTool     = "tool"
+)
+
+// retries returns req.MaxRetries, or the SDKs' default of two.
+func (req *Request) retries() int {
+	if req.MaxRetries != nil {
+		return *req.MaxRetries
+	}
+	return 2
+}
 
 // Tool is a function the model may call.
 type Tool struct {

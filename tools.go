@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/apzuk3/crux/internal/schema"
 	sjs "github.com/santhosh-tekuri/jsonschema/v5"
@@ -33,6 +34,8 @@ type Tool struct {
 	instructions   *toolInstructions // added to the agent's instructions on each request
 	schemaErr      error             // from WithInputSchema, reported at registration
 	subAgent       *Agent            // set for WithSubAgent tools
+	timeout        time.Duration     // 0 means no limit
+	sequential     bool              // calls run one at a time, in the model's order
 }
 
 type ToolOption func(*Tool)
@@ -40,6 +43,27 @@ type ToolOption func(*Tool)
 func WithApprovalNeeded(approvalNeeded bool) ToolOption {
 	return func(tool *Tool) {
 		tool.approvalNeeded = approvalNeeded
+	}
+}
+
+// WithToolTimeout limits how long one call of the tool may run. When the time
+// is up, the tool's context is cancelled and the model gets an error as the
+// result, so the run continues; a tool that ignores its context is left
+// running in the background and its result is discarded. Zero means no limit.
+func WithToolTimeout(timeout time.Duration) ToolOption {
+	return func(tool *Tool) {
+		tool.timeout = max(timeout, 0)
+	}
+}
+
+// WithSequential makes calls of the tool from one model turn run one at a
+// time, in the order the model wrote them, each seeing the state changes of
+// the calls before it. Use it for tools whose side effects depend on order,
+// such as writes to the same file. Calls of other tools in the turn still run
+// concurrently with them.
+func WithSequential() ToolOption {
+	return func(tool *Tool) {
+		tool.sequential = true
 	}
 }
 

@@ -66,6 +66,7 @@ func newOpenAIClient(req *Request) *openai.Client {
 	if req.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(req.BaseURL))
 	}
+	opts = append(opts, option.WithMaxRetries(req.retries()))
 	client := req.HTTPClient
 	if client != nil {
 		opts = append(opts, option.WithHTTPClient(client))
@@ -103,6 +104,17 @@ func OpenAI(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 	}
 	if req.Instructions != "" {
 		params.Instructions = openai.String(req.Instructions)
+	}
+	if len(req.Tools) > 0 || req.Search != nil {
+		switch req.ToolChoice {
+		case ToolChoiceAuto, ToolChoiceRequired, ToolChoiceNone:
+			params.ToolChoice.OfToolChoiceMode = openai.Opt(responses.ToolChoiceOptions(req.ToolChoice))
+		case ToolChoiceTool:
+			params.ToolChoice.OfFunctionTool = &responses.ToolChoiceFunctionParam{Name: req.ToolName}
+		}
+		if req.Parallel != nil {
+			params.ParallelToolCalls = openai.Bool(*req.Parallel)
+		}
 	}
 	if req.MaxTokens > 0 {
 		params.MaxOutputTokens = openai.Int(int64(req.MaxTokens))

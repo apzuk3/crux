@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/apzuk3/crux/internal/schema"
 	"github.com/google/uuid"
@@ -27,6 +28,7 @@ type Agent struct {
 	apiKey       string
 	baseURL      string
 	httpClient   *http.Client
+	maxRetries   *int // nil uses the default of two retries
 
 	// Capabilities & Schemas
 	tools         []Tool
@@ -39,6 +41,8 @@ type Agent struct {
 	maxTokens   int             // 0 uses the provider default
 	temperature *float64        // nil uses the provider default
 	reasoning   ReasoningEffort // "" uses the provider default
+	toolChoice  ToolChoice      // "" lets the model decide
+	parallel    *bool           // nil uses the provider default
 
 	// Context
 	compaction    CompactionOptions
@@ -75,6 +79,9 @@ func New(name, model string, opts ...AgentOption) (*Agent, error) {
 			return nil, fmt.Errorf("agent %q has two tools named %q", agent.name, tool.name)
 		}
 		seen[tool.name] = true
+	}
+	if err := agent.checkToolChoice(); err != nil {
+		return nil, err
 	}
 
 	if agent.provider == "" {
@@ -148,6 +155,12 @@ func (a *Agent) canonicalData() []byte {
 	if a.contextWindow != 0 {
 		data["context_window"] = a.contextWindow
 	}
+	if a.toolChoice != "" {
+		data["tool_choice"] = a.toolChoice
+	}
+	if a.parallel != nil {
+		data["parallel_tool_calls"] = *a.parallel
+	}
 	raw, _ := json.Marshal(data)
 	return raw
 }
@@ -191,6 +204,11 @@ func (a *Agent) toolRequiresApproval(name string) bool {
 		return false
 	}
 	return a.tools[index].approvalNeeded
+}
+
+func (a *Agent) toolIsSequential(name string) bool {
+	index := slices.IndexFunc(a.tools, func(tool Tool) bool { return tool.name == name })
+	return index >= 0 && a.tools[index].sequential
 }
 
 // AgentOption configures an Agent in New.
@@ -337,6 +355,19 @@ func WithHTTPClient(client *http.Client) AgentOption {
 	return func(a *Agent) error { a.httpClient = client; return nil }
 }
 
+// WithMaxRetries sets how many times a failed provider request is retried:
+// connection errors, timeouts, rate limits (429) and server errors, with
+// backoff. The default is 2; zero turns retries off.
+func WithMaxRetries(retries int) AgentOption {
+	return func(a *Agent) error {
+		if retries < 0 {
+			return fmt.Errorf("max retries cannot be negative, got %d", retries)
+		}
+		a.maxRetries = &retries
+		return nil
+	}
+}
+
 func WithAPIKey(apikey string) AgentOption {
 	return func(a *Agent) error { a.apiKey = apikey; return nil }
 }
@@ -401,6 +432,74 @@ func WithReasoning(effort ReasoningEffort) AgentOption {
 		a.reasoning = effort
 		return nil
 	}
+}
+
+// ToolChoice says whether the model must call a tool. Use one of the
+// ToolChoice constants or ToolChoiceTool.
+type ToolChoice string
+
+const (
+	// ToolChoiceAuto lets the model decide whether to call tools. It is the default.
+	ToolChoiceAuto ToolChoice = "auto"
+	// ToolChoiceRequired makes the model call at least one tool.
+	ToolChoiceRequired ToolChoice = "required"
+	// ToolChoiceNone makes the model answer without calling tools.
+	ToolChoiceNone ToolChoice = "none"
+)
+
+const toolChoicePrefix = "tool:"
+
+// ToolChoiceTool makes the model call the named tool, which must be one of
+// the agent's tools. A subagent is named agent_<name>.
+func ToolChoiceTool(name string) ToolChoice {
+	return ToolChoice(toolChoicePrefix + name)
+}
+
+// tool returns the tool name of a ToolChoiceTool choice.
+func (c ToolChoice) tool() (string, bool) {
+	return strings.CutPrefix(string(c), toolChoicePrefix)
+}
+
+// WithToolChoice sets whether the model must call a tool. It applies to the
+// first request after each new input to Run, RunInto or Stream; later
+// requests of the run, which follow the tool results, let the model decide,
+// so it can answer. Anthropic does not accept ToolChoiceRequired or
+// ToolChoiceTool while the model reasons.
+func WithToolChoice(choice ToolChoice) AgentOption {
+	return func(a *Agent) error {
+		switch choice {
+		case ToolChoiceAuto, ToolChoiceNone, ToolChoiceRequired:
+		default:
+			name, ok := choice.tool()
+			if !ok {
+				return fmt.Errorf("unknown tool choice %q; use a ToolChoice constant or ToolChoiceTool", choice)
+			}
+			if err := schema.ValidateToolName(name); err != nil {
+				return fmt.Errorf("tool choice: %w", err)
+			}
+		}
+		a.toolChoice = choice
+		return nil
+	}
+}
+
+// checkToolChoice reports a tool choice the agent's tools cannot satisfy.
+func (a *Agent) checkToolChoice() error {
+	if name, ok := a.toolChoice.tool(); ok {
+		if !slices.ContainsFunc(a.tools, func(t Tool) bool { return t.name == name }) {
+			return fmt.Errorf("agent %q: tool choice names %q, which is not one of its tools", a.name, name)
+		}
+	} else if a.toolChoice == ToolChoiceRequired && len(a.tools) == 0 {
+		return fmt.Errorf("agent %q: ToolChoiceRequired needs at least one tool", a.name)
+	}
+	return nil
+}
+
+// WithParallelToolCalls sets whether the model may call several tools in one
+// turn. Unset uses the provider default, which allows it. Gemini has no such
+// setting and rejects false.
+func WithParallelToolCalls(enabled bool) AgentOption {
+	return func(a *Agent) error { a.parallel = &enabled; return nil }
 }
 
 // WithMaxRepairs sets the number of attempts the agent will make
@@ -566,11 +665,14 @@ func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {
 		fork.provider = "" // set after opts, so an explicit WithProvider is detectable
 		fork.baseURL = a.baseURL
 		fork.httpClient = a.httpClient
+		fork.maxRetries = a.maxRetries
 		fork.outputSchema = a.outputSchema
 		fork.maxRepairs = a.maxRepairs
 		fork.maxTokens = a.maxTokens
 		fork.temperature = a.temperature
 		fork.reasoning = a.reasoning
+		fork.toolChoice = a.toolChoice
+		fork.parallel = a.parallel
 		fork.apiKey = a.apiKey
 		fork.tools = slices.Clone(a.tools)
 		fork.searchOptions = cloneSearchOptions(a.searchOptions)

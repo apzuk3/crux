@@ -13,6 +13,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/packages/param"
 )
 
 const anthropicContentBlockOpaqueKey = "anthropic.message.content_block"
@@ -36,7 +37,7 @@ func newAnthropicClient(req *Request) *anthropic.Client {
 		// a server that accepts a streaming request but does not answer.
 		client = DefaultHTTPClient()
 	}
-	opts = append(opts, option.WithHTTPClient(client))
+	opts = append(opts, option.WithHTTPClient(client), option.WithMaxRetries(req.retries()))
 
 	c := anthropic.NewClient(opts...)
 	return &c
@@ -98,6 +99,7 @@ func Anthropic(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 	if err := setAnthropicReasoning(req, &params); err != nil {
 		return nil, err
 	}
+	setAnthropicToolChoice(req, &params)
 	setAnthropicCacheBreakpoints(&params)
 	client := newAnthropicClient(req)
 	now := time.Now().UTC()
@@ -190,6 +192,30 @@ func Anthropic(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 		})
 		if len(paused.Content) > 0 {
 			params.Messages = append(params.Messages, paused)
+		}
+	}
+}
+
+// setAnthropicToolChoice maps the tool choice and WithParallelToolCalls onto
+// tool_choice, which carries both.
+func setAnthropicToolChoice(req *Request, params *anthropic.MessageNewParams) {
+	if len(params.Tools) == 0 {
+		return
+	}
+	var disableParallel param.Opt[bool]
+	if req.Parallel != nil {
+		disableParallel = anthropic.Bool(!*req.Parallel)
+	}
+	switch req.ToolChoice {
+	case ToolChoiceNone:
+		params.ToolChoice.OfNone = &anthropic.ToolChoiceNoneParam{}
+	case ToolChoiceRequired:
+		params.ToolChoice.OfAny = &anthropic.ToolChoiceAnyParam{DisableParallelToolUse: disableParallel}
+	case ToolChoiceTool:
+		params.ToolChoice.OfTool = &anthropic.ToolChoiceToolParam{Name: req.ToolName, DisableParallelToolUse: disableParallel}
+	default:
+		if req.Parallel != nil {
+			params.ToolChoice.OfAuto = &anthropic.ToolChoiceAutoParam{DisableParallelToolUse: disableParallel}
 		}
 	}
 }
