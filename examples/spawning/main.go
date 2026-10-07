@@ -1,10 +1,13 @@
-// Spawning: a coordinator that creates its own agents.
+// Spawning: an agent that finds out it can create agents.
 //
-// The coordinator has no fixed subagents. With WithAgentSpawning it writes
-// an agent for each piece of work (its name, instructions and tools) and runs
-// it. Spawned agents may only use the tools and models allowed here, and the
-// one tool that sends a report needs your approval, even when a spawned agent
-// calls it.
+// The assistant has no instructions and one tool, spawn_agent. Nothing tells
+// it to delegate: the tool's description says it can create an agent and
+// lists the tools it may give one, and the request below doesn't mention
+// agents at all. What it spawns, with which tools and models, is its own
+// decision; the trace shows it as it happens.
+//
+// The tools are fictional product lookups and an email tool that needs your
+// approval, even when an agent the assistant created calls it.
 //
 //	OPENAI_API_KEY=... go run ./examples/spawning
 package main
@@ -73,13 +76,9 @@ func run() error {
 			return "sent", nil
 		}, crux.WithApprovalNeeded(true))
 
-	// The coordinator itself has no tools besides spawn_agent: everything it
-	// learns comes from the agents it creates.
-	coordinator := crux.Must(crux.New("coordinator", crux.OpenAIGPT5_4,
-		crux.WithoutTools(),
-		crux.WithInstructions(`You coordinate work by spawning agents; you have no other tools.
-Spawn one analyst per product, giving each only the tools it needs, and a cheaper model for simple lookups.
-Then spawn a writer to compare the analyses and send the report. Give every agent all the context it needs in its task.`),
+	// No instructions and no tools of its own: only the ability to create
+	// agents, within these limits.
+	assistant := crux.Must(crux.New("assistant", crux.OpenAIGPT5_4,
 		crux.WithAgentSpawning(
 			crux.WithSpawnModels(crux.OpenAIGPT5_4Mini, crux.OpenAIGPT5_4),
 			crux.WithSpawnTools("get_specs", "get_reviews", "send_report"),
@@ -91,8 +90,11 @@ Then spawn a writer to compare the analyses and send the report. Give every agen
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	session := crux.MustSession(crux.NewSession(ctx, coordinator, crux.WithEntryHandler(trace)))
-	output, err := session.Run(ctx, "Compare the TrailLight and CampGlow lanterns for a rainy hiking trip and email the report to team@example.com.")
+	request := "I'm going hiking in the rain next week. Should I take the TrailLight or the CampGlow lantern? Email the answer to team@example.com."
+	fmt.Printf("The assistant's tools: %v\n\n> %s\n\n", assistant.ToolNames(), request)
+
+	session := crux.MustSession(crux.NewSession(ctx, assistant, crux.WithEntryHandler(trace)))
+	output, err := session.Run(ctx, request)
 	for errors.Is(err, crux.ErrApprovalNeeded) {
 		if err := decide(ctx, session); err != nil {
 			return err
@@ -100,14 +102,14 @@ Then spawn a writer to compare the analyses and send the report. Give every agen
 		output, err = session.Resume(ctx)
 	}
 	if err != nil {
-		return fmt.Errorf("run coordinator: %w", err)
+		return fmt.Errorf("run assistant: %w", err)
 	}
-	fmt.Printf("\n[coordinator]\n%s\n", output)
+	fmt.Printf("\n[assistant]\n%s\n", output)
 	return nil
 }
 
-// trace prints each agent the coordinator spawns and each tool call made,
-// by the coordinator or by a spawned agent.
+// trace prints each agent the assistant creates and each tool call made, by
+// the assistant or by an agent it created.
 func trace(ctx context.Context, s *crux.Session, e crux.Entry) {
 	if e.Kind != crux.KindToolCall || e.ToolCall == nil {
 		return

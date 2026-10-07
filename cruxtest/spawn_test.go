@@ -68,6 +68,7 @@ func TestSpawnRunsAgent(t *testing.T) {
 
 	parent := requestTools(t, reqs[0])
 	require.Contains(t, parent, "spawn_agent")
+	require.Contains(t, parent["spawn_agent"]["description"], "- lookup: Look something up", "the model learns what each tool does")
 	params := parent["spawn_agent"]["parameters"].(map[string]any)["properties"].(map[string]any)
 	require.Equal(t, []any{"lookup", "delete_file"}, params["tools"].(map[string]any)["items"].(map[string]any)["enum"])
 	require.NotContains(t, params, "model", "one allowed model needs no choice")

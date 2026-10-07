@@ -109,10 +109,9 @@ func WithAgentSpawning(opts ...SpawnOption) AgentOption {
 			}
 		}
 		a.tools = append(a.tools, Tool{
-			name:        spawnToolName,
-			kind:        toolKindSubagent,
-			description: spawnDescription,
-			spawn:       config,
+			name:  spawnToolName,
+			kind:  toolKindSubagent,
+			spawn: config,
 		})
 		return nil
 	}
@@ -137,8 +136,9 @@ func (a *Agent) spawnLimits(config *spawnConfig) (models []string, tools []Tool,
 	return models, tools, nil
 }
 
-// prepareSpawning gives the spawn tool its input schema, which lists the
-// models and tools the agent allows.
+// prepareSpawning gives the spawn tool its description and input schema,
+// which list the tools and models the agent allows, so the model knows what
+// it can give the agents it creates.
 func (a *Agent) prepareSpawning() error {
 	index := slices.IndexFunc(a.tools, func(t Tool) bool { return t.spawn != nil })
 	if index < 0 {
@@ -148,8 +148,25 @@ func (a *Agent) prepareSpawning() error {
 	if err != nil {
 		return fmt.Errorf("agent %q: %w", a.name, err)
 	}
+	a.tools[index].description = spawnToolDescription(tools)
 	a.tools[index].schema = spawnSchema(models, tools)
 	return nil
+}
+
+func spawnToolDescription(tools []Tool) string {
+	if len(tools) == 0 {
+		return spawnDescription + " It can have no tools."
+	}
+	var b strings.Builder
+	b.WriteString(spawnDescription)
+	b.WriteString(" Tools you can give it:")
+	for _, t := range tools {
+		fmt.Fprintf(&b, "\n- %s", t.name)
+		if t.description != "" {
+			fmt.Fprintf(&b, ": %s", t.description)
+		}
+	}
+	return b.String()
 }
 
 func spawnSchema(models []string, tools []Tool) map[string]any {
