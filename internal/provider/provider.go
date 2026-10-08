@@ -1,4 +1,4 @@
-// Package provider holds the wire code of the three provider APIs crux
+// Package provider holds the wire code of the three generation APIs crux
 // speaks: OpenAI Responses (also used by xAI, DeepSeek, OpenRouter and
 // Ollama), Anthropic Messages and Google GenAI. It knows nothing about crux:
 // the crux package turns an agent and its log into a Request and the Items a
@@ -266,6 +266,7 @@ func IsContextTooLong(err error) bool {
 		"prompt is too long",         // Anthropic
 		"request_too_large",          // Anthropic, request body over its size limit
 		"exceeds the context window", // OpenAI-compatible servers
+		"max_tokens_exceeded",        // TypeSafe Jev
 	} {
 		if strings.Contains(msg, s) {
 			return true

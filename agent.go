@@ -57,6 +57,18 @@ type SearchOptions struct {
 type SearchOption func(*SearchOptions)
 
 func New(name, model string, opts ...AgentOption) (*Agent, error) {
+	agent, err := newAgent(name, model, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if spec := providerSpecs[agent.provider]; spec.step == nil || spec.decidesNatively(agent.model) {
+		return nil, fmt.Errorf("%q is a decision model and can't run agents; use crux.NewDecider", agent.model)
+	}
+	return agent, nil
+}
+
+// newAgent builds an agent for any model, including decision models.
+func newAgent(name, model string, opts ...AgentOption) (*Agent, error) {
 	agent := &Agent{
 		name:     name,
 		model:    model,

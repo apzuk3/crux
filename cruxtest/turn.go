@@ -35,6 +35,8 @@ type Turn struct {
 	omitCallIDs      bool
 	thoughtSignature string
 	blankText        bool
+
+	answers map[string]Answer
 }
 
 // ReturnText configures the turn to respond with a plain text assistant message.

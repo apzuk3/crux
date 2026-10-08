@@ -154,6 +154,8 @@ func (m *Mock) RoundTrip(req *http.Request) (*http.Response, error) {
 	var err error
 
 	switch provider {
+	case providerDecisions:
+		respBytes, err = buildDecisionsResponse(turn)
 	case crux.ProviderGoogle:
 		respBytes, err = buildGeminiResponse(turn, callIndex)
 	case crux.ProviderAnthropic:
@@ -204,6 +206,9 @@ func detectProvider(req *http.Request) crux.Provider {
 	path := req.URL.Path
 	host := req.URL.Host
 
+	if isDecisionsPath(path) {
+		return providerDecisions
+	}
 	if strings.Contains(path, ":generateContent") || strings.Contains(path, ":streamGenerateContent") || strings.Contains(host, "googleapis.com") {
 		return crux.ProviderGoogle
 	}

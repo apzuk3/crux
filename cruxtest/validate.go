@@ -20,6 +20,8 @@ func validateRequest(provider crux.Provider, body []byte) error {
 		return nil
 	}
 	switch provider {
+	case providerDecisions:
+		return validateDecisionsRequest(body)
 	case crux.ProviderAnthropic:
 		return validateAnthropicRequest(body)
 	case crux.ProviderGoogle:
@@ -35,6 +37,8 @@ func invalidRequestResponse(provider crux.Provider, req *http.Request, err error
 	message := "cruxtest: invalid request: " + err.Error()
 	var payload any
 	switch provider {
+	case providerDecisions:
+		payload = map[string]any{"detail": []map[string]any{{"loc": []string{"body"}, "msg": message, "type": "value_error"}}}
 	case crux.ProviderAnthropic:
 		payload = map[string]any{"type": "error", "error": map[string]any{"type": "invalid_request_error", "message": message}}
 	case crux.ProviderGoogle:
