@@ -433,6 +433,23 @@ const (
 	OpenRouterInferenceNetSchematronV2Small                       = "inference-net/schematron-v2-small"
 )
 
+// OpenRouter decision model IDs, for NewDecider. They answer typed questions
+// through OpenRouter's Decisions API instead of generating text.
+const (
+	OpenRouterDecisionModelJev1_13   = "typesafe/jev-1.13"
+	OpenRouterDecisionModelJevLatest = "typesafe/jev-latest"
+)
+
+// ---------- typesafe ----------
+
+// TypeSafe decision model IDs, for NewDecider. Jev answers typed questions with
+// calibrated probabilities and generates no text, so agents can't use it.
+// Source: https://docs.typesafe.ai/api
+const (
+	Jev     = "jev-latest"
+	Jev1_13 = "jev-1.13"
+)
+
 // ---------- ollama ----------
 
 // Official Ollama generation families from https://ollama.com/library,
@@ -1067,6 +1084,8 @@ func init() {
 			OpenRouterGrypheMythoMaxL2_13B,
 			OpenRouterInferenceNetSchematronV2Turbo,
 			OpenRouterInferenceNetSchematronV2Small,
+			OpenRouterDecisionModelJev1_13,
+			OpenRouterDecisionModelJevLatest,
 		},
 		envVars:       []string{"OPENROUTER_API_KEY", "OPENROUTER_APIKEY", "OPENROUTER_KEY"},
 		baseURL:       "https://openrouter.ai/api/v1",
@@ -1074,6 +1093,17 @@ func init() {
 		schema:        schema.AdaptOpenAI,
 		contextWindow: openRouterWindow,
 		prepare:       prepareOpenRouter,
+		decide:        provider.Decisions("../alpha/decisions"),
+		isDecisionModel: func(model string) bool {
+			return strings.HasPrefix(model, "typesafe/")
+		},
+	})
+
+	registerProvider(ProviderTypeSafe, providerSpec{
+		models:  []string{Jev, Jev1_13},
+		envVars: []string{"TYPESAFE_API_KEY", "TYPESAFE_APIKEY", "TYPESAFE_KEY"},
+		baseURL: "https://api.typesafe.ai",
+		decide:  provider.Decisions("v1/systemone"),
 	})
 
 	registerProvider(ProviderOllama, providerSpec{

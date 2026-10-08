@@ -2,6 +2,7 @@ package crux
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -21,6 +22,7 @@ const (
 	ProviderDeepSeek   Provider = "deepseek"
 	ProviderXAI        Provider = "xai"
 	ProviderOllama     Provider = "ollama"
+	ProviderTypeSafe   Provider = "typesafe"
 )
 
 // providerSpec is everything crux knows about one provider.
@@ -34,13 +36,23 @@ type providerSpec struct {
 	// contextWindow returns a model's context window in tokens, or 0 when
 	// unknown. Optional; WithContextWindow overrides it.
 	contextWindow func(model string) int
+	// decide answers typed questions for NewDecider; optional. isDecisionModel
+	// reports which models it serves (nil: all of them). Other models decide
+	// through step with a structured output schema.
+	decide          provider.Decide
+	isDecisionModel func(model string) bool
+}
+
+// decidesNatively reports whether model is served by the spec's decide.
+func (spec providerSpec) decidesNatively(model string) bool {
+	return spec.decide != nil && (spec.isDecisionModel == nil || spec.isDecisionModel(model))
 }
 
 var providerSpecs = map[Provider]providerSpec{}
 
 // registerProvider adds a provider. It is called only from init functions.
 func registerProvider(provider Provider, spec providerSpec) {
-	if _, dup := providerSpecs[provider]; dup || spec.step == nil || spec.schema == nil {
+	if _, dup := providerSpecs[provider]; dup || (spec.step == nil && spec.decide == nil) || (spec.step != nil && spec.schema == nil) {
 		panic(fmt.Sprintf("crux: invalid registration of provider %q", provider))
 	}
 	providerSpecs[provider] = spec
@@ -250,7 +262,35 @@ func wireSchemaFor(s *jsonschema.Schema, provider Provider) (map[string]any, err
 	if !ok {
 		return m, nil
 	}
-	return spec.schema(m, string(provider))
+	m, err = spec.schema(m, string(provider))
+	if err != nil {
+		return nil, err
+	}
+	return plainNumbers(m).(map[string]any), nil
+}
+
+// plainNumbers replaces the json.Numbers in a decoded schema with int64 or
+// float64 values. The OpenAI and Anthropic SDKs encode a json.Number as a
+// string, which turns "maximum": 3 into "maximum": "3".
+func plainNumbers(v any) any {
+	switch v := v.(type) {
+	case map[string]any:
+		for k, item := range v {
+			v[k] = plainNumbers(item)
+		}
+	case []any:
+		for i, item := range v {
+			v[i] = plainNumbers(item)
+		}
+	case json.Number:
+		if n, err := v.Int64(); err == nil {
+			return n
+		}
+		if f, err := v.Float64(); err == nil {
+			return f
+		}
+	}
+	return v
 }
 
 // validateOutput validates the output string against the pre-compiled validator.

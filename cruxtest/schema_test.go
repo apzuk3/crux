@@ -283,3 +283,21 @@ func TestResumeRepairsStoredInvalidOutput(t *testing.T) {
 	require.Contains(t, mock.Requests()[1].BodyString(), "Return corrected JSON")
 	mock.AssertAllConsumed(t)
 }
+
+func TestOutputSchemaNumbersStayNumbersOnOpenAI(t *testing.T) {
+	type rating struct {
+		Stars int `json:"stars" jsonschema:"minimum=1,maximum=5,enum=1,enum=3,enum=5"`
+	}
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnJSON(map[string]any{"stars": 5})
+	a, err := crux.New("rater", crux.OpenAIGPT5_4Nano, append(mock.AgentOptions(), crux.WithOutputSchemaFrom[rating]())...)
+	require.NoError(t, err)
+	s, err := crux.NewSession(t.Context(), a)
+	require.NoError(t, err)
+	_, err = s.Run(t.Context(), "rate it")
+	require.NoError(t, err)
+	body := mock.Requests()[0].BodyString()
+	require.Contains(t, body, `"maximum":5`)
+	require.Contains(t, body, `"minimum":1`)
+	require.Contains(t, body, `"enum":[1,3,5]`)
+}
