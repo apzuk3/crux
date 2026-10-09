@@ -6,7 +6,8 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.searchParams.get("go-get") === "1") {
-      const path = url.pathname.replace(/\/+$/, "");
+      let path = url.pathname;
+      while (path.endsWith("/")) path = path.slice(0, -1);
       const html = `<!doctype html>
 <html><head>
 <meta name="go-import" content="${MODULE} git ${REPO}">

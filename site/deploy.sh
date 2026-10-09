@@ -3,4 +3,4 @@
 set -eu
 cd "$(dirname "$0")"
 hugo --minify --cleanDestinationDir -d ../.site-build/prod
-npx --yes wrangler@4 deploy --config worker/wrangler.toml
+npx --yes --ignore-scripts wrangler@4 deploy --config worker/wrangler.toml
