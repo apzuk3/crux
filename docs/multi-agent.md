@@ -1,4 +1,7 @@
-# Multi-agent
+---
+title: Multi-agent
+weight: 90
+---
 
 ## Subagents
 

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>crux brand</title>
+<style>
+  body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif; background: #f4f5f7; color: #111; }
+  h1 { font-size: 1.1rem; font-weight: 600; margin: 2rem 2rem 1rem; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 0 2rem 2rem; }
+  .tile { border-radius: 14px; display: flex; align-items: center; justify-content: center; gap: 2.5rem; padding: 2.5rem; }
+  .light { background: #fff; color: #111; border: 1px solid #0001; }
+  .dark { background: #111318; color: #f5f5f5; }
+  .mark svg { display: block; }
+  .lockup { display: flex; align-items: center; gap: .5rem; font-weight: 700; font-size: 1.1rem; }
+  .gopher img { width: 380px; }
+</style></head>
+<body>
+<h1>Gopher (from Egon Elbre's CC0 gophers, after Renée French)</h1>
+<div class="row gopher">
+  <div class="tile dark" style="background:#0f1c33"><img src="gophers/crux-wizard.svg"></div>
+  <div class="tile light"><img src="gophers/crux-wizard.svg"></div>
+</div>
+<script>
+  for (const img of document.images) img.src = img.getAttribute("src") + "?v=" + Date.now();
+</script>
+</body></html>

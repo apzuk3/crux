@@ -1,4 +1,7 @@
-# crux documentation
+---
+title: Documentation
+weight: 0
+---
 
 crux is a Go toolkit for LLM agents that run the same way on OpenAI,
 Anthropic, Google Gemini, xAI, DeepSeek, OpenRouter, Ollama and decision models

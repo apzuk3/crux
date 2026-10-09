@@ -1,4 +1,7 @@
-# Decisions
+---
+title: Decisions
+weight: 70
+---
 
 `crux.Decide[T]` answers typed questions about some input: yes or no, one of a
 set of options, or a level on a scale. Use it for classification, routing,

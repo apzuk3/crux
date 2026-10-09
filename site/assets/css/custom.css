@@ -1,0 +1,231 @@
+/* Go's cyan as the primary colour. */
+:root {
+  --primary-hue: 192deg;
+  --primary-saturation: 100%;
+  --primary-lightness: 38%;
+}
+.dark {
+  --primary-hue: 190deg;
+  --primary-saturation: 90%;
+  --primary-lightness: 55%;
+}
+
+/* Landing page */
+.crux-install {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1.75rem;
+  padding: 0.6rem 1rem;
+  border-radius: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.95rem;
+  background: hsl(220 15% 12%);
+  color: hsl(0 0% 96%);
+}
+.crux-install .crux-prompt {
+  color: hsl(192 100% 55%);
+  user-select: none;
+}
+.crux-hero {
+  width: 100%;
+  margin-top: 1.5rem;
+  padding: 3rem 2rem;
+  border-radius: 1.5rem;
+  border: 1px solid hsl(220 10% 50% / 0.15);
+  background: hsl(220 15% 97%);
+}
+.dark .crux-hero {
+  background: hsl(220 15% 9%);
+}
+.crux-hero-grid {
+  display: grid;
+  gap: 2.5rem;
+  align-items: center;
+}
+@media (min-width: 1024px) {
+  .crux-hero-grid {
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  }
+}
+.crux-hero-code pre {
+  margin: 0 !important;
+  border-radius: 1rem;
+  box-shadow: 0 25px 60px -20px hsl(220 40% 5% / 0.6);
+}
+.crux-hero-code {
+  min-width: 0;
+}
+
+/* Tabbed examples in the hero */
+.crux-hero-code .hextra-tabs-toggle {
+  font-size: 0.8rem;
+}
+.crux-hero-code .hextra-tabs-panel {
+  padding-top: 0.75rem !important;
+}
+
+/* Hero buttons */
+.crux-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+.crux-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.6rem 1.15rem;
+  border-radius: 0.6rem;
+  font-size: 0.95rem;
+  font-weight: 500;
+  line-height: 1.25;
+  text-decoration: none;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.crux-btn--primary {
+  background: hsl(220 15% 12%);
+  color: hsl(0 0% 100%);
+  border: 1px solid hsl(220 15% 12%);
+}
+.crux-btn--primary:hover {
+  background: hsl(220 15% 22%);
+  border-color: hsl(220 15% 22%);
+}
+.dark .crux-btn--primary {
+  background: hsl(0 0% 96%);
+  color: hsl(220 15% 10%);
+  border-color: hsl(0 0% 96%);
+}
+.dark .crux-btn--primary:hover {
+  background: hsl(0 0% 100%);
+  border-color: hsl(0 0% 100%);
+}
+.crux-btn--secondary {
+  color: inherit;
+  border: 1px solid hsl(220 10% 50% / 0.35);
+}
+.crux-btn--secondary:hover {
+  border-color: hsl(220 10% 50% / 0.7);
+  background: hsl(220 10% 50% / 0.08);
+}
+
+/* The wizard gopher peeks over the code panel, its feet hidden behind it. */
+.crux-hero-code {
+  position: relative;
+  padding-top: 6rem;
+}
+.crux-hero-gopher {
+  position: absolute;
+  top: -2.75rem;
+  right: 1.75rem;
+  width: 200px;
+  height: auto;
+  z-index: 2;
+  pointer-events: none;
+}
+.crux-hero-code .hextra-tabs-panel pre,
+.crux-hero-code .hextra-code-block {
+  position: relative;
+  z-index: 3;
+}
+@media (max-width: 1023px) {
+  .crux-hero-code {
+    padding-top: 5rem;
+  }
+  .crux-hero-gopher {
+    width: 150px;
+    top: -1.5rem;
+  }
+}
+
+.crux-credit {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  opacity: 0.6;
+}
+.crux-credit a {
+  text-decoration: underline;
+}
+
+/* Feature section, after GoReleaser's homepage */
+.crux-features {
+  width: 100%;
+  margin: 6rem 0 4rem;
+}
+.crux-features-head {
+  text-align: center;
+  margin-bottom: 3rem;
+}
+.crux-features-head h2 {
+  font-size: clamp(1.9rem, 3.2vw, 2.75rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+.crux-features-head p {
+  margin-top: 0.9rem;
+  font-size: 1.15rem;
+  opacity: 0.65;
+}
+.crux-grid {
+  display: grid;
+  gap: 1.5rem;
+  grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
+}
+@media (min-width: 1024px) {
+  .crux-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.crux-card {
+  display: block;
+  padding: 1.75rem 1.9rem;
+  border-radius: 0.75rem;
+  border: 1px solid hsl(220 10% 50% / 0.2);
+  background: hsl(220 10% 50% / 0.03);
+  text-decoration: none !important;
+  color: inherit !important;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.crux-card:hover {
+  border-color: hsl(220 10% 50% / 0.45);
+  background: hsl(220 10% 50% / 0.06);
+}
+.crux-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0 0 0.75rem;
+  font-size: 1.2rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.crux-card h3 svg {
+  width: 1.35rem;
+  height: 1.35rem;
+  flex-shrink: 0;
+}
+.crux-card p {
+  margin: 0;
+  font-size: 1.05rem;
+  line-height: 1.65;
+  opacity: 0.65;
+}
+
+/* Hero headline: Hextra's tracking is a little too tight at this size. */
+.crux-hero-text h1 {
+  letter-spacing: -0.02em !important;
+}
+
+/* Solid code background in the hero, so the gopher's feet hide behind it. */
+.crux-hero-code pre {
+  background-color: hsl(220 14% 92%) !important;
+}
+.dark .crux-hero-code pre {
+  background-color: hsl(215 16% 15%) !important;
+}
+
+/* Every example tab has the height of the tallest, so switching tabs doesn't jump. */
+.crux-hero-code pre {
+  min-height: 18.25rem;
+}

@@ -1,4 +1,7 @@
-# Testing
+---
+title: Testing
+weight: 120
+---
 
 `crux.foo/cruxtest` mocks every provider's HTTP API, so agent tests need no
 keys or network and still exercise the real request and response code. You

@@ -1,4 +1,7 @@
-# Sessions
+---
+title: Sessions
+weight: 50
+---
 
 A `*crux.Session` is one conversation with an agent. Create one per
 conversation and use it from one goroutine at a time; the `*crux.Agent` can be

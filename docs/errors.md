@@ -1,4 +1,7 @@
-# Errors
+---
+title: Errors
+weight: 110
+---
 
 Check errors with `errors.Is`; crux wraps them with context.
 

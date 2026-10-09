@@ -1,0 +1,12 @@
+# Deploys the docs site to crux.foo. Build it first: see site/deploy.sh.
+name = "crux-foo-goimport"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+routes = [{ pattern = "crux.foo", custom_domain = true }]
+
+[assets]
+directory = "../../.site-build/prod"
+binding = "ASSETS"
+run_worker_first = true
+not_found_handling = "404-page"
+html_handling = "auto-trailing-slash"

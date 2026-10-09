@@ -1,4 +1,7 @@
-# Tools
+---
+title: Tools
+weight: 10
+---
 
 A tool is a Go function the model can call. Tools live in a registry and agents
 select them by name, so tools can be defined in any package, independently of

@@ -1,4 +1,7 @@
-# Approvals
+---
+title: Approvals
+weight: 80
+---
 
 Tools registered with `crux.WithApprovalNeeded(true)` (plus the filesystem and
 network tools that change things, and MCP tools not marked read-only) don't run

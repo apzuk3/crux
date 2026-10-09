@@ -1,4 +1,7 @@
-# Providers and models
+---
+title: Providers and models
+weight: 100
+---
 
 The model constant picks the provider; the key comes from the environment.
 

@@ -1,4 +1,7 @@
-# Skills
+---
+title: Skills
+weight: 40
+---
 
 crux agents can use Agent Skills: folders of instructions the model loads only
 when it needs them.
