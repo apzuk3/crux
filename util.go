@@ -20,29 +20,40 @@ func redactURLSecrets(err error, raw string) error {
 		return err
 	}
 	msg := err.Error()
-	redacted := msg
-	if u.User != nil {
-		// As url.URL.String writes it, and as a raw string would show it.
-		for _, userinfo := range []string{u.User.String(), rawUserinfo(raw)} {
-			if userinfo != "" {
-				redacted = strings.ReplaceAll(redacted, userinfo+"@", "redacted@")
-			}
+	redacted := redactQuery(redactUserinfo(msg, u, raw), u.Query())
+	if redacted == msg {
+		return err
+	}
+	return &redactedError{msg: redacted, err: err}
+}
+
+// redactUserinfo replaces the credentials of u in msg, as url.URL.String
+// writes them and as the raw URL shows them.
+func redactUserinfo(msg string, u *url.URL, raw string) string {
+	if u.User == nil {
+		return msg
+	}
+	for _, userinfo := range []string{u.User.String(), rawUserinfo(raw)} {
+		if userinfo != "" {
+			msg = strings.ReplaceAll(msg, userinfo+"@", "redacted@")
 		}
 	}
-	for key, values := range u.Query() {
+	return msg
+}
+
+// redactQuery replaces every non-empty query value in msg, escaped and raw.
+func redactQuery(msg string, query url.Values) string {
+	for key, values := range query {
 		for _, value := range values {
 			if value == "" {
 				continue
 			}
 			for _, form := range []string{url.QueryEscape(value), value} {
-				redacted = strings.ReplaceAll(redacted, url.QueryEscape(key)+"="+form, url.QueryEscape(key)+"=redacted")
+				msg = strings.ReplaceAll(msg, url.QueryEscape(key)+"="+form, url.QueryEscape(key)+"=redacted")
 			}
 		}
 	}
-	if redacted == msg {
-		return err
-	}
-	return &redactedError{msg: redacted, err: err}
+	return msg
 }
 
 // rawUserinfo returns the user info of a URL exactly as written.
@@ -165,54 +176,62 @@ func cloneUserLocation(l *UserLocation) *UserLocation {
 func cloneEntries(entries []Entry) []Entry {
 	result := slices.Clone(entries)
 	for i := range result {
-		e := &result[i]
-		e.Content = slices.Clone(e.Content)
-		if e.Reasoning != nil {
-			value := *e.Reasoning
-			e.Reasoning = &value
-		}
-		if e.ToolCall != nil {
-			value := *e.ToolCall
-			value.Args = slices.Clone(value.Args)
-			e.ToolCall = &value
-		}
-		if e.ToolResult != nil {
-			value := *e.ToolResult
-			e.ToolResult = &value
-		}
-		if e.Delta != nil {
-			value := *e.Delta
-			value.Set = cloneState(value.Set)
-			value.Delete = slices.Clone(value.Delete)
-			e.Delta = &value
-		}
-		if e.Approval != nil {
-			value := *e.Approval
-			e.Approval = &value
-		}
-		if e.Usage != nil {
-			value := *e.Usage
-			e.Usage = &value
-		}
-		if e.Run != nil {
-			value := *e.Run
-			e.Run = &value
-		}
-		if e.Turn != nil {
-			value := *e.Turn
-			e.Turn = &value
-		}
-		if e.Response != nil {
-			value := *e.Response
-			e.Response = &value
-		}
-		if e.Opaque != nil {
-			opaque := make(map[string][]byte, len(e.Opaque))
-			for key, value := range e.Opaque {
-				opaque[key] = slices.Clone(value)
-			}
-			e.Opaque = opaque
-		}
+		cloneEntry(&result[i])
 	}
 	return result
+}
+
+// cloneEntry replaces what e points to with copies, so the copy and the
+// original share nothing.
+func cloneEntry(e *Entry) {
+	e.Content = slices.Clone(e.Content)
+	e.Reasoning = clonePtr(e.Reasoning)
+	e.ToolCall = cloneToolCall(e.ToolCall)
+	e.ToolResult = clonePtr(e.ToolResult)
+	e.Delta = cloneDelta(e.Delta)
+	e.Approval = clonePtr(e.Approval)
+	e.Usage = clonePtr(e.Usage)
+	e.Run = clonePtr(e.Run)
+	e.Turn = clonePtr(e.Turn)
+	e.Response = clonePtr(e.Response)
+	e.Opaque = cloneOpaque(e.Opaque)
+}
+
+// clonePtr returns a pointer to a copy of *p, or nil for nil.
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	value := *p
+	return &value
+}
+
+func cloneToolCall(c *ToolCall) *ToolCall {
+	if c == nil {
+		return nil
+	}
+	value := *c
+	value.Args = slices.Clone(value.Args)
+	return &value
+}
+
+func cloneDelta(d *StateDelta) *StateDelta {
+	if d == nil {
+		return nil
+	}
+	value := *d
+	value.Set = cloneState(value.Set)
+	value.Delete = slices.Clone(value.Delete)
+	return &value
+}
+
+func cloneOpaque(opaque map[string][]byte) map[string][]byte {
+	if opaque == nil {
+		return nil
+	}
+	out := make(map[string][]byte, len(opaque))
+	for key, value := range opaque {
+		out[key] = slices.Clone(value)
+	}
+	return out
 }

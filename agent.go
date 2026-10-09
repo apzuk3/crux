@@ -556,46 +556,49 @@ func makeOptionalNullable(schema *jsonschema.Schema) {
 	if schema == nil {
 		return
 	}
-	seen := make(map[*jsonschema.Schema]bool)
-	var visit func(*jsonschema.Schema)
-	visit = func(s *jsonschema.Schema) {
-		if s == nil || seen[s] {
-			return
-		}
-		seen[s] = true
-		if s.Properties != nil {
-			reqSet := make(map[string]bool, len(s.Required))
-			for _, r := range s.Required {
-				reqSet[r] = true
-			}
-			for pair := s.Properties.Oldest(); pair != nil; pair = pair.Next() {
-				visit(pair.Value)
-				if !reqSet[pair.Key] {
-					s.Properties.Set(pair.Key, &jsonschema.Schema{
-						AnyOf: []*jsonschema.Schema{pair.Value, {Type: "null"}},
-					})
-				}
-			}
-		}
-		if s.Definitions != nil {
-			for _, def := range s.Definitions {
-				visit(def)
-			}
-		}
-		if s.Items != nil {
-			visit(s.Items)
-		}
-		for _, anyOf := range s.AnyOf {
-			visit(anyOf)
-		}
-		for _, oneOf := range s.OneOf {
-			visit(oneOf)
-		}
-		for _, allOf := range s.AllOf {
-			visit(allOf)
+	w := nullableWalker{seen: make(map[*jsonschema.Schema]bool)}
+	w.visit(schema)
+}
+
+// nullableWalker visits every schema once, making optional properties nullable.
+type nullableWalker struct {
+	seen map[*jsonschema.Schema]bool
+}
+
+func (w nullableWalker) visit(s *jsonschema.Schema) {
+	if s == nil || w.seen[s] {
+		return
+	}
+	w.seen[s] = true
+	if s.Properties != nil {
+		w.nullableProperties(s)
+	}
+	for _, def := range s.Definitions {
+		w.visit(def)
+	}
+	w.visit(s.Items)
+	w.visitChildren(s)
+}
+
+func (w nullableWalker) nullableProperties(s *jsonschema.Schema) {
+	required := make(map[string]bool, len(s.Required))
+	for _, r := range s.Required {
+		required[r] = true
+	}
+	for pair := s.Properties.Oldest(); pair != nil; pair = pair.Next() {
+		w.visit(pair.Value)
+		if !required[pair.Key] {
+			s.Properties.Set(pair.Key, &jsonschema.Schema{
+				AnyOf: []*jsonschema.Schema{pair.Value, {Type: "null"}},
+			})
 		}
 	}
-	visit(schema)
+}
+
+func (w nullableWalker) visitChildren(s *jsonschema.Schema) {
+	for _, child := range slices.Concat(s.AnyOf, s.OneOf, s.AllOf) {
+		w.visit(child)
+	}
 }
 
 // WithOutputSchemaFrom reflects T into a response schema, or disables structured
@@ -674,53 +677,67 @@ func hashTools(tools []Tool) map[string]string {
 
 func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {
 	allOpts := make([]AgentOption, 0, len(opts)+2)
-
-	allOpts = append(allOpts, func(fork *Agent) error {
-		fork.maxTurns = a.maxTurns
-		fork.instructions = a.instructions
-		fork.provider = "" // set after opts, so an explicit WithProvider is detectable
-		fork.baseURL = a.baseURL
-		fork.maxRetries = a.maxRetries
-		fork.outputSchema = a.outputSchema
-		fork.maxRepairs = a.maxRepairs
-		fork.maxTokens = a.maxTokens
-		fork.temperature = a.temperature
-		fork.reasoning = a.reasoning
-		fork.toolChoice = a.toolChoice
-		fork.parallel = a.parallel
-		fork.apiKey = a.apiKey
-		fork.tools = slices.Clone(a.tools)
-		fork.searchOptions = cloneSearchOptions(a.searchOptions)
-		fork.compaction = a.compaction
-		fork.contextWindow = a.contextWindow
-		return nil
-	})
-
+	allOpts = append(allOpts, a.copyInto)
 	allOpts = append(allOpts, opts...)
-
-	allOpts = append(allOpts, func(fork *Agent) error {
-		if fork.provider == "" {
-			fork.provider = a.provider
-			if fork.model != a.model {
-				if inferred := inferProvider(fork.model); inferred != "" {
-					fork.provider = inferred
-				}
-			}
-		}
-
-		if fork.model != a.model && fork.contextWindow == a.contextWindow {
-			fork.contextWindow = 0 // set for the old model
-		}
-		if fork.provider != a.provider {
-			if fork.apiKey == a.apiKey {
-				fork.apiKey = ""
-			}
-			if fork.baseURL == a.baseURL {
-				fork.baseURL = ""
-			}
-		}
-		return nil
-	})
-
+	allOpts = append(allOpts, a.reconcileFork)
 	return New(a.name, a.model, allOpts...)
+}
+
+// copyInto gives fork the agent's settings, except the provider: it is set
+// after the fork's own options, so an explicit WithProvider is detectable.
+func (a *Agent) copyInto(fork *Agent) error {
+	fork.maxTurns = a.maxTurns
+	fork.instructions = a.instructions
+	fork.provider = ""
+	fork.baseURL = a.baseURL
+	fork.maxRetries = a.maxRetries
+	fork.outputSchema = a.outputSchema
+	fork.maxRepairs = a.maxRepairs
+	fork.maxTokens = a.maxTokens
+	fork.temperature = a.temperature
+	fork.reasoning = a.reasoning
+	fork.toolChoice = a.toolChoice
+	fork.parallel = a.parallel
+	fork.apiKey = a.apiKey
+	fork.tools = slices.Clone(a.tools)
+	fork.searchOptions = cloneSearchOptions(a.searchOptions)
+	fork.compaction = a.compaction
+	fork.contextWindow = a.contextWindow
+	return nil
+}
+
+// reconcileFork resolves the fork's provider once its options have run and
+// drops the settings that belonged to the old model or provider.
+func (a *Agent) reconcileFork(fork *Agent) error {
+	if fork.provider == "" {
+		fork.provider = a.resolveForkProvider(fork.model)
+	}
+	a.dropStaleForkSettings(fork)
+	return nil
+}
+
+// resolveForkProvider infers the provider of a changed model, keeping the
+// agent's when the model is the same or unknown.
+func (a *Agent) resolveForkProvider(model string) Provider {
+	if model != a.model {
+		if inferred := inferProvider(model); inferred != "" {
+			return inferred
+		}
+	}
+	return a.provider
+}
+
+func (a *Agent) dropStaleForkSettings(fork *Agent) {
+	if fork.model != a.model && fork.contextWindow == a.contextWindow {
+		fork.contextWindow = 0 // set for the old model
+	}
+	if fork.provider == a.provider {
+		return
+	}
+	if fork.apiKey == a.apiKey {
+		fork.apiKey = ""
+	}
+	if fork.baseURL == a.baseURL {
+		fork.baseURL = ""
+	}
 }

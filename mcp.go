@@ -189,37 +189,15 @@ func (c *mcpConfig) transport(name string, t MCPTransport) (mcp.Transport, *mcpc
 	case t.sdk != nil:
 		return t.sdk, stderr, nil
 	case len(t.command) > 0:
-		if c.header != nil || c.httpClient != nil || c.oauth != nil {
-			return nil, nil, errors.New("WithMCPHeader, WithMCPHTTPClient and WithMCPOAuth only apply to MCPRemote")
+		command, err := c.commandTransport(t.command, stderr)
+		if err != nil {
+			return nil, nil, err
 		}
-		cmd := exec.Command(t.command[0], t.command[1:]...)
-		cmd.Env = append(os.Environ(), c.env...)
-		cmd.Stderr = stderr
-		return &mcp.CommandTransport{Command: cmd}, stderr, nil
+		return command, stderr, nil
 	case t.url != "":
-		if c.env != nil {
-			return nil, nil, errors.New("WithMCPEnv only applies to MCPCommand")
-		}
-		httpClient := c.httpClient
-		if httpClient == nil {
-			httpClient = http.DefaultClient
-		}
-		remote := &mcp.StreamableClientTransport{Endpoint: t.url, HTTPClient: httpClient}
-		if c.header != nil {
-			base := httpClient.Transport
-			if base == nil {
-				base = http.DefaultTransport
-			}
-			withHeaders := *httpClient
-			withHeaders.Transport = mcpclient.HeaderTransport{Base: base, Header: c.header}
-			remote.HTTPClient = &withHeaders
-		}
-		if c.oauth != nil || c.header.Get("Authorization") == "" {
-			var oauth OAuthConfig
-			if c.oauth != nil {
-				oauth = *c.oauth
-			}
-			remote.OAuthHandler = mcpclient.NewOAuthHandler(name, t.url, oauth.internal(), httpClient)
+		remote, err := c.remoteTransport(name, t.url)
+		if err != nil {
+			return nil, nil, err
 		}
 		return remote, stderr, nil
 	default:
@@ -227,16 +205,83 @@ func (c *mcpConfig) transport(name string, t MCPTransport) (mcp.Transport, *mcpc
 	}
 }
 
+func (c *mcpConfig) commandTransport(command []string, stderr *mcpclient.TailBuffer) (mcp.Transport, error) {
+	if c.header != nil || c.httpClient != nil || c.oauth != nil {
+		return nil, errors.New("WithMCPHeader, WithMCPHTTPClient and WithMCPOAuth only apply to MCPRemote")
+	}
+	cmd := exec.Command(command[0], command[1:]...)
+	cmd.Env = append(os.Environ(), c.env...)
+	cmd.Stderr = stderr
+	return &mcp.CommandTransport{Command: cmd}, nil
+}
+
+func (c *mcpConfig) remoteTransport(name, url string) (mcp.Transport, error) {
+	if c.env != nil {
+		return nil, errors.New("WithMCPEnv only applies to MCPCommand")
+	}
+	httpClient := c.httpClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	remote := &mcp.StreamableClientTransport{Endpoint: url, HTTPClient: c.headerClient(httpClient)}
+	if c.oauth != nil || c.header.Get("Authorization") == "" {
+		remote.OAuthHandler = mcpclient.NewOAuthHandler(name, url, c.oauthConfig(), httpClient)
+	}
+	return remote, nil
+}
+
+// headerClient returns a copy of httpClient that adds the configured
+// headers to every request, or httpClient itself when there are none.
+func (c *mcpConfig) headerClient(httpClient *http.Client) *http.Client {
+	if c.header == nil {
+		return httpClient
+	}
+	base := httpClient.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	withHeaders := *httpClient
+	withHeaders.Transport = mcpclient.HeaderTransport{Base: base, Header: c.header}
+	return &withHeaders
+}
+
+func (c *mcpConfig) oauthConfig() mcpclient.OAuthConfig {
+	var oauth OAuthConfig
+	if c.oauth != nil {
+		oauth = *c.oauth
+	}
+	return oauth.internal()
+}
+
 // register registers the server's tools, checking every one before any is
 // registered so a failure leaves the registry unchanged.
 func (s *MCPServer) register(ctx context.Context, registry ToolsRegistry, config *mcpConfig) ([]string, error) {
-	type pending struct {
-		mcpName, name, description string
-		schema                     map[string]any
-		approval                   bool
+	tools, err := s.listTools(ctx)
+	if err != nil {
+		return nil, err
 	}
-	var tools []pending
-	byMCPName := make(map[string]int)
+	if len(tools) == 0 {
+		return nil, errors.New("server has no tools")
+	}
+	if err := applyApprovalRules(tools, config.approval); err != nil {
+		return nil, err
+	}
+	if err := checkUnregistered(registry, tools); err != nil {
+		return nil, err
+	}
+	return s.registerAll(registry, tools)
+}
+
+// mcpPendingTool is a server tool checked and named, but not yet registered.
+type mcpPendingTool struct {
+	mcpName, name, description string
+	schema                     map[string]any
+	approval                   bool
+}
+
+// listTools lists the server's tools, each with a valid, distinct name.
+func (s *MCPServer) listTools(ctx context.Context) ([]mcpPendingTool, error) {
+	var tools []mcpPendingTool
 	taken := make(map[string]string)
 	for tool, err := range s.session.Tools(ctx, nil) {
 		if err != nil {
@@ -250,25 +295,40 @@ func (s *MCPServer) register(ctx context.Context, registry ToolsRegistry, config
 			return nil, fmt.Errorf("tools %q and %q both map to the name %q", other, tool.Name, name)
 		}
 		taken[name] = tool.Name
-		inputSchema, err := mcpInputSchema(tool.InputSchema)
-		if err == nil {
-			_, err = schema.Compile(inputSchema)
-		}
+		pending, err := pendingTool(tool, name)
 		if err != nil {
-			return nil, fmt.Errorf("tool %q: %w", tool.Name, err)
+			return nil, err
 		}
-		description := tool.Description
-		if description == "" {
-			description = tool.Title
-		}
-		readOnly := tool.Annotations != nil && tool.Annotations.ReadOnlyHint
-		byMCPName[tool.Name] = len(tools)
-		tools = append(tools, pending{mcpName: tool.Name, name: name, description: description, schema: inputSchema, approval: !readOnly})
+		tools = append(tools, pending)
 	}
-	if len(tools) == 0 {
-		return nil, errors.New("server has no tools")
+	return tools, nil
+}
+
+// pendingTool checks the tool's input schema and reads its description and
+// approval default: tools the server marks read-only run without approval.
+func pendingTool(tool *mcp.Tool, name string) (mcpPendingTool, error) {
+	inputSchema, err := mcpInputSchema(tool.InputSchema)
+	if err == nil {
+		_, err = schema.Compile(inputSchema)
 	}
-	for _, rule := range config.approval {
+	if err != nil {
+		return mcpPendingTool{}, fmt.Errorf("tool %q: %w", tool.Name, err)
+	}
+	description := tool.Description
+	if description == "" {
+		description = tool.Title
+	}
+	readOnly := tool.Annotations != nil && tool.Annotations.ReadOnlyHint
+	return mcpPendingTool{mcpName: tool.Name, name: name, description: description, schema: inputSchema, approval: !readOnly}, nil
+}
+
+// applyApprovalRules applies the WithMCPApprovalNeeded options in order.
+func applyApprovalRules(tools []mcpPendingTool, rules []approvalRule) error {
+	byMCPName := make(map[string]int, len(tools))
+	for i, tool := range tools {
+		byMCPName[tool.mcpName] = i
+	}
+	for _, rule := range rules {
 		if len(rule.tools) == 0 {
 			for i := range tools {
 				tools[i].approval = rule.needed
@@ -277,40 +337,44 @@ func (s *MCPServer) register(ctx context.Context, registry ToolsRegistry, config
 		for _, mcpName := range rule.tools {
 			i, ok := byMCPName[mcpName]
 			if !ok {
-				return nil, fmt.Errorf("WithMCPApprovalNeeded: server has no tool %q", mcpName)
+				return fmt.Errorf("WithMCPApprovalNeeded: server has no tool %q", mcpName)
 			}
 			tools[i].approval = rule.needed
 		}
 	}
+	return nil
+}
 
+func checkUnregistered(registry ToolsRegistry, tools []mcpPendingTool) error {
 	registry.mu.Lock()
+	defer registry.mu.Unlock()
 	for _, tool := range tools {
 		if _, exists := registry.tools[tool.name]; exists {
-			registry.mu.Unlock()
-			return nil, fmt.Errorf("tool %q is already registered", tool.name)
+			return fmt.Errorf("tool %q is already registered", tool.name)
 		}
 	}
-	registry.mu.Unlock()
+	return nil
+}
 
-	names := make([]string, 0, len(tools))
-	err := func() (err error) {
-		defer func() {
-			if r := recover(); r != nil {
-				regErr, ok := r.(toolRegistrationError)
-				if !ok {
-					panic(r)
-				}
-				err = regErr.err
+// registerAll registers the tools, returning a registration panic as the
+// error it carries.
+func (s *MCPServer) registerAll(registry ToolsRegistry, tools []mcpPendingTool) (names []string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			regErr, ok := r.(toolRegistrationError)
+			if !ok {
+				panic(r)
 			}
-		}()
-		for _, tool := range tools {
-			RegisterToolWithRegistry(registry, tool.name, tool.description, s.call(tool.mcpName),
-				WithInputSchema(tool.schema), WithToolset(s.name), WithApprovalNeeded(tool.approval))
-			names = append(names, tool.name)
+			err = regErr.err
 		}
-		return nil
 	}()
-	return names, err
+	names = make([]string, 0, len(tools))
+	for _, tool := range tools {
+		RegisterToolWithRegistry(registry, tool.name, tool.description, s.call(tool.mcpName),
+			WithInputSchema(tool.schema), WithToolset(s.name), WithApprovalNeeded(tool.approval))
+		names = append(names, tool.name)
+	}
+	return names, nil
 }
 
 // mcpInputSchema adapts a tool's input schema to what providers accept: an

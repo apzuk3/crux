@@ -150,6 +150,28 @@ func (c *cli) track(s *Session, e Entry) {
 // event describes an entry to the chat. It reports false for entries the
 // chat does not show and that carry no token usage.
 func (c *cli) event(s *Session, e Entry) (tui.Event, bool) {
+	ev := c.baseEvent(s, e)
+	switch e.Kind {
+	case KindRunStarted, KindRunFinished, KindTurnStarted:
+		describeLifecycle(&ev, e)
+	case KindUser, KindAssistant, KindReasoning:
+		describeMessage(&ev, e)
+	case KindToolCall, KindToolStarted, KindToolResult, KindApproval:
+		shown := describeTool(&ev, e, s.agent.name)
+		return ev, shown
+	case KindCompaction:
+		shown := describeCompaction(&ev, e)
+		return ev, shown
+	default:
+		ev.Kind = tui.EventOther
+		return ev, ev.Usage != nil
+	}
+	return ev, true
+}
+
+// baseEvent carries what every event has: the agent, the parent call of a
+// subagent's session, and the entry's usage and response timing.
+func (c *cli) baseEvent(s *Session, e Entry) tui.Event {
 	ev := tui.Event{Agent: s.agent.name}
 	if s != c.session {
 		c.mu.Lock()
@@ -162,7 +184,10 @@ func (c *cli) event(s *Session, e Entry) (tui.Event, bool) {
 	if e.Response != nil {
 		ev.FirstToken = e.Response.FirstTokenAfter
 	}
+	return ev
+}
 
+func describeLifecycle(ev *tui.Event, e Entry) {
 	switch e.Kind {
 	case KindRunStarted:
 		ev.Kind = tui.EventRunStarted
@@ -176,6 +201,11 @@ func (c *cli) event(s *Session, e Entry) (tui.Event, bool) {
 		if e.Turn != nil {
 			ev.Provider, ev.Model = string(e.Turn.Provider), e.Turn.Model
 		}
+	}
+}
+
+func describeMessage(ev *tui.Event, e Entry) {
+	switch e.Kind {
 	case KindUser:
 		ev.Kind, ev.Text = tui.EventUser, e.Text()
 	case KindAssistant:
@@ -190,40 +220,46 @@ func (c *cli) event(s *Session, e Entry) (tui.Event, bool) {
 		if e.Reasoning != nil {
 			ev.Text = e.Reasoning.Summary
 		}
+	}
+}
+
+// describeTool reports false for a tool entry without its payload.
+func describeTool(ev *tui.Event, e Entry, agent string) bool {
+	switch e.Kind {
 	case KindToolCall, KindToolStarted:
 		if e.ToolCall == nil {
-			return ev, false
+			return false
 		}
 		ev.Kind = tui.EventToolCall
 		if e.Kind == KindToolStarted {
 			ev.Kind = tui.EventToolStarted
 		}
-		ev.Call = tui.Call{ID: e.ToolCall.ID, Name: e.ToolCall.Name, Args: string(e.ToolCall.Args), Agent: s.agent.name}
+		ev.Call = tui.Call{ID: e.ToolCall.ID, Name: e.ToolCall.Name, Args: string(e.ToolCall.Args), Agent: agent}
 	case KindToolResult:
 		if e.ToolResult == nil {
-			return ev, false
+			return false
 		}
 		ev.Kind = tui.EventToolResult
 		ev.Call.ID = e.ToolResult.CallID
 		ev.Output, ev.Err, ev.Denied, ev.Duration = e.ToolResult.Output, e.ToolResult.Error, e.ToolResult.Denied, e.Duration
-	case KindCompaction:
-		if e.Compaction == nil {
-			return ev, false
-		}
-		ev.Kind, ev.Text = tui.EventCompacted, "Context compacted: older tool outputs and files are omitted for the model."
-		if e.Compaction.Summary != "" {
-			ev.Text = "Context compacted: older messages were summarised for the model."
-		}
 	case KindApproval:
 		if e.Approval == nil {
-			return ev, false
+			return false
 		}
 		ev.Kind, ev.Call.ID, ev.Approved = tui.EventApproval, e.Approval.CallID, e.Approval.Approved
-	default:
-		ev.Kind = tui.EventOther
-		return ev, ev.Usage != nil
 	}
-	return ev, true
+	return true
+}
+
+func describeCompaction(ev *tui.Event, e Entry) bool {
+	if e.Compaction == nil {
+		return false
+	}
+	ev.Kind, ev.Text = tui.EventCompacted, "Context compacted: older tool outputs and files are omitted for the model."
+	if e.Compaction.Summary != "" {
+		ev.Text = "Context compacted: older messages were summarised for the model."
+	}
+	return true
 }
 
 // cliTools describes tools, and each subagent's own tools, for the sidebar.

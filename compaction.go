@@ -199,42 +199,67 @@ func (s *Session) summaryRange(explicit bool) (from, cut int) {
 	if len(s.logs) < 2 {
 		return 0, 0
 	}
-	summarised := summarisedThrough(s.logs)
-	for from < len(s.logs) && s.logs[from].Seq <= summarised {
+	from = firstUnsummarised(s.logs)
+	fits, latestUser, latest := s.cutCandidates(from)
+	if explicit {
+		fits = -1
+	}
+	return from, firstUsefulCut(s.logs, from, fits, latestUser, latest)
+}
+
+// firstUnsummarised returns the index of the first entry after the latest
+// summary.
+func firstUnsummarised(log []Entry) int {
+	summarised := summarisedThrough(log)
+	from := 0
+	for from < len(log) && log[from].Seq <= summarised {
 		from++
 	}
+	return from
+}
+
+// cutCandidates finds the turn boundaries after from, scanning from the end:
+// the earliest one that keeps the tail within compactTail of the window, the
+// latest user message and the latest boundary. Each is -1 when there is none.
+func (s *Session) cutCandidates(from int) (fits, latestUser, latest int) {
 	limit := int(compactTail * float64(s.agent.window()))
-	fits, latestUser, latest := -1, -1, -1
+	fits, latestUser, latest = -1, -1, -1
 	tail := estimateTokens(s.logs[len(s.logs)-1:])
 	for i := len(s.logs) - 2; i > from; i-- {
 		tail += estimateTokens(s.logs[i : i+1])
 		kind := s.logs[i].Kind
-		if kind != KindUser && kind != KindTurnStarted {
+		if !summaryBoundary(kind) {
 			continue
 		}
-		if latest < 0 {
-			latest = i
+		latest = max(latest, i)
+		if kind == KindUser {
+			latestUser = max(latestUser, i)
 		}
-		if kind == KindUser && latestUser < 0 {
-			latestUser = i
+		if tail > limit && fits >= 0 {
+			break
 		}
-		if tail > limit {
-			if fits >= 0 {
-				break
-			}
-			continue
-		}
-		fits = i
-	}
-	if explicit {
-		fits = -1
-	}
-	for _, cut := range []int{fits, latestUser, latest} {
-		if cut >= 0 && slices.ContainsFunc(s.logs[from:cut], func(e Entry) bool { return !e.HiddenFromModel() }) {
-			return from, cut
+		if tail <= limit {
+			fits = i
 		}
 	}
-	return from, from
+	return fits, latestUser, latest
+}
+
+// summaryBoundary reports whether an entry of this kind may start the part
+// of the conversation a summary leaves in place.
+func summaryBoundary(kind Kind) bool {
+	return kind == KindUser || kind == KindTurnStarted
+}
+
+// firstUsefulCut returns the first candidate that leaves something for the
+// model to summarise, or from when none does.
+func firstUsefulCut(log []Entry, from int, candidates ...int) int {
+	for _, cut := range candidates {
+		if cut >= 0 && slices.ContainsFunc(log[from:cut], func(e Entry) bool { return !e.HiddenFromModel() }) {
+			return cut
+		}
+	}
+	return from
 }
 
 // compactor returns the agent that writes summaries.
@@ -489,33 +514,47 @@ func transcriptBlocks(entries []Entry, textCap, toolCap int) []string {
 		}
 		switch e.Kind {
 		case KindUser, KindAssistant:
-			role := "user"
-			if e.Kind == KindAssistant {
-				role = "assistant"
-			}
-			for _, p := range e.Content {
-				if p.Kind == ContentKindFile {
-					blocks = append(blocks, fmt.Sprintf("[%s attached file %s]\n", role, fileLabel(p)))
-				} else if text := strings.TrimSpace(p.Text); text != "" {
-					blocks = append(blocks, fmt.Sprintf("[%s]\n%s\n", role, truncate(text, textCap)))
-				}
-			}
+			blocks = append(blocks, messageBlocks(e, textCap)...)
 		case KindToolCall:
 			if c := e.ToolCall; c != nil {
 				names[c.ID] = c.Name
-				blocks = append(blocks, fmt.Sprintf("[tool call %s]\n%s\n", c.Name, truncate(string(c.Args), toolCap)))
+				blocks = append(blocks, toolCallBlock(c, toolCap))
 			}
 		case KindToolResult:
 			if r := e.ToolResult; r != nil {
-				if r.Error != "" {
-					blocks = append(blocks, fmt.Sprintf("[tool error %s]\n%s\n", names[r.CallID], truncate(r.Error, toolCap)))
-				} else {
-					blocks = append(blocks, fmt.Sprintf("[tool result %s]\n%s\n", names[r.CallID], truncate(r.Output, toolCap)))
-				}
+				blocks = append(blocks, toolResultBlock(r, names[r.CallID], toolCap))
 			}
 		}
 	}
 	return blocks
+}
+
+// messageBlocks renders each part of a user or assistant message.
+func messageBlocks(e Entry, textCap int) []string {
+	role := "user"
+	if e.Kind == KindAssistant {
+		role = "assistant"
+	}
+	var blocks []string
+	for _, p := range e.Content {
+		if p.Kind == ContentKindFile {
+			blocks = append(blocks, fmt.Sprintf("[%s attached file %s]\n", role, fileLabel(p)))
+		} else if text := strings.TrimSpace(p.Text); text != "" {
+			blocks = append(blocks, fmt.Sprintf("[%s]\n%s\n", role, truncate(text, textCap)))
+		}
+	}
+	return blocks
+}
+
+func toolCallBlock(c *ToolCall, toolCap int) string {
+	return fmt.Sprintf("[tool call %s]\n%s\n", c.Name, truncate(string(c.Args), toolCap))
+}
+
+func toolResultBlock(r *ToolResult, name string, toolCap int) string {
+	if r.Error != "" {
+		return fmt.Sprintf("[tool error %s]\n%s\n", name, truncate(r.Error, toolCap))
+	}
+	return fmt.Sprintf("[tool result %s]\n%s\n", name, truncate(r.Output, toolCap))
 }
 
 func blocksSize(blocks []string) int {
