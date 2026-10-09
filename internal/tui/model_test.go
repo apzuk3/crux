@@ -256,3 +256,24 @@ func TestModelPickerWaitsForRun(t *testing.T) {
 	require.NotNil(t, m.picker)
 	require.Equal(t, []Model{{Provider: "anthropic", Name: "claude-opus-5-5"}}, m.pickerMatches())
 }
+
+func TestModelSidebarFocusShowsToolCard(t *testing.T) {
+	m := newTestModel(t, testInfo, &fakeBackend{})
+	require.NotContains(t, screen(m), "Refund an order")
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	require.Equal(t, focusSidebar, m.focus)
+	out := screen(m)
+	require.Contains(t, out, "Refund an order", "the selected tool's description card")
+	require.Contains(t, out, "back to chat")
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	require.Equal(t, 1, m.selected)
+	out = screen(m)
+	require.Contains(t, out, "Looks up orders")
+	require.NotContains(t, out, "Refund an order")
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	require.Equal(t, focusInput, m.focus)
+	require.NotContains(t, screen(m), "Looks up orders")
+}
