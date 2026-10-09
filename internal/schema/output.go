@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 
@@ -71,52 +72,65 @@ func AdaptOpenAI(root map[string]any, provider string) (map[string]any, error) {
 		}
 	}
 	err := walkSchemas(root, func(m map[string]any) error {
-		isObject := m["type"] == "object" || m["properties"] != nil
-		if !isObject {
-			return nil
-		}
-
-		if isDynamicMap(m) {
-			return fmt.Errorf("%s does not support dynamic map schemas in structured outputs", provider)
-		}
-		m["additionalProperties"] = false
-
-		props, ok := m["properties"].(map[string]any)
-		if !ok || len(props) == 0 {
-			return nil
-		}
-
-		reqSet := make(map[string]bool)
-		var reqList []string
-		if existing, ok := m["required"].([]any); ok {
-			for _, item := range existing {
-				if s, ok := item.(string); ok {
-					reqSet[s] = true
-					reqList = append(reqList, s)
-				}
-			}
-		}
-
-		var missing []string
-		for k, propVal := range props {
-			if !reqSet[k] {
-				missing = append(missing, k)
-				if prop, ok := propVal.(map[string]any); ok && !allowsNull(prop) {
-					props[k] = map[string]any{
-						"anyOf": []any{
-							prop,
-							map[string]any{"type": "null"},
-						},
-					}
-				}
-			}
-		}
-		sort.Strings(missing)
-		reqList = append(reqList, missing...)
-		m["required"] = reqList
-		return nil
+		return strictObject(m, provider)
 	})
 	return root, err
+}
+
+// strictObject closes an object schema for strict structured outputs: every
+// property is required, and those that were optional become nullable.
+func strictObject(m map[string]any, provider string) error {
+	isObject := m["type"] == "object" || m["properties"] != nil
+	if !isObject {
+		return nil
+	}
+	if isDynamicMap(m) {
+		return fmt.Errorf("%s does not support dynamic map schemas in structured outputs", provider)
+	}
+	m["additionalProperties"] = false
+
+	props, ok := m["properties"].(map[string]any)
+	if !ok || len(props) == 0 {
+		return nil
+	}
+	required, list := requiredSet(m)
+	var missing []string
+	for name, prop := range props {
+		if required[name] {
+			continue
+		}
+		missing = append(missing, name)
+		props[name] = nullable(prop)
+	}
+	sort.Strings(missing)
+	m["required"] = append(list, missing...)
+	return nil
+}
+
+// requiredSet returns the names an object schema lists as required, as a set
+// and in their listed order.
+func requiredSet(m map[string]any) (map[string]bool, []string) {
+	set := make(map[string]bool)
+	var list []string
+	if existing, ok := m["required"].([]any); ok {
+		for _, item := range existing {
+			if s, ok := item.(string); ok {
+				set[s] = true
+				list = append(list, s)
+			}
+		}
+	}
+	return set, list
+}
+
+// nullable wraps a property schema so it also accepts null, unless it does
+// already. Anything that is not a schema object is returned as is.
+func nullable(value any) any {
+	prop, ok := value.(map[string]any)
+	if !ok || allowsNull(prop) {
+		return value
+	}
+	return map[string]any{"anyOf": []any{prop, map[string]any{"type": "null"}}}
 }
 
 // AdaptAnthropic adapts schemas for Anthropic Claude structured outputs.
@@ -276,23 +290,33 @@ func walkSchemas(node any, visit func(m map[string]any) error) error {
 }
 
 func allowsNull(prop map[string]any) bool {
-	if typ, ok := prop["type"].(string); ok && typ == "null" {
+	if typeAllowsNull(prop["type"]) {
 		return true
 	}
-	if types, ok := prop["type"].([]any); ok {
-		for _, t := range types {
-			if s, ok := t.(string); ok && s == "null" {
-				return true
-			}
+	for _, key := range []string{"anyOf", "oneOf"} {
+		if branches, ok := prop[key].([]any); ok && anyBranchAllowsNull(branches) {
+			return true
 		}
 	}
-	for _, key := range []string{"anyOf", "oneOf"} {
-		if branches, ok := prop[key].([]any); ok {
-			for _, b := range branches {
-				if bm, ok := b.(map[string]any); ok && allowsNull(bm) {
-					return true
-				}
-			}
+	return false
+}
+
+// typeAllowsNull reports whether a "type" keyword, a name or a list of
+// names, includes null.
+func typeAllowsNull(typ any) bool {
+	switch v := typ.(type) {
+	case string:
+		return v == "null"
+	case []any:
+		return slices.Contains(v, any("null"))
+	}
+	return false
+}
+
+func anyBranchAllowsNull(branches []any) bool {
+	for _, b := range branches {
+		if bm, ok := b.(map[string]any); ok && allowsNull(bm) {
+			return true
 		}
 	}
 	return false
@@ -306,6 +330,21 @@ func CompileOutput(schema *jsonschema.Schema) (*sjs.Schema, error) {
 		return nil, nil
 	}
 
+	m, err := schemaMap(schema)
+	if err != nil {
+		return nil, err
+	}
+	_ = walkSchemas(m, makeOptionalNullable)
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return nil, fmt.Errorf("marshal schema for compilation: %w", err)
+	}
+	return compileDraft2020(raw)
+}
+
+// schemaMap decodes a reflected schema into the map form the adapters edit,
+// keeping numbers exact.
+func schemaMap(schema *jsonschema.Schema) (map[string]any, error) {
 	raw, err := json.Marshal(schema)
 	if err != nil {
 		return nil, fmt.Errorf("marshal schema for compilation: %w", err)
@@ -314,36 +353,29 @@ func CompileOutput(schema *jsonschema.Schema) (*sjs.Schema, error) {
 	if err := decodeJSONNumber(strings.NewReader(string(raw)), &m); err != nil {
 		return nil, fmt.Errorf("decode schema for compilation: %w", err)
 	}
-	_ = walkSchemas(m, func(m map[string]any) error {
-		props, ok := m["properties"].(map[string]any)
-		if !ok {
-			return nil
-		}
-		required := make(map[string]bool)
-		if list, ok := m["required"].([]any); ok {
-			for _, item := range list {
-				if name, ok := item.(string); ok {
-					required[name] = true
-				}
-			}
-		}
-		for name, value := range props {
-			if prop, ok := value.(map[string]any); ok && !required[name] && !allowsNull(prop) {
-				props[name] = map[string]any{"anyOf": []any{prop, map[string]any{"type": "null"}}}
-			}
-		}
-		return nil
-	})
-	if raw, err = json.Marshal(m); err != nil {
-		return nil, fmt.Errorf("marshal schema for compilation: %w", err)
-	}
+	return m, nil
+}
 
+func makeOptionalNullable(m map[string]any) error {
+	props, ok := m["properties"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	required, _ := requiredSet(m)
+	for name, prop := range props {
+		if !required[name] {
+			props[name] = nullable(prop)
+		}
+	}
+	return nil
+}
+
+func compileDraft2020(raw []byte) (*sjs.Schema, error) {
 	compiler := sjs.NewCompiler()
 	compiler.Draft = sjs.Draft2020
 	if err := compiler.AddResource("output.json", strings.NewReader(string(raw))); err != nil {
 		return nil, fmt.Errorf("add schema resource: %w", err)
 	}
-
 	return compiler.Compile("output.json")
 }
 
