@@ -12,7 +12,7 @@ Thanks for helping. crux is a small Go toolkit whose main goal is developer expe
 
 - **One package.** Everything users need comes from `import "github.com/apzuk3/crux"`. Implementation details go in `internal/`, which never imports `crux`. No feature subpackages.
 - **Pure Go.** `crux` must build with `CGO_ENABLED=0`; never add a dependency that needs cgo, such as a cgo SQLite driver.
-- **Go 1.25.8.** Check a new dependency's `go` directive, and don't use newer standard-library APIs.
+- **Go 1.26.** Check a new dependency's `go` directive, and don't use newer standard-library APIs.
 - **The same on every provider.** A new request option goes into `provider.Request` and all three wire implementations (`internal/provider/openai.go`, `anthropic.go`, `gemini.go`). Provider-specific rules belong in the provider's `prepare` hook in `models.go`, not in `switch` statements elsewhere.
 - **The session log is the source of truth.** New lifecycle facts are log entries. `Kind` values are stored, so never renumber them; add new ones at the end.
 - **Options validate.** Options return errors instead of panicking.
@@ -20,7 +20,7 @@ Thanks for helping. crux is a small Go toolkit whose main goal is developer expe
 
 ## Checks
 
-CI runs these on Linux, macOS and Windows with Go 1.25 and the latest Go. Run them before pushing:
+CI runs these on Linux, macOS and Windows with Go 1.26 and the latest Go. Run them before pushing:
 
 ```sh
 gofmt -l .                                   # must print nothing

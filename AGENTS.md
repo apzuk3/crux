@@ -75,7 +75,7 @@ Each is a `provider.Step` that takes a `provider.Request` (settings, tools, adap
 
 - Functional options: `AgentOption func(*Agent) error` and `SessionOption func(*Session) error`. Validate inside the option and return an error rather than panicking. `Must`/`MustSession` exist for examples and main functions.
 - Match the surrounding style: short doc comments on exported identifiers, few inline comments, errors wrapped with `%w` and context.
-- Minimum Go version is 1.25.8 (set by `glamour`; `openai-go` needs 1.25). Check a new dependency's `go` directive before adding it: `bubbletea` v2.0.10 needs Go 1.26, so it is pinned at v2.0.9, and `golang.org/x/oauth2` v0.36+ needs Go 1.26, so it is pinned at v0.35.0. Don't use newer standard-library APIs; `go vet` checks this.
+- Minimum Go version is 1.26.0, the oldest Go release still supported (`bubbletea` v2.1.0 and `golang.org/x/oauth2` v0.36+ need it too). Raise it only when Go drops support for it or a dependency requires more, not to the newest release. Check a new dependency's `go` directive before adding it, and don't use newer standard-library APIs; `go vet` checks this.
 - Pre-v0.0.1: breaking changes are acceptable when they improve developer experience. Say so in the PR description.
 
 ## Testing
@@ -91,7 +91,7 @@ go test -tags evals ./evals/...    # live provider evals; needs API keys, don't 
 - Test agent behaviour end to end with `cruxtest` (a mock HTTP transport that speaks each provider's wire format): `mock.Expect().ReturnText/ReturnToolCall/ReturnRefusal/WithUsage`, `mock.AgentOptions()`, `mock.Requests()`. Tests that need `cruxtest` go in `cruxtest/*_test.go` (package `cruxtest_test`), because the root package can't import it.
 - Tests that need unexported fields go in the root package (see `approval_test.go`, `store_test.go`). You can drive tools without a provider by seeding tool calls with `WithSessionLogs` and calling `executeUnexecutedToolCalls`.
 - Live evals in `evals/` carry `//go:build evals`. Keep `evals/doc.go` untagged so `go test ./...` still finds the package.
-- CI (`.github/workflows/ci.yml`) runs gofmt, vet, `go test -race`, and a `CGO_ENABLED=0` test on Go 1.25 and stable, on Linux, macOS and Windows (no `-race` on Windows). It also fails if the `crux` package depends on a SQLite driver.
+- CI (`.github/workflows/ci.yml`) runs gofmt, vet, `go test -race`, and a `CGO_ENABLED=0` test on Go 1.26 and stable, on Linux, macOS and Windows (no `-race` on Windows). It also fails if the `crux` package depends on a SQLite driver.
 
 ## Layout
 
