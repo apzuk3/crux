@@ -183,3 +183,64 @@ func TestDecideLimitErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderLimitWaitsForRetryAfter(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider crux.Provider
+		model    string
+		status   int
+		body     string
+		header   [2]string
+		wait     time.Duration
+		atMost   time.Duration // 0 for no upper bound
+	}{
+		{"openai retry-after-ms", crux.ProviderOpenAI, crux.OpenAIGPT5_6Sol, 429,
+			`{"error":{"message":"Rate limit reached","type":"requests","code":"rate_limit_exceeded"}}`,
+			[2]string{"Retry-After-Ms", "200"}, 200 * time.Millisecond, 0},
+		{"anthropic retry-after", crux.ProviderAnthropic, crux.ClaudeHaiku4_5, 429,
+			`{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`,
+			[2]string{"Retry-After", "1"}, time.Second, 0},
+		// The genai SDK's own backoff would wait at least half a second here,
+		// so a shorter wait shows crux honoured the RetryInfo delay instead.
+		{"gemini retry info", crux.ProviderGoogle, crux.Gemini2_5Flash, 429,
+			`{"error":{"code":429,"message":"Quota exceeded","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"0.05s"}]}}`,
+			[2]string{}, 50 * time.Millisecond, 400 * time.Millisecond},
+		{"gemini overloaded without retry info", crux.ProviderGoogle, crux.Gemini2_5Flash, 503,
+			`{"error":{"code":503,"message":"The model is overloaded","status":"UNAVAILABLE"}}`,
+			[2]string{}, 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := cruxtest.NewMock(cruxtest.WithProvider(tt.provider))
+			turn := mock.Expect().ReturnError(tt.status, tt.body)
+			if tt.header[0] != "" {
+				turn.WithHeader(tt.header[0], tt.header[1])
+			}
+			mock.Expect().ReturnText("hello")
+			start := time.Now()
+			out, err := limitSession(t, mock, tt.model, 1).Run(t.Context(), "hi")
+			require.NoError(t, err)
+			require.Equal(t, "hello", out)
+			elapsed := time.Since(start)
+			require.GreaterOrEqual(t, elapsed, tt.wait)
+			if tt.atMost > 0 {
+				require.Less(t, elapsed, tt.atMost)
+			}
+			mock.AssertTurnCount(t, 2)
+		})
+	}
+}
+
+func TestProviderLimitRetriesRunOut(t *testing.T) {
+	mock := cruxtest.NewMock(cruxtest.WithProvider(crux.ProviderGoogle))
+	for range 2 {
+		mock.Expect().ReturnError(429, `{"error":{"code":429,"message":"Quota exceeded","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"0.1s"}]}}`)
+	}
+	_, err := limitSession(t, mock, crux.Gemini2_5Flash, 1).Run(t.Context(), "hi")
+	require.ErrorIs(t, err, crux.ErrRateLimited)
+	var perr *crux.ProviderError
+	require.ErrorAs(t, err, &perr)
+	require.Equal(t, 100*time.Millisecond, perr.RetryAfter)
+	mock.AssertTurnCount(t, 2)
+}

@@ -96,13 +96,14 @@ func (a *Agent) step(ctx context.Context, client *http.Client, log []Entry, emit
 			return emit(Chunk{Kind: ChunkKind(kind), Delta: delta})
 		}
 	}
-	// The SDKs retry limits reported as HTTP errors. One that comes after the
-	// response started is retried here, unless deltas were already emitted.
+	// A limit the SDK didn't retry (one that came after the response started,
+	// or a Gemini HTTP limit) is retried here, waiting for the provider's
+	// delay, unless deltas were already emitted.
 	var items []provider.Item
 	for attempt := 0; ; attempt++ {
 		items, err = spec.step(ctx, req, sink)
 		var limit *provider.LimitError
-		if err == nil || emitted || attempt >= req.Retries() || !errors.As(err, &limit) || limit.StatusCode != 0 || !limit.Kind.Retryable() {
+		if err == nil || emitted || attempt >= req.Retries() || !errors.As(err, &limit) || limit.Retried || !limit.Kind.Retryable() {
 			break
 		}
 		if provider.Sleep(ctx, provider.RetryDelay(limit.RetryAfter, attempt)) != nil {
