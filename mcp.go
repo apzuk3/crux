@@ -14,8 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/apzuk3/crux/internal/mcpclient"
-	"github.com/apzuk3/crux/internal/schema"
+	"crux.foo/internal/mcpclient"
+	"crux.foo/internal/schema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

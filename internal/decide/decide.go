@@ -21,7 +21,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/apzuk3/crux/internal/provider"
+	"crux.foo/internal/provider"
 )
 
 const (

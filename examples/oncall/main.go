@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 // All services, deploys, logs and metrics below are fictional fixtures.

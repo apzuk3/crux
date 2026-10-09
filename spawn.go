@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/apzuk3/crux/internal/schema"
+	"crux.foo/internal/schema"
 )
 
 // spawnToolName is the tool WithAgentSpawning adds.

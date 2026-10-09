@@ -29,6 +29,7 @@ type Turn struct {
 	Refusal    string
 	StatusCode int
 	RawBody    []byte
+	Header     map[string]string
 	Usage      *TokenUsage
 	empty      bool
 
@@ -116,6 +117,15 @@ func (t *Turn) WithThoughtSignature(signature string) *Turn {
 // with a "\n\n" text block, as Claude often does. Other providers ignore it.
 func (t *Turn) WithBlankText() *Turn {
 	t.blankText = true
+	return t
+}
+
+// WithHeader adds a response header, such as Retry-After.
+func (t *Turn) WithHeader(key, value string) *Turn {
+	if t.Header == nil {
+		t.Header = make(map[string]string)
+	}
+	t.Header[key] = value
 	return t
 }
 

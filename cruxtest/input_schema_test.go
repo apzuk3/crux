@@ -6,8 +6,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/apzuk3/crux"
-	"github.com/apzuk3/crux/cruxtest"
+	"crux.foo"
+	"crux.foo/cruxtest"
 	"github.com/stretchr/testify/require"
 )
 

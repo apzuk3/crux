@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/apzuk3/crux/internal/schema"
+	"crux.foo/internal/schema"
 )
 
 // redactURLSecrets removes the credentials a base URL carries from err's

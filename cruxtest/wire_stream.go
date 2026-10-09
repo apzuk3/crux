@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"maps"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 // buildStreamResponse encodes ordinary mock turns using each provider's SSE

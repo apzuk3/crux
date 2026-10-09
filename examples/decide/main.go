@@ -8,7 +8,7 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 // Triage is what the decider answers about a ticket: one question per field.

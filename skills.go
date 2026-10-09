@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/apzuk3/crux/internal/skills"
+	"crux.foo/internal/skills"
 )
 
 // Skill tool names.

@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 // validateRequest checks a request body against rules the real provider APIs

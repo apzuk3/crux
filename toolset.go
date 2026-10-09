@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"slices"
 
-	"github.com/apzuk3/crux/internal/filesystem"
-	"github.com/apzuk3/crux/internal/network"
+	"crux.foo/internal/filesystem"
+	"crux.foo/internal/network"
 )
 
 // The built-in toolsets: Filesystem and Network. Their tools are implemented

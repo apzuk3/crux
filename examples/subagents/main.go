@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 // Message shapes each specialist's answer. The coordinator passes work to a

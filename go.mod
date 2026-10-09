@@ -1,4 +1,4 @@
-module github.com/apzuk3/crux
+module crux.foo
 
 go 1.26.0
 

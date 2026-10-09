@@ -29,7 +29,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 
 	"github.com/stretchr/testify/require"
 )

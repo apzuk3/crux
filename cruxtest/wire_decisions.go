@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 // providerDecisions marks the state-and-questions API decision models speak

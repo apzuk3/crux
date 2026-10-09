@@ -68,8 +68,8 @@ const (
 	ToolChoiceTool     = "tool"
 )
 
-// retries returns req.MaxRetries, or the SDKs' default of two.
-func (req *Request) retries() int {
+// Retries returns req.MaxRetries, or the SDKs' default of two.
+func (req *Request) Retries() int {
 	if req.MaxRetries != nil {
 		return *req.MaxRetries
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -37,7 +38,7 @@ func newAnthropicClient(req *Request) *anthropic.Client {
 		// a server that accepts a streaming request but does not answer.
 		client = DefaultHTTPClient()
 	}
-	opts = append(opts, option.WithHTTPClient(client), option.WithMaxRetries(req.retries()))
+	opts = append(opts, option.WithHTTPClient(client), option.WithMaxRetries(req.Retries()))
 
 	c := anthropic.NewClient(opts...)
 	return &c
@@ -132,7 +133,7 @@ func Anthropic(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 			response, err = streamAnthropic(ctx, client, params, emit)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("anthropic messages: %w", err)
+			return nil, fmt.Errorf("anthropic messages: %w", anthropicLimit(err))
 		}
 		switch response.StopReason {
 		case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence, anthropic.StopReasonToolUse, anthropic.StopReasonPauseTurn:
@@ -339,7 +340,7 @@ func streamAnthropic(ctx context.Context, client *anthropic.Client, params anthr
 		case "message_stop":
 			complete = true
 		case "error":
-			return nil, fmt.Errorf("anthropic stream error: %s", event.RawJSON())
+			return nil, bodyLimit(fmt.Errorf("anthropic stream error: %s", event.RawJSON()), []byte(event.RawJSON()))
 		}
 		if err != nil {
 			return nil, err
@@ -536,4 +537,23 @@ func toAnthropicContentBlockParamUnion(e Item) ([]anthropic.ContentBlockParamUni
 	}
 
 	return blocks, nil
+}
+
+// anthropicLimit returns err as a *LimitError when Anthropic reported a limit,
+// as an HTTP error or as an error event in a stream (which the SDK returns as
+// an *anthropic.Error with status 200).
+func anthropicLimit(err error) error {
+	var apiErr *anthropic.Error
+	if !errors.As(err, &apiErr) {
+		return err
+	}
+	if apiErr.StatusCode == http.StatusOK {
+		return bodyLimit(err, []byte(apiErr.RawJSON()), string(apiErr.Type()))
+	}
+	_, codes, message := errorFields([]byte(apiErr.RawJSON()))
+	var header http.Header
+	if apiErr.Response != nil {
+		header = apiErr.Response.Header
+	}
+	return limitError(err, apiErr.StatusCode, header, append(codes, string(apiErr.Type())), message)
 }

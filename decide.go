@@ -9,9 +9,9 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/apzuk3/crux/internal/decide"
-	"github.com/apzuk3/crux/internal/provider"
-	"github.com/apzuk3/crux/internal/schema"
+	"crux.foo/internal/decide"
+	"crux.foo/internal/provider"
+	"crux.foo/internal/schema"
 	"github.com/invopop/jsonschema"
 )
 
@@ -165,6 +165,8 @@ func (d *Decider) decideNatively(ctx context.Context, fields []decide.Field, inp
 	if err != nil {
 		if provider.IsContextTooLong(err) {
 			err = fmt.Errorf("%w: %w", ErrContextTooLong, err)
+		} else {
+			err = providerError(a.provider, err)
 		}
 		return nil, redactURLSecrets(err, a.baseURL)
 	}

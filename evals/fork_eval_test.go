@@ -41,7 +41,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 	"github.com/stretchr/testify/require"
 )
 

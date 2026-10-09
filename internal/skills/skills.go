@@ -21,7 +21,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/apzuk3/crux/internal/filesystem"
+	"crux.foo/internal/filesystem"
 	"gopkg.in/yaml.v3"
 )
 

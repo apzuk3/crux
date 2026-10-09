@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 func main() {

@@ -13,7 +13,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 func main() {

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/apzuk3/crux/internal/provider"
+	"crux.foo/internal/provider"
 )
 
 type base struct {

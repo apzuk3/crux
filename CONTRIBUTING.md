@@ -1,6 +1,8 @@
 # Contributing
 
-Thanks for helping. crux is a small Go toolkit whose main goal is developer experience: the common path should be obvious, and users should never have to wire many pieces together. [AGENTS.md](AGENTS.md) explains the design in detail; read it before larger changes.
+Thanks for helping. crux is a small Go toolkit whose main goal is developer experience: the common path should be obvious, and users should never have to wire many pieces together. This file explains the design and the rules the code follows; read it before larger changes. It is also the context coding agents load when they work on crux (`CLAUDE.md` imports it).
+
+The root [AGENTS.md](AGENTS.md) is not for contributors: it points coding agents that *use* crux to the docs in [skills/crux](skills/crux/SKILL.md).
 
 ## Before you start
 
@@ -8,36 +10,132 @@ Thanks for helping. crux is a small Go toolkit whose main goal is developer expe
 - **New or changed public API** (anything exported from `crux`): open an issue first and describe the use case. The public API is kept small on purpose, and removing an export later is a breaking change, so API changes are discussed before code is written.
 - **Security issues:** don't open an issue; see [SECURITY.md](SECURITY.md).
 
-## Rules the code follows
+## What crux is
 
-- **One package.** Everything users need comes from `import "github.com/apzuk3/crux"`. Implementation details go in `internal/`, which never imports `crux`. No feature subpackages.
-- **Pure Go.** `crux` must build with `CGO_ENABLED=0`; never add a dependency that needs cgo, such as a cgo SQLite driver.
-- **Go 1.26.** Check a new dependency's `go` directive, and don't use newer standard-library APIs.
-- **The same on every provider.** A new request option goes into `provider.Request` and all three wire implementations (`internal/provider/openai.go`, `anthropic.go`, `gemini.go`). Provider-specific rules belong in the provider's `prepare` hook in `models.go`, not in `switch` statements elsewhere.
-- **The session log is the source of truth.** New lifecycle facts are log entries. `Kind` values are stored, so never renumber them; add new ones at the end.
-- **Options validate.** Options return errors instead of panicking.
-- **Style.** Short doc comments on exported identifiers, errors wrapped with `%w` and context, and code that matches what's around it.
+A cross-platform Go agent development kit. **The primary goal is developer experience:** keep things simple, make the common path obvious, and never make users wire many pieces together.
 
-## Checks
+**Current focus:** the foundation of *creating* agents and *running* sessions. That means the loop that sends input, executes tools, and returns a result, working the same across providers. RAG, telemetry, workflows and similar features come later, once this core is solid. Don't start them unless asked.
 
-CI runs these on Linux, macOS and Windows with Go 1.26 and the latest Go. Run them before pushing:
+## Principles (non-negotiable)
+
+- **One flat package.** Everything a user needs comes from `import "crux.foo"`. Do not create subpackages for features (no `crux/store/...`, `crux/tools/...`). `cruxtest` (test helpers), `internal/` (implementation details users never import), `examples/`, `evals/` and `skills/` (documentation for users' coding agents, no Go code) are the only other directories.
+- **Root holds the API; `internal/` holds the machinery.** The root package keeps every exported identifier and the code bound to `Agent`/`Session` internals (run loop, registry, stores, options). Code that doesn't need them lives in `internal/<pkg>`: provider wire code, the schema engine, toolset implementations, MCP OAuth. Internal packages never import `crux` (it would be a cycle) and define their own plain types; a thin root file adapts (`provider.go` for providers, `cli.go` for the TUI, `toolset.go`/`mcp*.go` for toolsets). Public types stay defined in root, not aliased from `internal`, so `go doc` shows them whole. Moving a built-in tool's input struct must not change its schema, because agent IDs hash tool definitions.
+- **Pure Go, no cgo.** The `crux` package must build and run with `CGO_ENABLED=0`. Never import a cgo SQLite driver (such as `mattn/go-sqlite3`) or any library that needs cgo or loads native libraries. GORM itself is fine because it's pure Go. Users bring their own GORM driver; tests use the pure-Go `github.com/glebarez/sqlite`. CI enforces this.
+- **Small public API.** Don't export something unless users need it. Internal mechanisms stay unexported (for example, session parent tracking). Removing an export later is a breaking change.
+- **Works with zero configuration.** `crux.New(name, model)` + `crux.NewSession(ctx, agent)` + `session.Run(ctx, input)` must work with only an API key in the environment.
+- **Discuss before redesigning public APIs.** The owner wants to talk through design changes (especially tools, sessions and stores) before code is written. Bug fixes and internal changes can go ahead.
+- **Keep the user docs current.** `skills/crux/` is how coding agents learn crux, and their training data is out of date. A change to public API or behaviour updates the matching page in `skills/crux/references/` (and `SKILL.md` when it changes the basics) in the same pull request. `docs_test.go` checks that the skill parses and its links resolve.
+
+## Core concepts and intentional design decisions
+
+- **Tools are decoupled from agents, on purpose.** Tools are registered in a registry: the default one via `RegisterTool`, or a custom `NewToolsRegistry()` passed with `WithToolsRegistry`. Any package in an application can contribute tools independently of where agents are defined, and each agent references the tools it may use **by name** (`WithTools([]string{...})`). This keeps large LLM apps from turning into a tangle. **Do not replace this with tools defined inline on agents.** Tool names must match `^[a-zA-Z0-9_-]{1,64}$`; an invalid or already registered name panics (`AddToolset*` returns it as an error), and `New` rejects an agent with two tools of the same name. Improvements that were discussed and not yet decided:
+  - `RegisterTool` could return a reference value that agents can pass instead of a string;
+  - a simpler custom-registry option, `WithRegistry(reg)`.
+- **Runtime schemas:** `WithInputSchema(schema)` replaces the schema generated from the input type, for tools whose arguments are only known at run time (such as MCP tools). The input type may then be `json.RawMessage`.
+- **MCP** (`mcp.go`, `internal/mcpclient`): `ConfigureMCP(ctx, name, transport)` connects to an MCP server through the official Go SDK (`github.com/modelcontextprotocol/go-sdk`, kept out of the public API), lists its tools once and registers each one as `<name>_<tool>` with `WithInputSchema`, `WithToolset(name)` and approval unless the server marks it read-only. Agents select them with `WithMCPs(name)` (sugar over `WithToolsets`). All names, schemas and conflicts are checked before anything is registered. Results become text: `IsError` is a tool error, structured content is JSON when there is no text. Remote servers authorize with OAuth on a 401 (`mcpclient.NewOAuthHandler`: protected resource metadata, auth server metadata, dynamic client registration or a configured client, PKCE with a loopback redirect, token cached in a `TokenStore` and refreshed). Not supported yet: `list_changed`, resources, prompts, sampling, elicitation, per-user identities.
+- **Skills** (`skills.go`, `internal/skills`): `AddSkills(dir)` registers the skills in `dir` (each a `<name>/SKILL.md` with YAML frontmatter `name` and `description`, the Agent Skills format) as the `skills` toolset; agents select them with `WithSkills()` (sugar over `WithToolsets`). Modelled on Google ADK's skill toolset: `load_skill`, `load_skill_resource`, and `save_skill` (creates or updates a skill, needs approval). The skill list (names and descriptions) is appended to the instructions on every request through the unexported `withInstructions` tool option, which `wireRequest` evaluates; it's read from disk each time, so saved skills appear from the next request, and it isn't part of the agent ID. `AddSkills` uses the default registry only and rejects invalid skills; skills that become invalid later are left out of the list. Scripts are not run.
+- **Network toolset** (`toolset.go`, `internal/network`): `Network(opts...)` returns a `*NetworkToolset` (a `Toolset` with `Close`) whose tools are `dns_lookup`, `whois`, `http_get`, `http_request`, `net_connect`, `net_send`, `net_read`, `net_list`, `net_close`, `net_listen` and `http_serve`. Pure Go on every OS: DNS with `golang.org/x/net/dns/dnsmessage` (system servers from `/etc/resolv.conf`, or `GetAdaptersAddresses` on Windows), WebSockets with `github.com/coder/websocket`. Long-lived connections, listeners and servers are handles in the toolset (shared by its sessions), each with a background reader filling a capped `netBuffer` that `net_read` drains. Every dial goes through `network.Tools.dial`, whose `net.Dialer.Control` checks the resolved IP against `netPolicy` (`WithNetworkPrivate`, `WithNetworkHosts`); `http_get` always applies the public-only rule, which is what lets it run without approval. Approval defaults are `netApprovalDefaults`: lookups, reads and handle management are free, anything that sends data or opens a port needs approval. Approval is static per tool; a per-call approval hook has been discussed and deferred.
+- **AGENTS.md** (`toolset.go`, `internal/filesystem/agents.go`): `Filesystem(root)` adds `root/AGENTS.md` (cut at 32 KB) to the instructions of agents with any filesystem tool, through `withInstructions`; one shared option on every tool, deduplicated in `wireRequest` by pointer, so it's added once. Read before each request, not part of the agent ID. `WithFilesystemAgentsFile(false)` turns it off. Only the root file is read (no nested AGENTS.md, no CLAUDE.md).
+- **Toolsets** group tools. A `Toolset` registers its tools in `Register(registry)` and labels each one with the `WithToolset(name)` tool option; `AddToolset`/`AddToolsetWithRegistry` call `Register`. Agents select a whole set with `WithToolsets`/`WithToolsetsRegistry`, which add to the tool list (unlike `WithTools`, which replaces it).
+- **Agent** (`agent.go`): an immutable, stateless blueprint (model, instructions, tool names, limits), safe for concurrent use. Its ID is derived from `canonicalData()`, which includes a SHA-256 of each tool definition, so a changed tool description or schema changes the ID.
+- **Session** (`session.go`): one conversation, stored as an append-only log of `Entry` values (`types.go`). Not safe for concurrent use. `Run`/`RunInto`/`Stream` drive the loop:
+  1. run any pending tool calls (the calls from one model turn run concurrently, at most 8 at a time; results keep the model's order). Calls of `WithSequential` tools (every filesystem tool; `net_send`, `net_read`, `net_close`) run one after another in the model's order as a single concurrent task, each seeing the state deltas of the ones before it;
+  2. record `KindTurnStarted` and call the provider (`step`). `WithToolChoice` is sent only on the first request after new input (`step`'s `first` flag), so a forced choice can't loop; repair requests and `Resume` don't repeat it;
+  3. append what the model produced;
+  4. stop on approvals, refusals or a final answer; otherwise repeat, up to `maxTurns`. Output repair requests (`WithMaxRepairs`) are extra and don't count as turns.
+- **Tool failures never stop a run.** Tool errors, tool panics (recovered in `callTool`) and timeouts (`WithToolTimeout`, enforced in `invokeTool`, which stops waiting for a tool that ignores its context and discards its late result) are sent to the model as `ToolResult.Error`. Arguments are validated against the tool's input schema first; repeated keys, keys that match a field only case-insensitively and keys of a struct input that match no field are rejected (maps and nested types with their own decoder accept any key), so an approval shown from the raw arguments matches what the tool receives.
+- **Approvals:** tools registered with `WithApprovalNeeded(true)` make `Run` return `ErrApprovalNeeded`. The caller then uses `Approve`/`Reject` and `Resume`. Approvals needed inside a subagent surface on the parent: `PendingApprovals` includes them (`ToolCall.Agent` names the agent that made each call), and `Approve`/`Reject` record the decision in the subagent's session.
+- **Stores** (`store.go`): `Store.Append(ctx, *Session, entries...)` and `Store.Get(ctx, id)`.
+  - `MemoryStore` is the default.
+  - `GORMStore` (`NewGORMStore(db)`) persists to the `crux_agents`, `crux_sessions` and `crux_session_logs` tables.
+  - `NewSession` with `WithSessionID(id)` loads an existing session from the store, or starts fresh if there isn't one. There is no separate resume function.
+  - History seeded with `WithSessionLogs` (as forks do) is written to the store.
+  - The store is the source of truth. `Session.logs` is only a cache: `appendLogs` adds entries to it after `Store.Append` succeeds. After a failed write the session is unchanged, so tool calls whose results weren't stored run again on the next `Run`/`Resume`.
+- **Parent/child sessions are hidden and only for tracing.**
+  - `dispatch` puts the running session into the tool's context under an unexported `sessionContextKey`.
+  - `NewSession` reads it, records the parent's ID, and reuses the parent's store.
+  - `GORMStore` saves the link in `crux_sessions.parent_id`.
+  - There is no public API for this, and none should be added without discussion.
+- **Subagents** (`WithSubAgent`): exposed to the parent as a tool named `agent_<name>` that takes `{"task": string}`, validated as strictly as other tool arguments. Each call runs a child session whose ID is derived from the parent session and the call (`childSessionID`), and its output is the tool result. Subagent tools have no `invoke`: `dispatch` runs them through `Session.runSubAgent`. When the child stops for approval, `dispatch` returns it as waiting: the call gets no result, the child is kept in `Session.children`, and the parent returns `ErrApprovalNeeded`. Running the call again loads the child by its ID and resumes it. `NewSession` reloads waiting children when it loads a session from the store.
+- **Agent spawning** (`spawn.go`, `WithAgentSpawning(opts...)`): adds a `spawn_agent` tool (kind `toolKindSubagent`, `Tool.spawn` set) whose arguments are `name`, `instructions`, `task`, optional `tools` and, with more than one allowed model, `model`. `prepareSpawning` (in `New`) writes the allowed tools (with their descriptions) into the tool's description and the allowed tools and models into its schema as enums, so the model can tell what it may hand out without being told in instructions, and they're part of the agent ID; `WithSpawnMaxTurns` enters `canonicalData` only when set. Defaults come from the parent: its model, its tools (minus `spawn_agent`, so spawned agents can't spawn) and its turn limit. `spawnedAgent` builds the child by `clone` from the parent and the call's arguments only, so a call that runs again gets the same agent ID and session; it runs through `runSubAgent`/`subAgentFor` like `WithSubAgent`, including approvals and reloads, but sets no state delta because the model chose the name. A spawned agent has no output schema or tool choice. Spawn calls of one turn run in their own queue in `executeUnexecutedToolCalls`, at most `WithSpawnConcurrency` at a time (default `maxConcurrentToolCalls`), without taking the general slots; the setting stays out of `canonicalData`.
+- **Attachments** (`attachment.go`): `Run`, `Stream` and `RunInto(ctx, target, inputs...)` take any number of inputs. `NewUserEntry` turns strings and JSON values into text parts and `Attachment`s (`File`, `FileFS`, `Data`, `Reader`, `URL`, with `WithName`/`WithMIME`) into `ContentKindFile` parts. Files are read when the run starts (at most `maxAttachmentSize`) and their bytes stored in the log; URLs are stored as URLs and fetched by the provider. The type is resolved once, in `detectMIME` (content for images, audio, video and PDF, then a fixed extension table, then sniffed text). In the wire code, text files become inline text (`ContentPart.InlineText`) on every provider, images and PDFs native blocks; a file a provider can't take fails before the request with `unsupportedFile`. A non-UTF-8 `[]byte` input is rejected rather than sent as text.
+- **Compaction** (`compaction.go`): keeps sessions within the context window without changing the log. A `KindCompaction` entry (`Entry.Compaction`) records `Through`, a Seq: tool outputs over `omitOver` and files up to it are omitted for the model, and with a `Summary` the entries up to it are replaced by the summary. `modelView` applies this in `wireRequest`; nothing else filters what the model sees. Before each request, `maybeCompact` estimates the context (the latest `Usage` plus a rough estimate of what came after) against `CompactAt` of the window (`WithContextWindow`, else `providerSpec.contextWindow`); it omits outputs the model has read when that reaches `compactTarget`, otherwise it summarises. A provider error recognised by `provider.IsContextTooLong` becomes `ErrContextTooLong`, and the run loop compacts and retries the request up to twice (each try has its own `KindTurnStarted`). Summaries are cut only at user messages or turn starts, so a tool call is never separated from its result, and are written from a plain-text transcript by `Agent.compactor` (the agent's model or `CompactWith`), so they need no tools and work across providers. The transcript fits `transcriptBudget` (cut parts, then the oldest entries left out), and the summary keeps a verbatim "Durable facts" section that each rolling summary carries forward. A failed `maybeCompact` doesn't stop the run: the request is sent anyway, and the failure is joined to its error only if it fails too. `Session.Compact` summarises everything before the latest user message. Compaction settings enter `canonicalData` only when set, so agent IDs don't change.
+- **Decisions** (`decide.go`, `internal/decide`, `internal/provider/decisions.go`): `NewDecider(model, opts...)` + `Decide[T](ctx, d, state...)` answer typed questions without a session. Each field of the struct `T` is one question: `bool` is a yes/no ("noul", `true`/`false` tags), a string with a `choices` tag (or a type with `Choices() map[string]string`) picks an option, a number with a `levels` tag is a score (integers round to a level index, floats keep the weighted position); `description` is the instructions, and other field types are rejected before any request. Decision models (TypeSafe's Jev, `typesafe/*` on OpenRouter) answer through `providerSpec.decide` with calibrated probabilities (`Decision.Confidence`/`Probabilities`); every other model answers through its `step` with an output schema built from the questions, and those maps are nil. `New` rejects decision models; `NewDecider` reuses `AgentOption` but rejects tools, output schemas, tool choice and compaction, and sampling settings on decision models. Nothing is logged or stored. Session integration (deciding over a session's history, routing) is undecided; discuss first.
+- **Fork** (`session.go`): copies history into a new session, optionally switching model or provider. Provider-specific data (`Opaque`) is dropped when the provider changes.
+- **Errors** (`types.go`): sentinel errors for `errors.Is` checks: `ErrApprovalNeeded`, `ErrMaxTurns`, `ErrRefused`, `ErrOutputValidation`, `ErrSessionNotFound`, `ErrSessionConflict`, `ErrToolNotFound`, `ErrContextTooLong`.
+- **The log is the absolute source of truth, including the run's lifecycle.** `run` records `KindRunStarted` before it does any work and `KindRunFinished` (`Entry.Run`: outcome and error text) when it returns, even after a cancel. `KindTurnStarted` precedes each provider request (`Entry.Turn`: agent ID, provider and model; the agent ID pins the tool definitions). `KindToolStarted` is written, in one batch, before the tools of a turn run. A start without a result means the tool may have run; a start without a finish means the process died. The last entry of a model response carries `Entry.Response` (provider response ID, time to first streamed token). These kinds are `HiddenFromModel`, and `FinalOutput` skips them rather than treating them as a turn boundary. Only streamed deltas are not stored: they are previews of an entry that is stored whole. Don't add lifecycle events that bypass the log.
+- **Terminal chat** (`cli.go`, `internal/tui`): `CLI` is a `WithEntryHandler` listener plus `Stream` for deltas. It shows lifecycle entries (`KindRunStarted`, `KindTurnStarted`, `KindToolStarted`, …) as a progress pipeline, so new lifecycle facts belong in the log and get shown from there. The handler only forwards events; approvals, runs and model switches happen off the UI goroutine. Switching models forks the session with the unexported `forkWith`, which also copies the session's entry handlers (public `Fork` does not).
+- **Listening:** `WithEntryHandler` is a session option that subagent sessions inherit (`NewSession`, through `sessionContextKey`). It is additive (handlers run in the order added; a child keeps the parent's handlers before its own) and fires from `appendLogs` after `Store.Append` succeeds, serialised by a mutex shared across the session tree. User rejections set `ToolResult.Denied`. There are deliberately no tool hooks: when control over tools is needed, prefer tool middleware on the registry or per-call approval decided by code (discuss first).
+- **`Kind` values are persisted.** Never renumber them; append new ones at the end. `KindCompaction` took the slot after `KindStateDelta` that was reserved for it.
+
+## Providers
+
+There are only three generation wire implementations, in `internal/provider`, plus one decision wire (`decisions.go`: the state-and-questions API of TypeSafe's `/v1/systemone`, also served by OpenRouter at `/api/alpha/decisions`). Every generative provider maps onto one of the three:
+
+- `openai.go`: the OpenAI Responses API. It also serves xAI, DeepSeek, OpenRouter and Ollama.
+- `anthropic.go`: Anthropic Messages. `max_tokens` is required and defaults to `defaultAnthropicMaxTokens` (16384). Every request sets prompt-cache breakpoints (`setAnthropicCacheBreakpoints`); the API allows at most 4.
+- `gemini.go`: Google GenAI.
+
+Each is a `provider.Step` that takes a `provider.Request` (settings, tools, adapted output schema, and the model-visible log as `provider.Item`s) and returns `Item`s. `provider.go` in the root builds the request from the agent and converts the items back to `Entry` values; refusals come back as `provider.RefusedError` and become errors wrapping `ErrRefused`.
+
+`models.go` holds every provider's model constants (OpenAI ones are prefixed `OpenAI`) and registers each provider in its single `init` with `registerProvider` (`provider.go`), next to the providers' `prepare` hooks. Each `providerSpec` lists the known models (so `New` can infer the provider from the model name), the API key environment variables (used unless `WithAPIKey` is given), the default base URL, the wire `step`, the output-schema adapter, an optional `contextWindow` (conservative windows by model family, for compaction) an optional `prepare` hook that `New` runs for provider-specific rules and defaults, and an optional `decide` (with `isDecisionModel`, nil meaning every model) for decision models; a decision-only provider (TypeSafe) has no `step`. Adding a provider means adding its constants and registration to `models.go`; don't add `switch` statements on the provider elsewhere. Every model constant must be in its provider's `models` list. `WithMaxRetries` reaches the SDKs through `Request.MaxRetries` (default two retries on every provider) and, like `WithHTTPClient`, stays out of `canonicalData`. A new agent option that affects requests (like `WithMaxTokens`/`WithTemperature`/`WithReasoning`) must be added to `provider.Request` and `wireRequest` (`provider.go`), used in all three wire files, added to `canonicalData()`, and copied in `Agent.clone` (`agent.go`).
+
+## Conventions
+
+- Functional options: `AgentOption func(*Agent) error` and `SessionOption func(*Session) error`. Validate inside the option and return an error rather than panicking. `Must`/`MustSession` exist for examples and main functions.
+- Match the surrounding style: short doc comments on exported identifiers, few inline comments, errors wrapped with `%w` and context.
+- Minimum Go version is 1.26.0, the oldest Go release still supported (`bubbletea` v2.1.0 and `golang.org/x/oauth2` v0.36+ need it too). Raise it only when Go drops support for it or a dependency requires more, not to the newest release. Check a new dependency's `go` directive before adding it, and don't use newer standard-library APIs; `go vet` checks this.
+- Before v0.1.0, breaking changes are acceptable when they improve developer experience. Say so in the PR description.
+
+## Testing
 
 ```sh
-gofmt -l .                                   # must print nothing
+go test -race ./...                # unit tests; no network, no API keys
+CGO_ENABLED=0 go test ./...        # must also pass
 go vet ./... && go vet -tags evals ./evals/...
-go test -race ./...
-CGO_ENABLED=0 go test ./...
+gofmt -l .                         # must print nothing
+go test -tags evals ./evals/...    # live provider evals; needs API keys, don't run by default
 ```
 
-Unit tests need no network or API keys. Test agent behaviour end to end with `cruxtest`, the mock transport that speaks each provider's wire format, in `cruxtest/*_test.go`. Tests that need unexported fields go in the root package.
+Run the evals your change affects if you touched provider wire code.
 
-The live evals call real providers and need their API keys:
+- Test agent behaviour end to end with `cruxtest` (a mock HTTP transport that speaks each provider's wire format): `mock.Expect().ReturnText/ReturnToolCall/ReturnRefusal/WithUsage`, `mock.AgentOptions()`, `mock.Requests()`. Tests that need `cruxtest` go in `cruxtest/*_test.go` (package `cruxtest_test`), because the root package can't import it.
+- Tests that need unexported fields go in the root package (see `approval_test.go`, `store_test.go`). You can drive tools without a provider by seeding tool calls with `WithSessionLogs` and calling `executeUnexecutedToolCalls`.
+- Live evals in `evals/` carry `//go:build evals`. Keep `evals/doc.go` untagged so `go test ./...` still finds the package.
+- CI (`.github/workflows/ci.yml`) runs gofmt, vet, `go test -race`, and a `CGO_ENABLED=0` test on Go 1.26 and stable, on Linux, macOS and Windows (no `-race` on Windows). It also fails if the `crux` package depends on a SQLite driver.
 
-```sh
-go test -tags evals ./evals/...
-```
+## Layout
 
-Run the ones your change affects if you touched provider wire code.
+| Path | Contents |
+|---|---|
+| `agent.go` | `Agent`, `New`, every `AgentOption` (including `WithSubAgent`, `WithOutputSchemaFrom`), `canonicalData`, `clone`, turn info and tool hashes |
+| `session.go` | `Session`, `NewSession`, session options (`WithStore`, `WithEntryHandler`, …), the run loop, tool dispatch, approvals, `Stream`, state, `Fork` |
+| `spawn.go` | `WithAgentSpawning` and its options, the `spawn_agent` schema, building the spawned agent |
+| `tools.go` | tool registry, `RegisterTool*`, `Toolset`/`AddToolset*` |
+| `toolset.go` | the built-in toolsets: `Filesystem(root)` (`"filesystem"`; tools that change files need approval) and `Network()` (options, approval defaults); public tool names and registration |
+| `mcp.go` | `ConfigureMCP`, `WithMCPs`, MCP transports and options, `OAuthConfig`, `TokenStore`; tool registration |
+| `provider.go` | `Provider`, `providerSpec` and registration; `wireRequest` and the `Entry`/`provider.Item` conversion; output schema adaptation and validation |
+| `models.go` | model constants and each provider's registration in `init` |
+| `decide.go` | `Decider`, `NewDecider`, `Decide[T]`, `Decision`; native decisions and the structured-output fallback |
+| `store.go` | `Store`, `MemoryStore`, `GORMStore` |
+| `attachment.go` | `Attachment` and its constructors, type detection |
+| `compaction.go` | context window management: options, `modelView`, estimates, summaries, `Session.Compact` |
+| `types.go` | log entry types and sentinel errors |
+| `util.go` | generic unexported helpers: URL secret redaction, env lookup, deep copies (`cloneEntries`, `cloneState`, …), `decodeInto` |
+| `cli.go` | `CLI(agent, opts...)`: adapts a session to `internal/tui` (entries become `tui.Event`s, subagent sessions are tied to the call that started them) |
+| `internal/schema/` | tool input schemas from Go types (`json` + `description` tags), strict argument checks; output schema adapters and validation |
+| `internal/provider/` | provider wire code: `Request`/`Item`, `OpenAI`, `Anthropic`, `Gemini` steps, the `Decisions` wire, default HTTP client |
+| `internal/decide/` | decision questions from Go struct fields (tags, limits), answers back into the struct, the fallback output schema |
+| `internal/network/` | network tools: address policy, handles and buffers, sockets, HTTP client and server, DNS, whois |
+| `skills.go` | `AddSkills`, `WithSkills`, skill tool names and registration |
+| `internal/skills/` | skills: `SKILL.md` parsing and validation, the skill list for the instructions, load and save |
+| `internal/filesystem/` | file tools confined to a root with `os.Root` |
+| `internal/mcpclient/` | MCP OAuth (handler, token store), result rendering, transport helpers |
+| `internal/tui/` | the terminal chat (Bubble Tea, Lip Gloss, Glamour); it doesn't import `crux` and speaks only `tui.Info`, `tui.Event` and `tui.Backend` |
+| `cruxtest/` | mock transport for tests |
+| `examples/` | runnable examples (need real API keys) |
+| `evals/` | live evals (`-tags evals`) |
+| `skills/crux/` | the Agent Skill that teaches users' coding agents crux: `SKILL.md` (structure, rules, index) and `references/*.md` (one page per topic); `AGENTS.md` points to it |
 
 ## Pull requests
 

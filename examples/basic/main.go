@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 // All forecasts, schedules, prices, and availability below are fictional fixtures.
