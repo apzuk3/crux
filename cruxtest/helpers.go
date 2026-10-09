@@ -52,3 +52,18 @@ func normalizeToolArgs(args any) (map[string]any, string, error) {
 		return m, string(b), nil
 	}
 }
+
+// rawOrErrorBody handles the two shortcuts every provider builder takes
+// before encoding a turn: a raw body is returned as is, and an error status
+// without one gets the provider's error payload for that status. done is
+// false when the turn needs a regular response.
+func rawOrErrorBody(turn *Turn, errPayload func(status int) any) (body []byte, done bool, err error) {
+	if len(turn.RawBody) > 0 {
+		return turn.RawBody, true, nil
+	}
+	if turn.StatusCode != 0 && turn.StatusCode != 200 {
+		body, err := json.Marshal(errPayload(turn.StatusCode))
+		return body, true, err
+	}
+	return nil, false, nil
+}

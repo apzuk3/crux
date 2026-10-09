@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 
 	"crux.foo"
@@ -59,6 +60,13 @@ func invalidRequestResponse(provider crux.Provider, req *http.Request, err error
 	}
 }
 
+type anthropicBlock struct {
+	Type      string `json:"type"`
+	Text      string `json:"text"`
+	ID        string `json:"id"`
+	ToolUseID string `json:"tool_use_id"`
+}
+
 func validateAnthropicRequest(body []byte) error {
 	var request struct {
 		Messages []struct {
@@ -76,59 +84,78 @@ func validateAnthropicRequest(body []byte) error {
 	if n := bytes.Count(body, []byte(`"cache_control":`)); n > 4 {
 		return fmt.Errorf("anthropic: a maximum of 4 blocks with cache_control may be provided, found %d", n)
 	}
-	type block struct {
-		Type      string `json:"type"`
-		Text      string `json:"text"`
-		ID        string `json:"id"`
-		ToolUseID string `json:"tool_use_id"`
-	}
 	var pending []string // tool_use ids awaiting results in the next message
 	for i, message := range request.Messages {
-		var blocks []block
-		var text string
-		if err := json.Unmarshal(message.Content, &text); err == nil {
-			blocks = []block{{Type: "text", Text: text}}
-		} else if err := json.Unmarshal(message.Content, &blocks); err != nil {
-			return fmt.Errorf("anthropic: messages.%d: decode content: %w", i, err)
+		blocks, err := decodeAnthropicContent(i, message.Content)
+		if err != nil {
+			return err
 		}
-		if len(blocks) == 0 {
-			return fmt.Errorf("anthropic: messages.%d: content must not be empty", i)
+		uses, results, err := scanAnthropicBlocks(i, message.Role, blocks)
+		if err != nil {
+			return err
 		}
-		results := make(map[string]bool)
-		var uses []string
-		for j, b := range blocks {
-			switch b.Type {
-			case "text":
-				if strings.TrimSpace(b.Text) == "" {
-					return fmt.Errorf("anthropic: messages.%d.content.%d: text content blocks must contain non-whitespace text", i, j)
-				}
-			case "tool_use":
-				uses = append(uses, b.ID)
-			case "tool_result":
-				if message.Role != "user" {
-					return fmt.Errorf("anthropic: messages.%d.content.%d: tool_result blocks belong in user messages", i, j)
-				}
-				if j > 0 && blocks[j-1].Type != "tool_result" {
-					return fmt.Errorf("anthropic: messages.%d.content.%d: tool_result blocks must come first in a user message", i, j)
-				}
-				results[b.ToolUseID] = true
-			}
-		}
-		for id := range results {
-			found := false
-			for _, use := range pending {
-				found = found || use == id
-			}
-			if !found {
-				return fmt.Errorf("anthropic: messages.%d: tool_result for %q has no tool_use in the previous message", i, id)
-			}
-		}
-		for _, id := range pending {
-			if !results[id] {
-				return fmt.Errorf("anthropic: messages.%d: tool_use %q has no tool_result immediately after it", i, id)
-			}
+		if err := checkToolPairing(i, pending, results); err != nil {
+			return err
 		}
 		pending = uses
+	}
+	return nil
+}
+
+// decodeAnthropicContent decodes a message's content, which is either a
+// string or a list of blocks.
+func decodeAnthropicContent(i int, content json.RawMessage) ([]anthropicBlock, error) {
+	var text string
+	if err := json.Unmarshal(content, &text); err == nil {
+		return []anthropicBlock{{Type: "text", Text: text}}, nil
+	}
+	var blocks []anthropicBlock
+	if err := json.Unmarshal(content, &blocks); err != nil {
+		return nil, fmt.Errorf("anthropic: messages.%d: decode content: %w", i, err)
+	}
+	if len(blocks) == 0 {
+		return nil, fmt.Errorf("anthropic: messages.%d: content must not be empty", i)
+	}
+	return blocks, nil
+}
+
+// scanAnthropicBlocks checks the blocks of a message and returns the ids of
+// its tool_use blocks and of the tool calls its tool_result blocks answer.
+func scanAnthropicBlocks(i int, role string, blocks []anthropicBlock) (uses []string, results map[string]bool, err error) {
+	results = make(map[string]bool)
+	for j, b := range blocks {
+		switch b.Type {
+		case "text":
+			if strings.TrimSpace(b.Text) == "" {
+				return nil, nil, fmt.Errorf("anthropic: messages.%d.content.%d: text content blocks must contain non-whitespace text", i, j)
+			}
+		case "tool_use":
+			uses = append(uses, b.ID)
+		case "tool_result":
+			if role != "user" {
+				return nil, nil, fmt.Errorf("anthropic: messages.%d.content.%d: tool_result blocks belong in user messages", i, j)
+			}
+			if j > 0 && blocks[j-1].Type != "tool_result" {
+				return nil, nil, fmt.Errorf("anthropic: messages.%d.content.%d: tool_result blocks must come first in a user message", i, j)
+			}
+			results[b.ToolUseID] = true
+		}
+	}
+	return uses, results, nil
+}
+
+// checkToolPairing checks that the tool results of message i answer exactly
+// the tool calls pending from the previous message.
+func checkToolPairing(i int, pending []string, results map[string]bool) error {
+	for id := range results {
+		if !slices.Contains(pending, id) {
+			return fmt.Errorf("anthropic: messages.%d: tool_result for %q has no tool_use in the previous message", i, id)
+		}
+	}
+	for _, id := range pending {
+		if !results[id] {
+			return fmt.Errorf("anthropic: messages.%d: tool_use %q has no tool_result immediately after it", i, id)
+		}
 	}
 	return nil
 }
@@ -158,18 +185,19 @@ func validateGeminiRequest(body []byte) error {
 			return fmt.Errorf("gemini: contents.%d: parts must not be empty", i)
 		}
 		for j, part := range content.Parts {
-			hasData := false
-			for _, field := range geminiDataFields {
-				if value, ok := part[field]; ok && string(value) != "null" && string(value) != `""` {
-					hasData = true
-				}
-			}
-			if !hasData {
+			if !geminiPartHasData(part) {
 				return fmt.Errorf("gemini: contents.%d.parts.%d: part must carry data (such as text or functionCall), not only metadata", i, j)
 			}
 		}
 	}
 	return nil
+}
+
+func geminiPartHasData(part map[string]json.RawMessage) bool {
+	return slices.ContainsFunc(geminiDataFields, func(field string) bool {
+		value, ok := part[field]
+		return ok && string(value) != "null" && string(value) != `""`
+	})
 }
 
 func validateOpenAIRequest(body []byte) error {

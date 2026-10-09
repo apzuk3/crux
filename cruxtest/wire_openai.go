@@ -6,22 +6,8 @@ import (
 )
 
 func buildOpenAIResponse(turn *Turn, callIndex int) ([]byte, error) {
-	if turn.StatusCode != 0 && turn.StatusCode != 200 {
-		if len(turn.RawBody) > 0 {
-			return turn.RawBody, nil
-		}
-		errPayload := map[string]any{
-			"error": map[string]any{
-				"message": fmt.Sprintf("HTTP %d error", turn.StatusCode),
-				"type":    "api_error",
-				"code":    fmt.Sprintf("http_%d", turn.StatusCode),
-			},
-		}
-		return json.Marshal(errPayload)
-	}
-
-	if len(turn.RawBody) > 0 {
-		return turn.RawBody, nil
+	if body, done, err := rawOrErrorBody(turn, openAIError); done {
+		return body, err
 	}
 
 	output := []any{}
@@ -103,4 +89,14 @@ func buildOpenAIResponse(turn *Turn, callIndex int) ([]byte, error) {
 	}
 
 	return json.Marshal(resp)
+}
+
+func openAIError(status int) any {
+	return map[string]any{
+		"error": map[string]any{
+			"message": fmt.Sprintf("HTTP %d error", status),
+			"type":    "api_error",
+			"code":    fmt.Sprintf("http_%d", status),
+		},
+	}
 }
