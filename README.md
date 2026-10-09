@@ -73,15 +73,15 @@ func main() {
 
 No API key? Run the same agent on a local model with [Ollama](https://ollama.com): `ollama pull qwen3 && go run ./examples/ollama`.
 
-### Chat in the terminal
+### Chat with your agent before you ship it
 
-`crux.CLI` opens a full-screen chat with any agent: answers stream in as rendered markdown, each tool call and subagent shows up as a live card, a sidebar on the right lists the agent's tools with call counts and token usage, and a progress bar follows each run from request to answer. Tools registered with `WithApprovalNeeded` ask for approval in a dialog, and `ctrl+o` (or `/model`) switches the model mid-conversation: the chat continues in a fork of the session on the new model, listing every provider that has an API key in the environment.
+While you build an agent, `crux.CLI` lets you talk to it in the terminal and watch what it does, before you wire it into your app. It opens a full-screen chat with any agent: answers stream in as rendered markdown, each tool call and subagent shows up as a live card, a sidebar on the right lists the agent's tools with call counts and token usage, and a progress bar follows each run from request to answer. Tools registered with `WithApprovalNeeded` ask for approval in a dialog, and `ctrl+o` (or `/model`) switches the model mid-conversation: the chat continues in a fork of the session on the new model, listing every provider that has an API key in the environment.
 
 ```go
 crux.CLI(agent) // blocks until the user quits
 ```
 
-![crux.CLI: an agent calls tools on Gemini, then the chat switches to Grok mid-conversation](.github/assets/demo.gif)
+![Trying out an agent in crux.CLI: it calls tools on Gemini, then the chat switches to Grok mid-conversation](.github/assets/demo.gif)
 
 Session options work too: `crux.CLI(agent, crux.WithStore(store), crux.WithSessionID(id))` reopens a stored conversation with its history.
 
