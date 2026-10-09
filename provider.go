@@ -96,40 +96,49 @@ func (a *Agent) step(ctx context.Context, client *http.Client, log []Entry, emit
 			return emit(Chunk{Kind: ChunkKind(kind), Delta: delta})
 		}
 	}
-	// A limit the SDK didn't retry (one that came after the response started,
-	// or a Gemini HTTP limit) is retried here, waiting for the provider's
-	// delay, unless deltas were already emitted.
-	var items []provider.Item
-	for attempt := 0; ; attempt++ {
-		items, err = spec.step(ctx, req, sink)
-		var limit *provider.LimitError
-		if err == nil || emitted || attempt >= req.Retries() || !errors.As(err, &limit) || limit.Retried || !limit.Kind.Retryable() {
-			break
-		}
-		if provider.Sleep(ctx, provider.RetryDelay(limit.RetryAfter, attempt)) != nil {
-			break
-		}
-	}
+	items, err := stepWithRetries(ctx, spec, req, sink, &emitted)
 	if err != nil {
-		var refusal *provider.RefusedError
-		if errors.As(err, &refusal) {
-			if refusal.Detail != "" {
-				err = fmt.Errorf("%s: %w: %s", refusal.Provider, ErrRefused, refusal.Detail)
-			} else {
-				err = fmt.Errorf("%s: %w", refusal.Provider, ErrRefused)
-			}
-		} else if provider.IsContextTooLong(err) {
-			err = fmt.Errorf("%w: %w", ErrContextTooLong, err)
-		} else {
-			err = providerError(a.provider, err)
-		}
-		return nil, redactURLSecrets(err, a.baseURL)
+		return nil, redactURLSecrets(a.stepError(err), a.baseURL)
 	}
 	entries := make([]Entry, len(items))
 	for i, item := range items {
 		entries[i] = fromItem(item)
 	}
 	return entries, nil
+}
+
+// stepWithRetries calls the provider. A limit the SDK didn't retry (one that
+// came after the response started, or a Gemini HTTP limit) is retried here,
+// waiting for the provider's delay, unless deltas were already emitted.
+func stepWithRetries(ctx context.Context, spec providerSpec, req *provider.Request, sink provider.Emit, emitted *bool) ([]provider.Item, error) {
+	for attempt := 0; ; attempt++ {
+		items, err := spec.step(ctx, req, sink)
+		var limit *provider.LimitError
+		if err == nil || *emitted || attempt >= req.Retries() || !errors.As(err, &limit) || limit.Retried || !limit.Kind.Retryable() {
+			return items, err
+		}
+		if provider.Sleep(ctx, provider.RetryDelay(limit.RetryAfter, attempt)) != nil {
+			return items, err
+		}
+	}
+}
+
+// stepError maps a provider error onto crux's errors: refusals wrap
+// ErrRefused, a context too long wraps ErrContextTooLong, and limits become
+// a *ProviderError.
+func (a *Agent) stepError(err error) error {
+	var refusal *provider.RefusedError
+	switch {
+	case errors.As(err, &refusal):
+		if refusal.Detail != "" {
+			return fmt.Errorf("%s: %w: %s", refusal.Provider, ErrRefused, refusal.Detail)
+		}
+		return fmt.Errorf("%s: %w", refusal.Provider, ErrRefused)
+	case provider.IsContextTooLong(err):
+		return fmt.Errorf("%w: %w", ErrContextTooLong, err)
+	default:
+		return providerError(a.provider, err)
+	}
 }
 
 // providerError returns err as a *ProviderError when the provider reported a
