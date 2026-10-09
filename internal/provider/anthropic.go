@@ -54,16 +54,55 @@ func newAnthropicClient(req *Request) *anthropic.Client {
 // Messages API requires a cap. It stays below the SDK's non-streaming limit.
 const defaultAnthropicMaxTokens = 16384
 
-// anthropicStep returns ordered blocks with usage, resuming paused server turns
+// Anthropic returns ordered blocks with usage, resuming paused server turns
 // internally until the model finishes or requests a local tool.
 func Anthropic(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
-	messages, err := toAnthropicMessages(req.Log)
+	params, err := anthropicParams(req)
 	if err != nil {
 		return nil, err
 	}
+	client := newAnthropicClient(req)
+	emit = anthropicEmit(emit, params)
+	now := time.Now().UTC()
+	// Bound server-side continuation independently of the agent's tool turns.
+	const maxContinuations = 10
+	var produced []Item
+	var usage Usage
+	// anthropic has internal tool calling limitations. Once it's reach the maximum
+	// it will pause and wait until the content is sent back to continue
+	// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons#pause-turn
+	for continuations := 0; ; continuations++ {
+		response, err := anthropicMessage(ctx, client, params, emit)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkAnthropicStop(response, params.MaxTokens); err != nil {
+			return nil, err
+		}
+		produced, err = appendAnthropicBlocks(produced, response, now)
+		if err != nil {
+			return nil, err
+		}
+		addAnthropicUsage(&usage, response.Usage)
+		if response.StopReason != anthropic.StopReasonPauseTurn {
+			return finishTurn(produced, now, response.ID, &usage), nil
+		}
+		if continuations == maxContinuations {
+			return nil, errors.New("anthropic max paused-turn continuations reached")
+		}
+		params.Messages = appendPausedTurn(params.Messages, response)
+	}
+}
+
+// anthropicParams builds the request from req.
+func anthropicParams(req *Request) (anthropic.MessageNewParams, error) {
+	messages, err := toAnthropicMessages(req.Log)
+	if err != nil {
+		return anthropic.MessageNewParams{}, err
+	}
 	tools, err := anthropicTools(req.Tools)
 	if err != nil {
-		return nil, err
+		return anthropic.MessageNewParams{}, err
 	}
 	params := anthropic.MessageNewParams{
 		Model: req.Model, Messages: messages, Tools: tools,
@@ -79,24 +118,7 @@ func Anthropic(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 		params.System = []anthropic.TextBlockParam{{Text: req.Instructions}}
 	}
 	if req.Search != nil {
-		tool := &anthropic.WebSearchTool20250305Param{}
-		if location := req.Search.Location; location != nil {
-			if location.Country != "" {
-				tool.UserLocation.Country = anthropic.String(location.Country)
-			}
-			if location.City != "" {
-				tool.UserLocation.City = anthropic.String(location.City)
-			}
-			if location.Region != "" {
-				tool.UserLocation.Region = anthropic.String(location.Region)
-			}
-			if location.Timezone != "" {
-				tool.UserLocation.Timezone = anthropic.String(location.Timezone)
-			}
-		}
-		params.Tools = append(params.Tools, anthropic.ToolUnionParam{
-			OfWebSearchTool20250305: tool,
-		})
+		params.Tools = append(params.Tools, anthropicSearchTool(req.Search))
 	}
 	if schema := req.OutputSchema; schema != nil {
 		params.OutputConfig = anthropic.OutputConfigParam{
@@ -104,103 +126,117 @@ func Anthropic(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 		}
 	}
 	if err := setAnthropicReasoning(req, &params); err != nil {
-		return nil, err
+		return anthropic.MessageNewParams{}, err
 	}
 	setAnthropicToolChoice(req, &params)
 	setAnthropicCacheBreakpoints(&params)
-	client := newAnthropicClient(req)
-	now := time.Now().UTC()
-	// Bound server-side continuation independently of the agent's tool turns.
-	const maxContinuations = 10
-	var (
-		produced              []Item
-		totalInputTokens      int
-		totalOutputTokens     int
-		totalCacheReadTokens  int
-		totalCacheWriteTokens int
-	)
+	return params, nil
+}
 
-	// The SDK refuses non-streaming requests that may run past ten minutes,
-	// judged from max_tokens, so those stream without emitting chunks.
+func anthropicSearchTool(search *Search) anthropic.ToolUnionParam {
+	tool := &anthropic.WebSearchTool20250305Param{}
+	anthropicUserLocation(&tool.UserLocation, search.Location)
+	return anthropic.ToolUnionParam{OfWebSearchTool20250305: tool}
+}
+
+func anthropicUserLocation(dst *anthropic.UserLocationParam, location *Location) {
+	if location == nil {
+		return
+	}
+	if location.Country != "" {
+		dst.Country = anthropic.String(location.Country)
+	}
+	if location.City != "" {
+		dst.City = anthropic.String(location.City)
+	}
+	if location.Region != "" {
+		dst.Region = anthropic.String(location.Region)
+	}
+	if location.Timezone != "" {
+		dst.Timezone = anthropic.String(location.Timezone)
+	}
+}
+
+// anthropicEmit returns the Emit to stream with. The SDK refuses
+// non-streaming requests that may run past ten minutes, judged from
+// max_tokens, so those stream without emitting chunks.
+func anthropicEmit(emit Emit, params anthropic.MessageNewParams) Emit {
+	if emit != nil {
+		return emit
+	}
+	if _, err := anthropic.CalculateNonStreamingTimeout(int(params.MaxTokens), params.Model, nil); err != nil {
+		return func(ChunkKind, string) error { return nil }
+	}
+	return nil
+}
+
+func anthropicMessage(ctx context.Context, client *anthropic.Client, params anthropic.MessageNewParams, emit Emit) (*anthropic.Message, error) {
+	var response *anthropic.Message
+	var err error
 	if emit == nil {
-		if _, err := anthropic.CalculateNonStreamingTimeout(int(params.MaxTokens), params.Model, nil); err != nil {
-			emit = func(ChunkKind, string) error { return nil }
-		}
+		response, err = client.Messages.New(ctx, params)
+	} else {
+		response, err = streamAnthropic(ctx, client, params, emit)
 	}
+	if err != nil {
+		return nil, fmt.Errorf("anthropic messages: %w", anthropicLimit(err))
+	}
+	return response, nil
+}
 
-	// anthropic has internal tool calling limitations. Once it's reach the maximum
-	// it will pause and wait until the content is sent back to continue
-	// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons#pause-turn
-	for continuations := 0; ; continuations++ {
-		var response *anthropic.Message
-		if emit == nil {
-			response, err = client.Messages.New(ctx, params)
-		} else {
-			response, err = streamAnthropic(ctx, client, params, emit)
-		}
+// checkAnthropicStop rejects a response that did not end in a usable way.
+func checkAnthropicStop(response *anthropic.Message, maxTokens int64) error {
+	switch response.StopReason {
+	case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence, anthropic.StopReasonToolUse, anthropic.StopReasonPauseTurn:
+	case anthropic.StopReasonRefusal:
+		return refused("anthropic", "")
+	case anthropic.StopReasonMaxTokens:
+		return fmt.Errorf("anthropic response hit the %d output token limit; raise it with crux.WithMaxTokens", maxTokens)
+	default:
+		return fmt.Errorf("anthropic response did not complete: stop reason %q", response.StopReason)
+	}
+	if len(response.Content) == 0 && (response.StopReason == anthropic.StopReasonToolUse || response.StopReason == anthropic.StopReasonPauseTurn) {
+		return fmt.Errorf("anthropic returned no content with stop reason %q", response.StopReason)
+	}
+	return nil
+}
+
+func appendAnthropicBlocks(produced []Item, response *anthropic.Message, now time.Time) ([]Item, error) {
+	for _, block := range response.Content {
+		entry, err := fromAnthropicContentBlock(block)
 		if err != nil {
-			return nil, fmt.Errorf("anthropic messages: %w", anthropicLimit(err))
+			return nil, err
 		}
-		switch response.StopReason {
-		case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence, anthropic.StopReasonToolUse, anthropic.StopReasonPauseTurn:
-		case anthropic.StopReasonRefusal:
-			return nil, refused("anthropic", "")
-		case anthropic.StopReasonMaxTokens:
-			return nil, fmt.Errorf("anthropic response hit the %d output token limit; raise it with crux.WithMaxTokens", params.MaxTokens)
-		default:
-			return nil, fmt.Errorf("anthropic response did not complete: stop reason %q", response.StopReason)
+		if entry.At.IsZero() {
+			entry.At = now
 		}
-		if len(response.Content) == 0 && (response.StopReason == anthropic.StopReasonToolUse || response.StopReason == anthropic.StopReasonPauseTurn) {
-			return nil, fmt.Errorf("anthropic returned no content with stop reason %q", response.StopReason)
-		}
-		for _, block := range response.Content {
-			entry, err := fromAnthropicContentBlock(block)
-			if err != nil {
-				return nil, err
-			}
-			if entry.At.IsZero() {
-				entry.At = now
-			}
-			produced = append(produced, entry)
-		}
-		// Anthropic reports uncached input separately from cache reads and writes;
-		// total input is their sum. See "Tracking cache performance":
-		// https://platform.claude.com/docs/en/build-with-claude/prompt-caching
-		totalInputTokens += int(response.Usage.InputTokens + response.Usage.CacheReadInputTokens + response.Usage.CacheCreationInputTokens)
-		totalOutputTokens += int(response.Usage.OutputTokens)
-		totalCacheReadTokens += int(response.Usage.CacheReadInputTokens)
-		totalCacheWriteTokens += int(response.Usage.CacheCreationInputTokens)
-
-		if response.StopReason != anthropic.StopReasonPauseTurn {
-			if !hasAnswerOrCall(produced) {
-				// The model may end its turn without saying anything; that is
-				// still a final answer, and its usage must not be lost. See
-				// "Empty responses with end_turn":
-				// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons
-				produced = append(produced, Item{At: now, Kind: KindAssistant})
-			}
-			produced[len(produced)-1].Response = &ResponseInfo{ID: response.ID}
-			produced[len(produced)-1].Usage = &Usage{
-				InputTokens:      totalInputTokens,
-				OutputTokens:     totalOutputTokens,
-				CacheReadTokens:  totalCacheReadTokens,
-				CacheWriteTokens: totalCacheWriteTokens,
-			}
-			return produced, nil
-		}
-		if continuations == maxContinuations {
-			return nil, errors.New("anthropic max paused-turn continuations reached")
-		}
-		// Replay the returned blocks unchanged, keeping the same tools and
-		// config, but without the empty text blocks the API rejects.
-		paused := response.ToParam()
-		paused.Content = slices.DeleteFunc(paused.Content, func(b anthropic.ContentBlockParamUnion) bool {
-			return b.OfText != nil && strings.TrimSpace(b.OfText.Text) == ""
-		})
-		if len(paused.Content) > 0 {
-			params.Messages = append(params.Messages, paused)
-		}
+		produced = append(produced, entry)
 	}
+	return produced, nil
+}
+
+// addAnthropicUsage adds a response's usage to total. Anthropic reports
+// uncached input separately from cache reads and writes; total input is their
+// sum. See "Tracking cache performance":
+// https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+func addAnthropicUsage(total *Usage, usage anthropic.Usage) {
+	total.InputTokens += int(usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens)
+	total.OutputTokens += int(usage.OutputTokens)
+	total.CacheReadTokens += int(usage.CacheReadInputTokens)
+	total.CacheWriteTokens += int(usage.CacheCreationInputTokens)
+}
+
+// appendPausedTurn replays the blocks of a paused turn unchanged, keeping the
+// same tools and config, but without the empty text blocks the API rejects.
+func appendPausedTurn(messages []anthropic.MessageParam, response *anthropic.Message) []anthropic.MessageParam {
+	paused := response.ToParam()
+	paused.Content = slices.DeleteFunc(paused.Content, func(b anthropic.ContentBlockParamUnion) bool {
+		return b.OfText != nil && strings.TrimSpace(b.OfText.Text) == ""
+	})
+	if len(paused.Content) == 0 {
+		return messages
+	}
+	return append(messages, paused)
 }
 
 // setAnthropicToolChoice maps the tool choice and WithParallelToolCalls onto
@@ -352,14 +388,8 @@ func streamAnthropic(ctx context.Context, client *anthropic.Client, params anthr
 			return nil, err
 		}
 	}
-	if err := stream.Err(); err != nil {
+	if err := streamEnd(ctx, stream.Err(), complete, "anthropic stream ended without message_stop"); err != nil {
 		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if !complete {
-		return nil, errors.New("anthropic stream ended without message_stop")
 	}
 	return &response, nil
 }
@@ -478,71 +508,78 @@ func toAnthropicFileBlock(part ContentPart) (anthropic.ContentBlockParamUnion, e
 // toAnthropicContentBlockParamUnion renders an entry as content blocks.
 func toAnthropicContentBlockParamUnion(e Item) ([]anthropic.ContentBlockParamUnion, error) {
 	if raw := e.Opaque[anthropicContentBlockOpaqueKey]; len(raw) > 0 && e.Kind != KindUser && e.Kind != KindToolResult {
-		var block anthropic.ContentBlockUnion
-		if err := json.Unmarshal(raw, &block); err != nil {
-			return nil, fmt.Errorf("decode Anthropic content block: %w", err)
-		}
-		if block.Type == "text" && strings.TrimSpace(block.Text) == "" {
-			// Claude often sends "\n\n" before a tool call, and a streamed text
-			// block may stay empty, but the API rejects such blocks on replay.
-			return nil, nil
-		}
-		return []anthropic.ContentBlockParamUnion{block.ToParam()}, nil
+		return replayAnthropicBlock(raw)
 	}
-
-	var blocks []anthropic.ContentBlockParamUnion
 	switch e.Kind {
 	case KindUser, KindAssistant:
-		for _, part := range e.Content {
-			if part.Kind == ContentKindFile {
-				block, err := toAnthropicFileBlock(part)
-				if err != nil {
-					return nil, err
-				}
-				blocks = append(blocks, block)
-				continue
-			}
-			if part.Kind != ContentKindText && part.Kind != ContentKindRefusal {
-				return nil, fmt.Errorf("unsupported content part kind %q", part.Kind)
-			}
-			if strings.TrimSpace(part.Text) == "" {
-				continue // Anthropic rejects empty text blocks.
-			}
-			blocks = append(blocks, anthropic.NewTextBlock(part.Text))
-		}
+		return anthropicContentBlocks(e.Content)
 	case KindReasoning:
 		// Reasoning without signed provider data cannot be replayed.
+		return nil, nil
 	case KindToolCall:
 		c := e.ToolCall
 		if c == nil {
 			return nil, errors.New("invalid or unsupported Anthropic tool call entry")
 		}
-		args := c.objectArgs()
-		blocks = []anthropic.ContentBlockParamUnion{anthropic.NewToolUseBlock(c.ID, args, c.Name)}
+		return []anthropic.ContentBlockParamUnion{anthropic.NewToolUseBlock(c.ID, c.objectArgs(), c.Name)}, nil
 	case KindToolResult:
 		if e.ToolResult == nil {
 			return nil, errors.New("tool result entry carries no tool result")
 		}
-		r := e.ToolResult
-		isError := r.Error != ""
-		output := r.Output
-		if isError {
-			output = r.Error
-		}
-		// Anthropic rejects empty text blocks, so an empty result carries no
-		// content, which the API allows ("content (optional)"):
-		// https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls
-		if strings.TrimSpace(output) == "" {
-			block := anthropic.ToolResultBlockParam{ToolUseID: r.CallID, IsError: anthropic.Bool(isError)}
-			blocks = []anthropic.ContentBlockParamUnion{{OfToolResult: &block}}
-			break
-		}
-		blocks = []anthropic.ContentBlockParamUnion{anthropic.NewToolResultBlock(r.CallID, output, isError)}
+		return []anthropic.ContentBlockParamUnion{anthropicToolResultBlock(e.ToolResult)}, nil
 	default:
 		return nil, fmt.Errorf("unsupported entry kind %d for Anthropic content block", e.Kind)
 	}
+}
 
+// replayAnthropicBlock replays a block the model produced.
+func replayAnthropicBlock(raw []byte) ([]anthropic.ContentBlockParamUnion, error) {
+	var block anthropic.ContentBlockUnion
+	if err := json.Unmarshal(raw, &block); err != nil {
+		return nil, fmt.Errorf("decode Anthropic content block: %w", err)
+	}
+	if block.Type == "text" && strings.TrimSpace(block.Text) == "" {
+		// Claude often sends "\n\n" before a tool call, and a streamed text
+		// block may stay empty, but the API rejects such blocks on replay.
+		return nil, nil
+	}
+	return []anthropic.ContentBlockParamUnion{block.ToParam()}, nil
+}
+
+// anthropicContentBlocks renders a message's parts as text and file blocks.
+func anthropicContentBlocks(parts []ContentPart) ([]anthropic.ContentBlockParamUnion, error) {
+	var blocks []anthropic.ContentBlockParamUnion
+	for _, part := range parts {
+		if part.Kind == ContentKindFile {
+			block, err := toAnthropicFileBlock(part)
+			if err != nil {
+				return nil, err
+			}
+			blocks = append(blocks, block)
+			continue
+		}
+		if part.Kind != ContentKindText && part.Kind != ContentKindRefusal {
+			return nil, fmt.Errorf("unsupported content part kind %q", part.Kind)
+		}
+		if strings.TrimSpace(part.Text) == "" {
+			continue // Anthropic rejects empty text blocks.
+		}
+		blocks = append(blocks, anthropic.NewTextBlock(part.Text))
+	}
 	return blocks, nil
+}
+
+// anthropicToolResultBlock renders a tool result. Anthropic rejects empty
+// text blocks, so an empty result carries no content, which the API allows
+// ("content (optional)"):
+// https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls
+func anthropicToolResultBlock(r *ToolResult) anthropic.ContentBlockParamUnion {
+	output, isError := r.text()
+	if strings.TrimSpace(output) == "" {
+		block := anthropic.ToolResultBlockParam{ToolUseID: r.CallID, IsError: anthropic.Bool(isError)}
+		return anthropic.ContentBlockParamUnion{OfToolResult: &block}
+	}
+	return anthropic.NewToolResultBlock(r.CallID, output, isError)
 }
 
 // anthropicLimit returns err as a *LimitError when Anthropic reported a limit,

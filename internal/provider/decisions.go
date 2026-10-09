@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Decide asks a decision model typed questions about a state and returns one
@@ -82,52 +83,73 @@ type DecideResponse struct {
 // "https://openrouter.ai/api/alpha/decisions".
 func Decisions(path string) Decide {
 	return func(ctx context.Context, req *DecideRequest) (*DecideResponse, error) {
-		endpoint, err := resolveEndpoint(req.BaseURL, path)
-		if err != nil {
+		return postDecisions(ctx, path, req)
+	}
+}
+
+// postDecisions posts the questions, retrying transport errors and retryable
+// statuses with backoff, as the SDKs do.
+func postDecisions(ctx context.Context, path string, req *DecideRequest) (*DecideResponse, error) {
+	endpoint, err := resolveEndpoint(req.BaseURL, path)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(decisionsRequest(req))
+	if err != nil {
+		return nil, fmt.Errorf("%s: encode request: %w", req.Provider, err)
+	}
+	client := decisionsClient(req)
+	maxRetries := 2
+	if req.MaxRetries != nil {
+		maxRetries = *req.MaxRetries
+	}
+	for attempt := 0; ; attempt++ {
+		result := postDecisionsOnce(ctx, client, endpoint, req, body)
+		if result.err == nil || !result.retry || attempt >= maxRetries {
+			return result.out, result.err
+		}
+		if err := Sleep(ctx, RetryDelay(result.after, attempt)); err != nil {
 			return nil, err
 		}
-		body, err := json.Marshal(decisionsRequest(req))
-		if err != nil {
-			return nil, fmt.Errorf("%s: encode request: %w", req.Provider, err)
-		}
-		client := req.HTTPClient
-		if client == nil {
-			client = DefaultHTTPClient()
-		}
-		maxRetries := 2
-		if req.MaxRetries != nil {
-			maxRetries = *req.MaxRetries
-		}
+	}
+}
 
-		for attempt := 0; ; attempt++ {
-			resp, err := postJSON(ctx, client, endpoint, req.APIKey, body)
-			if err != nil {
-				if attempt < maxRetries && ctx.Err() == nil {
-					if err := Sleep(ctx, RetryDelay(0, attempt)); err != nil {
-						return nil, err
-					}
-					continue
-				}
-				return nil, fmt.Errorf("%s: %w", req.Provider, err)
-			}
-			raw, err := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if err != nil {
-				return nil, fmt.Errorf("%s: read response: %w", req.Provider, err)
-			}
-			if resp.StatusCode == http.StatusOK {
-				return decodeDecisions(req, raw)
-			}
-			if attempt < maxRetries && retryable(resp.StatusCode) {
-				if err := Sleep(ctx, RetryDelay(parseRetryAfter(resp.Header), attempt)); err != nil {
-					return nil, err
-				}
-				continue
-			}
-			err = fmt.Errorf("%s: %s: %s", req.Provider, resp.Status, bytes.TrimSpace(raw))
-			_, codes, message := errorFields(raw)
-			return nil, limitError(err, resp.StatusCode, resp.Header, codes, message)
-		}
+func decisionsClient(req *DecideRequest) *http.Client {
+	if req.HTTPClient != nil {
+		return req.HTTPClient
+	}
+	return DefaultHTTPClient()
+}
+
+// decisionsAttempt is the outcome of one post. A failed attempt says whether
+// it is worth repeating and how long the server asked to wait first.
+type decisionsAttempt struct {
+	out   *DecideResponse
+	err   error
+	retry bool
+	after time.Duration
+}
+
+func postDecisionsOnce(ctx context.Context, client *http.Client, endpoint string, req *DecideRequest, body []byte) decisionsAttempt {
+	resp, err := postJSON(ctx, client, endpoint, req.APIKey, body)
+	if err != nil {
+		return decisionsAttempt{err: fmt.Errorf("%s: %w", req.Provider, err), retry: ctx.Err() == nil}
+	}
+	raw, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return decisionsAttempt{err: fmt.Errorf("%s: read response: %w", req.Provider, err)}
+	}
+	if resp.StatusCode == http.StatusOK {
+		out, err := decodeDecisions(req, raw)
+		return decisionsAttempt{out: out, err: err}
+	}
+	err = fmt.Errorf("%s: %s: %s", req.Provider, resp.Status, bytes.TrimSpace(raw))
+	_, codes, message := errorFields(raw)
+	return decisionsAttempt{
+		err:   limitError(err, resp.StatusCode, resp.Header, codes, message),
+		retry: retryable(resp.StatusCode),
+		after: parseRetryAfter(resp.Header),
 	}
 }
 
