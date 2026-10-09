@@ -68,3 +68,35 @@ func TestFieldsLimits(t *testing.T) {
 		}
 	}
 }
+
+type verdict struct {
+	Spam  bool   `json:"spam" description:"Is it spam?" true:"unsolicited" false:"wanted"`
+	Lang  string `json:"lang" choices:"en|fr = French"`
+	Level uint8  `json:"level" levels:"low|high" description:"How urgent"`
+	Plain bool
+}
+
+func TestOutputSchema(t *testing.T) {
+	fields, err := Fields(reflect.TypeFor[verdict]())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"spam":  map[string]any{"type": "boolean", "description": "Is it spam?\ntrue: unsolicited\nfalse: wanted"},
+			"lang":  map[string]any{"type": "string", "enum": []any{"en", "fr"}, "description": "fr: French"},
+			"level": map[string]any{"type": "integer", "minimum": 0, "maximum": 1, "description": "How urgent\n0: low\n1: high"},
+			"Plain": map[string]any{"type": "boolean"},
+		},
+		"required":             []string{"spam", "lang", "level", "Plain"},
+		"additionalProperties": false,
+	}
+	if got := OutputSchema(fields, ""); !reflect.DeepEqual(got, want) {
+		t.Fatalf("schema = %#v\nwant %#v", got, want)
+	}
+	want["description"] = "Triage the message"
+	if got := OutputSchema(fields, "Triage the message"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("schema with goal = %#v\nwant %#v", got, want)
+	}
+}
