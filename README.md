@@ -17,7 +17,7 @@ A small Go toolkit for building LLM agents that run the same way on every major 
 go get github.com/apzuk3/crux
 ```
 
-Requires Go 1.25+.
+Requires Go 1.26+.
 
 ## Quickstart
 
