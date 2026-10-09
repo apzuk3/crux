@@ -116,51 +116,16 @@ func Test_ExecuteErrorRecoveryPrompt(t *testing.T) {
 func executeErrorRecovery(t *testing.T, modelname string) {
 	t.Parallel()
 
-	tools := setupErrorRecoveryTools(t)
-	agent, err := crux.New(
-		"database-assistant",
-		modelname,
-		crux.WithInstructions(errorRecoveryInstructions),
-		crux.WithToolsRegistry([]string{"query_user"}, tools),
-		crux.WithMaxTurns(5),
-	)
-	if err != nil && strings.Contains(err.Error(), "API key for provider") {
-		t.Skipf("Skipping %s: %v", modelname, err)
-	}
-	require.NoError(t, err)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	sess, err := crux.NewSession(ctx, agent)
-	require.NoError(t, err)
+	sess := newErrorRecoverySession(ctx, t, modelname)
 
 	output, err := sess.Run(ctx, errorRecoveryPrompt)
 	require.NoError(t, err, "agent should not fail when a tool returns an error")
 
-	// Collect tool calls and results from agent logs
-	var (
-		toolCalls          []crux.ToolCall
-		toolResults        []crux.ToolResult
-		firstToolResultIdx = -1
-		secondToolCallIdx  = -1
-	)
-
-	logs := sess.Logs()
-	for idx, entry := range logs {
-		if entry.Kind == crux.KindToolCall && entry.ToolCall != nil {
-			toolCalls = append(toolCalls, *entry.ToolCall)
-			if len(toolCalls) == 2 {
-				secondToolCallIdx = idx
-			}
-		}
-		if entry.Kind == crux.KindToolResult && entry.ToolResult != nil {
-			toolResults = append(toolResults, *entry.ToolResult)
-			if len(toolResults) == 1 {
-				firstToolResultIdx = idx
-			}
-		}
-	}
+	activity := collectToolActivity(sess.Logs())
+	toolCalls, toolResults := activity.calls, activity.results
 
 	// 1. Assert at least two tool calls and two tool results were made
 	require.GreaterOrEqual(t, len(toolCalls), 2, "expected at least two tool calls")
@@ -169,11 +134,7 @@ func executeErrorRecovery(t *testing.T, modelname string) {
 	// 2. Assert that the first tool call fails with ToolResult.Error
 	require.Equal(t, "query_user", toolCalls[0].Name)
 	require.Contains(t, string(toolCalls[0].Args), "aramp")
-
-	var firstInput QueryUserInput
-	if err := json.Unmarshal(toolCalls[0].Args, &firstInput); err == nil {
-		require.Equal(t, "aramp", firstInput.NormalizedIdentifier())
-	}
+	requireNormalizedIdentifier(t, toolCalls[0].Args, "aramp")
 
 	require.Equal(t, toolCalls[0].ID, toolResults[0].CallID)
 	require.NotEmpty(t, toolResults[0].Error, "expected first tool result to fail with ToolResult.Error")
@@ -181,17 +142,13 @@ func executeErrorRecovery(t *testing.T, modelname string) {
 	require.Empty(t, toolResults[0].Output, "first tool result output should be empty on error")
 
 	// 3. Assert the model observed the error in history rather than failing
-	require.True(t, firstToolResultIdx >= 0 && secondToolCallIdx > firstToolResultIdx,
+	require.True(t, activity.firstResultIdx >= 0 && activity.secondCallIdx > activity.firstResultIdx,
 		"model must observe the error in history before making the second tool call")
 
 	// 4. Assert the model calls query_user a second time with the corrected argument aramp@example.com
 	require.Equal(t, "query_user", toolCalls[1].Name)
 	require.Contains(t, string(toolCalls[1].Args), "aramp@example.com")
-
-	var secondInput QueryUserInput
-	if err := json.Unmarshal(toolCalls[1].Args, &secondInput); err == nil {
-		require.Equal(t, "aramp@example.com", secondInput.NormalizedIdentifier())
-	}
+	requireNormalizedIdentifier(t, toolCalls[1].Args, "aramp@example.com")
 
 	require.Equal(t, toolCalls[1].ID, toolResults[1].CallID)
 	require.Empty(t, toolResults[1].Error, "second tool call should succeed without error")
@@ -202,4 +159,52 @@ func executeErrorRecovery(t *testing.T, modelname string) {
 	outputLower := strings.ToLower(output)
 	require.Contains(t, outputLower, "42")
 	require.Contains(t, outputLower, "admin")
+}
+
+func newErrorRecoverySession(ctx context.Context, t *testing.T, modelname string) *crux.Session {
+	t.Helper()
+	tools := setupErrorRecoveryTools(t)
+	return newSessionOrSkip(ctx, t, "database-assistant", modelname,
+		crux.WithInstructions(errorRecoveryInstructions),
+		crux.WithToolsRegistry([]string{"query_user"}, tools),
+		crux.WithMaxTurns(5),
+	)
+}
+
+// toolActivity is the tool calls and results of a log, with the positions
+// that show the model saw the first result before its second call.
+type toolActivity struct {
+	calls          []crux.ToolCall
+	results        []crux.ToolResult
+	firstResultIdx int
+	secondCallIdx  int
+}
+
+func collectToolActivity(logs []crux.Entry) toolActivity {
+	activity := toolActivity{firstResultIdx: -1, secondCallIdx: -1}
+	for idx, entry := range logs {
+		if entry.Kind == crux.KindToolCall && entry.ToolCall != nil {
+			activity.calls = append(activity.calls, *entry.ToolCall)
+			if len(activity.calls) == 2 {
+				activity.secondCallIdx = idx
+			}
+		}
+		if entry.Kind == crux.KindToolResult && entry.ToolResult != nil {
+			activity.results = append(activity.results, *entry.ToolResult)
+			if len(activity.results) == 1 {
+				activity.firstResultIdx = idx
+			}
+		}
+	}
+	return activity
+}
+
+// requireNormalizedIdentifier checks the identifier the model sent when the
+// arguments decode; providers may use any of the aliases in QueryUserInput.
+func requireNormalizedIdentifier(t *testing.T, args json.RawMessage, want string) {
+	t.Helper()
+	var in QueryUserInput
+	if err := json.Unmarshal(args, &in); err == nil {
+		require.Equal(t, want, in.NormalizedIdentifier())
+	}
 }

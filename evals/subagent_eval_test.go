@@ -60,11 +60,7 @@ const (
 func Test_SubAgentDelegation(t *testing.T) {
 	t.Parallel()
 
-	testCases := []struct {
-		name     string
-		provider crux.Provider
-		model    string
-	}{
+	testCases := []providerCase{
 		{
 			name:     "OpenAI",
 			provider: crux.ProviderOpenAI,
@@ -84,85 +80,94 @@ func Test_SubAgentDelegation(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			if !hasProviderAPIKey(tc.provider) {
-				t.Skipf("Skipping %s: API key for provider %s not set in environment", tc.name, tc.provider)
-			}
-
-			// 1. Child subagent with output schema
-			subAgent, err := crux.New(
-				"summary-agent",
-				tc.model,
-				crux.WithInstructions(childAgentInstructions),
-				crux.WithOutputSchemaFrom[SummaryOutput](),
-				crux.WithMaxTurns(5),
-			)
-			require.NoError(t, err)
-
-			// 2. Parent coordinator with subagent tool
-			parentAgent, err := crux.New(
-				"coordinator-agent",
-				tc.model,
-				crux.WithInstructions(parentInstructions),
-				crux.WithSubAgent(subAgent, subAgentDescription),
-				crux.WithMaxTurns(10),
-			)
-			require.NoError(t, err)
-
-			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-			defer cancel()
-
-			parentSess, err := crux.NewSession(ctx, parentAgent)
-			require.NoError(t, err)
-
-			finalAnswer, err := parentSess.Run(ctx, incidentReportPrompt)
-			require.NoError(t, err)
-			require.NotEmpty(t, finalAnswer)
-			t.Logf("[%s] Parent final answer: %s", tc.name, finalAnswer)
-
-			// 3. Assert parent invoked 'agent_summary-agent'
-			var toolCallID string
-			var sawSubAgentToolCall bool
-			var sawSubAgentToolResult bool
-			for _, entry := range parentSess.Logs() {
-				if entry.Kind == crux.KindToolCall && entry.ToolCall != nil && entry.ToolCall.Name == "agent_summary-agent" {
-					sawSubAgentToolCall = true
-					toolCallID = entry.ToolCall.ID
-					t.Logf("[%s] ToolCall Args: %s", tc.name, string(entry.ToolCall.Args))
-				}
-				if entry.Kind == crux.KindToolResult && entry.ToolResult != nil && entry.ToolResult.CallID == toolCallID && toolCallID != "" {
-					sawSubAgentToolResult = true
-					t.Logf("[%s] ToolResult Output: %s", tc.name, entry.ToolResult.Output)
-				}
-			}
-			require.True(t, sawSubAgentToolCall, "expected parent to invoke agent_summary-agent")
-			require.True(t, sawSubAgentToolResult, "expected parent to receive tool result from agent_summary-agent")
-
-			// 4. Assert state delta populated: Set[subAgent.Name()]
-			state := parentSess.StateSnapshot()
-			rawVal, exists := state[subAgent.Name()]
-			require.True(t, exists, "expected parent state snapshot to contain key for subagent %q", subAgent.Name())
-
-			rawOutput, ok := rawVal.(string)
-			require.True(t, ok, "expected subagent state value to be string")
-			require.NotEmpty(t, rawOutput)
-			t.Logf("[%s] Subagent snapshot output: %s", tc.name, rawOutput)
-
-			var summaryOut SummaryOutput
-			err = json.Unmarshal([]byte(rawOutput), &summaryOut)
-			require.NoError(t, err, "subagent output should parse into SummaryOutput")
-			require.NotEmpty(t, summaryOut.Summary, "summary field must not be empty")
-			require.Contains(t, strings.ToUpper(summaryOut.Summary), "SUMMARY:", "subagent summary should contain SUMMARY: prefix")
-
-			// 6. Assert parent incorporates the subagent output in its final answer
-			require.Contains(t, strings.ToUpper(finalAnswer), "SUMMARY:", "parent final answer should incorporate SUMMARY: prefix")
-			hasIncidentDetail := strings.Contains(strings.ToLower(finalAnswer), "order") ||
-				strings.Contains(strings.ToLower(finalAnswer), "database") ||
-				strings.Contains(strings.ToLower(finalAnswer), "restored") ||
-				strings.Contains(strings.ToLower(finalAnswer), "04:30") ||
-				strings.Contains(strings.ToLower(finalAnswer), "index")
-			require.True(t, hasIncidentDetail, "parent final answer should incorporate incident report content from subagent")
+			runSubAgentCase(t, tc)
 		})
 	}
+}
+
+func runSubAgentCase(t *testing.T, tc providerCase) {
+	t.Parallel()
+
+	if !hasAPIKey(tc.provider) {
+		t.Skipf("Skipping %s: API key for provider %s not set in environment", tc.name, tc.provider)
+	}
+
+	// 1. Child subagent with output schema
+	subAgent, err := crux.New(
+		"summary-agent",
+		tc.model,
+		crux.WithInstructions(childAgentInstructions),
+		crux.WithOutputSchemaFrom[SummaryOutput](),
+		crux.WithMaxTurns(5),
+	)
+	require.NoError(t, err)
+
+	// 2. Parent coordinator with subagent tool
+	parentAgent, err := crux.New(
+		"coordinator-agent",
+		tc.model,
+		crux.WithInstructions(parentInstructions),
+		crux.WithSubAgent(subAgent, subAgentDescription),
+		crux.WithMaxTurns(10),
+	)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	parentSess, err := crux.NewSession(ctx, parentAgent)
+	require.NoError(t, err)
+
+	finalAnswer, err := parentSess.Run(ctx, incidentReportPrompt)
+	require.NoError(t, err)
+	require.NotEmpty(t, finalAnswer)
+	t.Logf("[%s] Parent final answer: %s", tc.name, finalAnswer)
+
+	// 3. Assert parent invoked 'agent_summary-agent'
+	requireSubAgentCallAndResult(t, tc.name, parentSess.Logs())
+
+	// 4. Assert state delta populated: Set[subAgent.Name()]
+	requireSubAgentState(t, tc.name, parentSess.StateSnapshot(), subAgent.Name())
+
+	// 6. Assert parent incorporates the subagent output in its final answer
+	require.Contains(t, strings.ToUpper(finalAnswer), "SUMMARY:", "parent final answer should incorporate SUMMARY: prefix")
+	hasIncidentDetail := containsAny(strings.ToLower(finalAnswer), "order", "database", "restored", "04:30", "index")
+	require.True(t, hasIncidentDetail, "parent final answer should incorporate incident report content from subagent")
+}
+
+func requireSubAgentCallAndResult(t *testing.T, tag string, logs []crux.Entry) {
+	t.Helper()
+	var toolCallID string
+	var sawSubAgentToolCall bool
+	var sawSubAgentToolResult bool
+	for _, entry := range logs {
+		if entry.Kind == crux.KindToolCall && entry.ToolCall != nil && entry.ToolCall.Name == "agent_summary-agent" {
+			sawSubAgentToolCall = true
+			toolCallID = entry.ToolCall.ID
+			t.Logf("[%s] ToolCall Args: %s", tag, string(entry.ToolCall.Args))
+		}
+		if entry.Kind == crux.KindToolResult && entry.ToolResult != nil && entry.ToolResult.CallID == toolCallID && toolCallID != "" {
+			sawSubAgentToolResult = true
+			t.Logf("[%s] ToolResult Output: %s", tag, entry.ToolResult.Output)
+		}
+	}
+	require.True(t, sawSubAgentToolCall, "expected parent to invoke agent_summary-agent")
+	require.True(t, sawSubAgentToolResult, "expected parent to receive tool result from agent_summary-agent")
+}
+
+func requireSubAgentState(t *testing.T, tag string, state map[string]any, name string) {
+	t.Helper()
+	rawVal, exists := state[name]
+	require.True(t, exists, "expected parent state snapshot to contain key for subagent %q", name)
+
+	rawOutput, ok := rawVal.(string)
+	require.True(t, ok, "expected subagent state value to be string")
+	require.NotEmpty(t, rawOutput)
+	t.Logf("[%s] Subagent snapshot output: %s", tag, rawOutput)
+
+	var summaryOut SummaryOutput
+	err := json.Unmarshal([]byte(rawOutput), &summaryOut)
+	require.NoError(t, err, "subagent output should parse into SummaryOutput")
+	require.NotEmpty(t, summaryOut.Summary, "summary field must not be empty")
+	require.Contains(t, strings.ToUpper(summaryOut.Summary), "SUMMARY:", "subagent summary should contain SUMMARY: prefix")
 }

@@ -42,7 +42,6 @@ package evals
 
 import (
 	"context"
-	"os"
 	"regexp"
 	"testing"
 	"time"
@@ -59,34 +58,10 @@ const (
 
 var urlPattern = regexp.MustCompile(`https?://[^\s)\]">]+`)
 
-func hasWebSearchAPIKey(provider crux.Provider) bool {
-	var envVars []string
-	switch provider {
-	case crux.ProviderOpenAI:
-		envVars = []string{"OPENAI_API_KEY", "OPENAI_APIKEY", "OPENAI_KEY"}
-	case crux.ProviderAnthropic:
-		envVars = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_APIKEY", "ANTHROPIC_KEY", "ANTHROPIC_AUTH_TOKEN"}
-	case crux.ProviderGoogle:
-		envVars = []string{"GOOGLE_API_KEY", "GOOGLE_APIKEY", "GOOGLE_KEY", "GEMINI_API_KEY", "GEMINI_APIKEY", "GEMINI_KEY"}
-	case crux.ProviderXAI:
-		envVars = []string{"XAI_API_KEY", "XAI_APIKEY", "XAI_KEY"}
-	}
-	for _, env := range envVars {
-		if os.Getenv(env) != "" {
-			return true
-		}
-	}
-	return false
-}
-
 func Test_WebSearchEval(t *testing.T) {
 	t.Parallel()
 
-	testCases := []struct {
-		name     string
-		provider crux.Provider
-		model    string
-	}{
+	testCases := []providerCase{
 		{
 			name:     "OpenAI_GPT4_1",
 			provider: crux.ProviderOpenAI,
@@ -116,94 +91,111 @@ func Test_WebSearchEval(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			if !hasWebSearchAPIKey(tc.provider) {
-				t.Skipf("Skipping %s: API key for provider %s not set in environment", tc.name, tc.provider)
-			}
-
-			agent, err := crux.New(
-				"websearch-eval-"+tc.name,
-				tc.model,
-				crux.WithProvider(tc.provider),
-				crux.WithWebSearch(crux.WithUserLocation(crux.UserLocation{Country: "US"})),
-				crux.WithInstructions(webSearchInstructions),
-				crux.WithMaxTurns(10),
-			)
-			require.NoError(t, err)
-
-			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-			defer cancel()
-
-			sess, err := crux.NewSession(ctx, agent)
-			require.NoError(t, err)
-
-			// Turn 1: Execute prompt requiring live web search and official citations
-			out1, err := sess.Run(ctx, webSearchUserPrompt)
-			require.NoError(t, err, "turn 1 web search query failed")
-			require.NotEmpty(t, out1, "expected non-empty response from web search turn")
-			t.Logf("[%s] Turn 1 Output:\n%s", tc.name, out1)
-
-			logs := sess.Logs()
-
-			// Validate URL links or citations in the final response
-			hasURLOrCitation := urlPattern.MatchString(out1)
-			if !hasURLOrCitation {
-				// Gemini attaches source URLs via candidate grounding metadata
-				for _, entry := range logs {
-					if raw, ok := entry.Opaque["gemini.candidate.grounding_metadata"]; ok && urlPattern.MatchString(string(raw)) {
-						hasURLOrCitation = true
-						break
-					}
-					if raw, ok := entry.Opaque["anthropic.message.content_block"]; ok && urlPattern.MatchString(string(raw)) {
-						hasURLOrCitation = true
-						break
-					}
-				}
-			}
-			require.True(t, hasURLOrCitation, "expected response to contain valid URL links or citations")
-
-			// Provider-specific audit validations
-			switch tc.provider {
-			case crux.ProviderGoogle:
-				var sawGroundingMetadata bool
-				for _, entry := range logs {
-					if len(entry.Opaque["gemini.candidate.grounding_metadata"]) > 0 {
-						sawGroundingMetadata = true
-						t.Logf("[%s] Found gemini.candidate.grounding_metadata: %s", tc.name, string(entry.Opaque["gemini.candidate.grounding_metadata"]))
-						break
-					}
-				}
-				require.True(t, sawGroundingMetadata, "expected Gemini logs to contain 'gemini.candidate.grounding_metadata' in Opaque")
-
-			case crux.ProviderAnthropic:
-				var sawProviderTool bool
-				for _, entry := range logs {
-					if entry.Kind == crux.KindProviderTool {
-						sawProviderTool = true
-						t.Logf("[%s] Found Anthropic KindProviderTool entry with opaque keys: %v", tc.name, getOpaqueKeys(entry.Opaque))
-					}
-				}
-				require.True(t, sawProviderTool, "expected Anthropic logs to contain KindProviderTool server tool events")
-
-			case crux.ProviderOpenAI, crux.ProviderXAI:
-				var sawProviderTool bool
-				for _, entry := range logs {
-					if entry.Kind == crux.KindProviderTool {
-						sawProviderTool = true
-						t.Logf("[%s] Found KindProviderTool entry with opaque keys: %v", tc.name, getOpaqueKeys(entry.Opaque))
-					}
-				}
-				require.True(t, sawProviderTool, "expected logs to contain KindProviderTool server tool events")
-			}
-
-			// Turn 2: Verify multi-turn execution following search turn does not fail to serialize provider tool entries
-			out2, err := sess.Run(ctx, webSearchTurn2Prompt)
-			require.NoError(t, err, "turn 2 multi-turn execution failed after search turn")
-			require.NotEmpty(t, out2, "expected non-empty response from turn 2")
-			t.Logf("[%s] Turn 2 Output:\n%s", tc.name, out2)
+			runWebSearchCase(t, tc)
 		})
 	}
+}
+
+func runWebSearchCase(t *testing.T, tc providerCase) {
+	t.Parallel()
+
+	if !hasAPIKey(tc.provider) {
+		t.Skipf("Skipping %s: API key for provider %s not set in environment", tc.name, tc.provider)
+	}
+
+	agent, err := crux.New(
+		"websearch-eval-"+tc.name,
+		tc.model,
+		crux.WithProvider(tc.provider),
+		crux.WithWebSearch(crux.WithUserLocation(crux.UserLocation{Country: "US"})),
+		crux.WithInstructions(webSearchInstructions),
+		crux.WithMaxTurns(10),
+	)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	sess, err := crux.NewSession(ctx, agent)
+	require.NoError(t, err)
+
+	// Turn 1: Execute prompt requiring live web search and official citations
+	out1, err := sess.Run(ctx, webSearchUserPrompt)
+	require.NoError(t, err, "turn 1 web search query failed")
+	require.NotEmpty(t, out1, "expected non-empty response from web search turn")
+	t.Logf("[%s] Turn 1 Output:\n%s", tc.name, out1)
+
+	logs := sess.Logs()
+
+	// Validate URL links or citations in the final response
+	require.True(t, hasCitation(out1, logs), "expected response to contain valid URL links or citations")
+
+	// Provider-specific audit validations
+	requireSearchAudit(t, tc.name, tc.provider, logs)
+
+	// Turn 2: Verify multi-turn execution following search turn does not fail to serialize provider tool entries
+	out2, err := sess.Run(ctx, webSearchTurn2Prompt)
+	require.NoError(t, err, "turn 2 multi-turn execution failed after search turn")
+	require.NotEmpty(t, out2, "expected non-empty response from turn 2")
+	t.Logf("[%s] Turn 2 Output:\n%s", tc.name, out2)
+}
+
+// hasCitation reports whether the answer, or the provider metadata behind
+// it, carries a URL. Gemini attaches source URLs via candidate grounding
+// metadata.
+func hasCitation(out string, logs []crux.Entry) bool {
+	if urlPattern.MatchString(out) {
+		return true
+	}
+	for _, entry := range logs {
+		if urlPattern.Match(entry.Opaque["gemini.candidate.grounding_metadata"]) ||
+			urlPattern.Match(entry.Opaque["anthropic.message.content_block"]) {
+			return true
+		}
+	}
+	return false
+}
+
+func requireSearchAudit(t *testing.T, tag string, provider crux.Provider, logs []crux.Entry) {
+	t.Helper()
+	switch provider {
+	case crux.ProviderGoogle:
+		raw, ok := firstOpaque(logs, "gemini.candidate.grounding_metadata")
+		if ok {
+			t.Logf("[%s] Found gemini.candidate.grounding_metadata: %s", tag, string(raw))
+		}
+		require.True(t, ok, "expected Gemini logs to contain 'gemini.candidate.grounding_metadata' in Opaque")
+
+	case crux.ProviderAnthropic:
+		require.True(t, hasKind(t, tag, logs, crux.KindProviderTool), "expected Anthropic logs to contain KindProviderTool server tool events")
+
+	case crux.ProviderOpenAI, crux.ProviderXAI:
+		require.True(t, hasKind(t, tag, logs, crux.KindProviderTool), "expected logs to contain KindProviderTool server tool events")
+	}
+}
+
+// firstOpaque returns the first non-empty value stored under key.
+func firstOpaque(logs []crux.Entry, key string) ([]byte, bool) {
+	for _, entry := range logs {
+		if raw := entry.Opaque[key]; len(raw) > 0 {
+			return raw, true
+		}
+	}
+	return nil, false
+}
+
+// hasKind reports whether the log has an entry of the kind, logging the
+// opaque keys of each one.
+func hasKind(t *testing.T, tag string, logs []crux.Entry, kind crux.Kind) bool {
+	t.Helper()
+	var found bool
+	for _, entry := range logs {
+		if entry.Kind == kind {
+			found = true
+			t.Logf("[%s] Found entry of kind %v with opaque keys: %v", tag, kind, getOpaqueKeys(entry.Opaque))
+		}
+	}
+	return found
 }
 
 func getOpaqueKeys(m map[string][]byte) []string {
