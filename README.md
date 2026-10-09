@@ -19,20 +19,12 @@ go get crux.foo
 
 Requires Go 1.26+.
 
-### Using crux with coding agents
+### Documentation
 
-crux is newer than most models' training data, so coding agents tend to guess
-its API. Give them the guide in [skills/crux](skills/crux/SKILL.md): how crux
-is structured, the rules that matter and a page per topic. Install it as an
-[Agent Skill](https://agentskills.io) in your project:
-
-```sh
-mkdir -p .claude/skills
-cp -r "$(go env GOMODCACHE)/crux.foo@$(go list -m -f '{{.Version}}' crux.foo)/skills/crux" .claude/skills/
-chmod -R u+w .claude/skills/crux
-```
-
-or tell your agent in your own `AGENTS.md` to read it before writing crux code.
+The [docs](docs/README.md) explain how crux is structured and works, with a
+page per topic. They are written so coding agents can follow them too: point
+your agent at [AGENTS.md](AGENTS.md) or the docs before it writes crux code,
+since crux is newer than most models' training data.
 
 ## Quickstart
 
