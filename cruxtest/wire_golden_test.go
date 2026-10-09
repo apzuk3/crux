@@ -95,7 +95,7 @@ func TestValidateAnthropicRequest(t *testing.T) {
 		{"too many cache controls", `{"messages":[{"role":"user","content":"hi"}],"system":[{"cache_control":{}},{"cache_control":{}},{"cache_control":{}},{"cache_control":{}},{"cache_control":{}}]}`,
 			"anthropic: a maximum of 4 blocks with cache_control may be provided, found 5"},
 		{"bad content", `{"messages":[{"role":"user","content":42}]}`,
-			"anthropic: messages.0: decode content: json: cannot unmarshal number into Go value of type []cruxtest.block"},
+			"anthropic: messages.0: decode content: json: cannot unmarshal number into Go value of type []cruxtest.anthropicBlock"},
 		{"empty content", `{"messages":[{"role":"user","content":[]}]}`, "anthropic: messages.0: content must not be empty"},
 		{"whitespace text", `{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"text","text":" \n"}]}]}`,
 			"anthropic: messages.1.content.0: text content blocks must contain non-whitespace text"},
