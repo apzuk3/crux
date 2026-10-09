@@ -134,8 +134,31 @@ func summarize(entries []crux.Entry) []runSummary {
 
 func main() {
 	ctx := context.Background()
+	session := newSupportSession(ctx)
 
-	// A subagent's entries reach the parent's handler too.
+	fmt.Println("── Run ──")
+	_, err := session.Run(ctx, "Orders A-1001 and A-1002 arrived. Anything you can do about them?")
+	for errors.Is(err, crux.ErrApprovalNeeded) {
+		err = approveAndResume(ctx, session)
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	answer, _ := session.FinalOutput()
+	fmt.Printf("\nAnswer: %s\n", answer)
+
+	fmt.Println("\n── Summary from the log ──")
+	for i, run := range summarize(session.Logs()) {
+		fmt.Println(formatRun(i, run))
+	}
+	fmt.Println("(subagent runs are stored in their own sessions and show up only in the live trace)")
+}
+
+// newSupportSession builds the support agent, its orders subagent and a
+// session that traces every entry. A subagent's entries reach the parent's
+// handler too.
+func newSupportSession(ctx context.Context) *crux.Session {
 	orderDesk := crux.Must(crux.New(
 		"orders",
 		crux.Gemini3_8Flash,
@@ -150,47 +173,39 @@ Refund an order only when it arrived damaged. Answer in one or two sentences.`),
 		crux.WithTools([]string{"refund_order"}),
 		crux.WithSubAgent(orderDesk, "Looks up orders by ID"),
 	))
+	return crux.MustSession(crux.NewSession(ctx, support, crux.WithEntryHandler(trace)))
+}
 
-	session := crux.MustSession(crux.NewSession(ctx, support, crux.WithEntryHandler(trace)))
-
-	fmt.Println("── Run ──")
-	_, err := session.Run(ctx, "Orders A-1001 and A-1002 arrived. Anything you can do about them?")
-	for errors.Is(err, crux.ErrApprovalNeeded) {
-		for _, call := range session.PendingApprovals() {
-			// A real application would ask a person here.
-			fmt.Printf("\n%s wants to run %s %s: approving\n", call.Agent, call.Name, call.Args)
-			if err := session.Approve(ctx, call.ID); err != nil {
-				log.Fatal(err)
-			}
-		}
-
-		// Resume by streaming, so the log also records the time to first token.
-		fmt.Println("\n── Resume ──")
-		err = nil
-		for _, streamErr := range session.Stream(ctx, nil) {
-			if streamErr != nil {
-				err = streamErr
-			}
+// approveAndResume approves every pending call and resumes by streaming, so
+// the log also records the time to first token.
+func approveAndResume(ctx context.Context, session *crux.Session) error {
+	for _, call := range session.PendingApprovals() {
+		// A real application would ask a person here.
+		fmt.Printf("\n%s wants to run %s %s: approving\n", call.Agent, call.Name, call.Args)
+		if err := session.Approve(ctx, call.ID); err != nil {
+			return err
 		}
 	}
-	if err != nil {
-		log.Fatal(err)
-	}
 
-	answer, _ := session.FinalOutput()
-	fmt.Printf("\nAnswer: %s\n", answer)
-
-	fmt.Println("\n── Summary from the log ──")
-	for i, run := range summarize(session.Logs()) {
-		line := fmt.Sprintf("run %d: %-15s requests: %d, tokens: %d in + %d out, took %s",
-			i+1, run.outcome, run.requests, run.usage.InputTokens, run.usage.OutputTokens, run.took.Round(time.Millisecond))
-		if len(run.tools) > 0 {
-			line += ", tools: " + strings.Join(run.tools, ", ")
+	fmt.Println("\n── Resume ──")
+	var err error
+	for _, streamErr := range session.Stream(ctx, nil) {
+		if streamErr != nil {
+			err = streamErr
 		}
-		if run.firstToken > 0 {
-			line += fmt.Sprintf(", first token after %s", run.firstToken.Round(time.Millisecond))
-		}
-		fmt.Println(line)
 	}
-	fmt.Println("(subagent runs are stored in their own sessions and show up only in the live trace)")
+	return err
+}
+
+// formatRun is one line of the summary.
+func formatRun(i int, run runSummary) string {
+	line := fmt.Sprintf("run %d: %-15s requests: %d, tokens: %d in + %d out, took %s",
+		i+1, run.outcome, run.requests, run.usage.InputTokens, run.usage.OutputTokens, run.took.Round(time.Millisecond))
+	if len(run.tools) > 0 {
+		line += ", tools: " + strings.Join(run.tools, ", ")
+	}
+	if run.firstToken > 0 {
+		line += fmt.Sprintf(", first token after %s", run.firstToken.Round(time.Millisecond))
+	}
+	return line
 }
