@@ -35,10 +35,12 @@ func goldenTurns() []goldenTurn {
 	}
 }
 
-var goldenBuilders = []struct {
+type goldenBuilder struct {
 	provider crux.Provider
 	build    func(*Turn, int) ([]byte, error)
-}{
+}
+
+var goldenBuilders = []goldenBuilder{
 	{crux.ProviderAnthropic, buildAnthropicResponse},
 	{crux.ProviderGoogle, buildGeminiResponse},
 	{crux.ProviderOpenAI, buildOpenAIResponse},
@@ -50,37 +52,49 @@ func TestWireBuildersMatchGoldens(t *testing.T) {
 	seen := make(map[string]bool)
 	for _, tc := range goldenTurns() {
 		for _, b := range goldenBuilders {
-			key := tc.name + "/" + string(b.provider)
-			raw, err := b.build(tc.turn, goldenCallIndex)
-			if err != nil {
-				t.Fatalf("%s: build: %v", key, err)
-			}
-			seen[key] = true
-			if want, ok := wireGoldens[key]; !ok {
-				t.Errorf("%s: no golden", key)
-			} else if string(raw) != want {
-				t.Errorf("%s: response changed\n got: %s\nwant: %s", key, raw, want)
-			}
-			if tc.turn.StatusCode != 0 && tc.turn.StatusCode != 200 || len(tc.turn.RawBody) > 0 {
-				continue
-			}
-			key += "/stream"
-			stream, err := buildStreamResponse(b.provider, raw)
-			if err != nil {
-				t.Fatalf("%s: build: %v", key, err)
-			}
-			seen[key] = true
-			if want, ok := wireGoldens[key]; !ok {
-				t.Errorf("%s: no golden", key)
-			} else if string(stream) != want {
-				t.Errorf("%s: stream changed\n got: %s\nwant: %s", key, stream, want)
-			}
+			checkTurnGoldens(t, seen, tc, b)
 		}
 	}
 	for key := range wireGoldens {
 		if !seen[key] {
 			t.Errorf("%s: golden has no case", key)
 		}
+	}
+}
+
+// checkTurnGoldens checks one builder's response for a turn and, when the
+// mock would stream it, the streaming variant too.
+func checkTurnGoldens(t *testing.T, seen map[string]bool, tc goldenTurn, b goldenBuilder) {
+	t.Helper()
+	key := tc.name + "/" + string(b.provider)
+	raw, err := b.build(tc.turn, goldenCallIndex)
+	checkGolden(t, seen, key, raw, err)
+	if !streamsGolden(tc.turn) {
+		return
+	}
+	stream, err := buildStreamResponse(b.provider, raw)
+	checkGolden(t, seen, key+"/stream", stream, err)
+}
+
+// streamsGolden mirrors the mock: only a regular response with no raw body
+// is encoded as a stream.
+func streamsGolden(turn *Turn) bool {
+	return (turn.StatusCode == 0 || turn.StatusCode == 200) && len(turn.RawBody) == 0
+}
+
+func checkGolden(t *testing.T, seen map[string]bool, key string, got []byte, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%s: build: %v", key, err)
+	}
+	seen[key] = true
+	want, ok := wireGoldens[key]
+	if !ok {
+		t.Errorf("%s: no golden", key)
+		return
+	}
+	if string(got) != want {
+		t.Errorf("%s: output changed\n got: %s\nwant: %s", key, got, want)
 	}
 }
 
