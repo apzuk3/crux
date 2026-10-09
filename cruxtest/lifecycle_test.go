@@ -52,7 +52,7 @@ func TestRunIsRecordedInTheLog(t *testing.T) {
 			mock.Expect().ReturnText("It is sunny.")
 			agent := newMockAgent(t, mock, model, crux.WithToolsRegistry([]string{"weather"}, weatherRegistry()))
 			var rec recorder
-			s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithEntryHandler(rec.handle)))
+			s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithEntryHandler(rec.handle), crux.WithHTTPClient(mock.Client())))
 
 			out, err := s.Run(t.Context(), "Weather?")
 			require.NoError(t, err)
@@ -94,7 +94,7 @@ func TestStreamRecordsTimeToFirstToken(t *testing.T) {
 		t.Run(model, func(t *testing.T) {
 			mock := cruxtest.NewMock()
 			mock.Expect().ReturnText("Hello there")
-			s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, model)))
+			s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, model), crux.WithHTTPClient(mock.Client())))
 			for _, err := range s.Stream(t.Context(), "Hi") {
 				require.NoError(t, err)
 			}
@@ -115,7 +115,7 @@ func TestTurnAgentIDChangesWithToolDescription(t *testing.T) {
 		})
 		mock := cruxtest.NewMock()
 		mock.Expect().ReturnText("ok")
-		s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.OpenAIGPT5_4, crux.WithToolsRegistry([]string{"weather"}, reg))))
+		s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.OpenAIGPT5_4, crux.WithToolsRegistry([]string{"weather"}, reg)), crux.WithHTTPClient(mock.Client())))
 		_, err := s.Run(t.Context(), "hi")
 		require.NoError(t, err)
 		return s.Logs()[2].Turn.AgentID
@@ -131,7 +131,7 @@ func TestApprovalIsRecordedInTheLog(t *testing.T) {
 	agent := newMockAgent(t, mock, crux.OpenAIGPT5_4,
 		crux.WithToolsRegistry([]string{"weather"}, weatherRegistry(crux.WithApprovalNeeded(true))))
 	var rec recorder
-	s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithEntryHandler(rec.handle)))
+	s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithEntryHandler(rec.handle), crux.WithHTTPClient(mock.Client())))
 
 	_, err := s.Run(t.Context(), "Weather?")
 	require.ErrorIs(t, err, crux.ErrApprovalNeeded)
@@ -162,7 +162,7 @@ func TestRejectedCallIsDenied(t *testing.T) {
 	mock.Expect().ReturnText("Okay.")
 	agent := newMockAgent(t, mock, crux.OpenAIGPT5_4,
 		crux.WithToolsRegistry([]string{"weather"}, weatherRegistry(crux.WithApprovalNeeded(true))))
-	s := crux.MustSession(crux.NewSession(t.Context(), agent))
+	s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
 	_, err := s.Run(t.Context(), "Weather?")
 	require.ErrorIs(t, err, crux.ErrApprovalNeeded)
 	require.NoError(t, s.Reject(t.Context(), s.PendingApprovals()[0].ID, "not now"))
@@ -181,12 +181,12 @@ func TestSubagentEntriesReachParent(t *testing.T) {
 	mock.Expect().ReturnToolCall("weather", map[string]any{"city": "Paris"})
 	mock.Expect().ReturnText("brief")
 	mock.Expect().ReturnText("final")
-	researcher := crux.Must(crux.New("researcher", crux.OpenAIGPT5_4, append(mock.AgentOptions(),
-		crux.WithToolsRegistry([]string{"weather"}, weatherRegistry()))...))
+	researcher := crux.Must(crux.New("researcher", crux.OpenAIGPT5_4,
+		crux.WithToolsRegistry([]string{"weather"}, weatherRegistry())))
 	agent := newMockAgent(t, mock, crux.OpenAIGPT5_4, crux.WithSubAgent(researcher, "Researches"))
 
 	var rec recorder
-	s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithEntryHandler(rec.handle)))
+	s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithEntryHandler(rec.handle), crux.WithHTTPClient(mock.Client())))
 	out, err := s.Run(t.Context(), "Research Paris")
 	require.NoError(t, err)
 	require.Equal(t, "final", out)
@@ -227,13 +227,13 @@ func TestParallelSubagentsReportSerially(t *testing.T) {
 		mock.Expect().ReturnText("brief")
 	}
 	mock.Expect().ReturnText("done")
-	researcher := crux.Must(crux.New("researcher", crux.OpenAIGPT5_4, mock.AgentOptions()...))
+	researcher := crux.Must(crux.New("researcher", crux.OpenAIGPT5_4))
 	agent := newMockAgent(t, mock, crux.OpenAIGPT5_4, crux.WithSubAgent(researcher, "Researches"))
 
 	// The subagents run concurrently; the recorder appends without a lock,
 	// so -race reports handler calls that are not serialised.
 	var rec recorder
-	s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithEntryHandler(rec.handle)))
+	s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithEntryHandler(rec.handle), crux.WithHTTPClient(mock.Client())))
 	out, err := s.Run(t.Context(), "go")
 	require.NoError(t, err)
 	require.Equal(t, "done", out)
@@ -257,7 +257,7 @@ func TestCancelledRunIsRecorded(t *testing.T) {
 		return "done", nil, nil
 	})
 	agent := newMockAgent(t, mock, crux.OpenAIGPT5_4, crux.WithToolsRegistry([]string{"slow"}, reg))
-	s := crux.MustSession(crux.NewSession(t.Context(), agent))
+	s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
 	_, err := s.Run(ctx, "go")
 	require.ErrorIs(t, err, context.Canceled)
 	logs := s.Logs()
@@ -282,7 +282,7 @@ func TestSeveralEntryHandlers(t *testing.T) {
 	mock.Expect().ReturnToolCall("agent_researcher", map[string]any{"task": "Paris"})
 	mock.Expect().ReturnText("brief")
 	mock.Expect().ReturnText("final")
-	researcher := crux.Must(crux.New("researcher", crux.OpenAIGPT5_4, mock.AgentOptions()...))
+	researcher := crux.Must(crux.New("researcher", crux.OpenAIGPT5_4))
 	agent := newMockAgent(t, mock, crux.OpenAIGPT5_4, crux.WithSubAgent(researcher, "Researches"))
 
 	var order []string
@@ -297,6 +297,7 @@ func TestSeveralEntryHandlers(t *testing.T) {
 			order = append(order, "second")
 			second.handle(ctx, s, e)
 		}),
+		crux.WithHTTPClient(mock.Client()),
 	))
 	_, err := s.Run(t.Context(), "go")
 	require.NoError(t, err)

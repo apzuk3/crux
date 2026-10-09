@@ -173,7 +173,7 @@ func (s *Session) summarise(ctx context.Context, explicit bool) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	produced, err := compactor.step(ctx, []Entry{prompt}, nil, false)
+	produced, err := compactor.step(ctx, s.client, []Entry{prompt}, nil, false)
 	if err != nil {
 		return false, fmt.Errorf("compact session: %w", err)
 	}
@@ -239,7 +239,7 @@ func (s *Session) summaryRange(explicit bool) (from, cut int) {
 
 // compactor returns the agent that writes summaries.
 func (a *Agent) compactor() (*Agent, error) {
-	opts := []AgentOption{WithInstructions(summaryInstructions), WithoutCompaction(), WithHTTPClient(a.httpClient)}
+	opts := []AgentOption{WithInstructions(summaryInstructions), WithoutCompaction()}
 	model := a.compaction.Model
 	if model == "" {
 		model = a.model

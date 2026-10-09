@@ -1,4 +1,7 @@
-# Toolsets
+---
+title: Toolsets
+weight: 20
+---
 
 A toolset is a group of tools selected together. Each tool is labelled with
 `crux.WithToolset(name)`, and agents pick the whole group with

@@ -453,20 +453,22 @@ The provider is inferred from known model constants (`crux.ClaudeSonnet5`, `crux
 
 Anthropic requests cache the prompt automatically, so each turn of a run reads the conversation so far from the cache instead of paying for it again.
 
-Common agent options: `WithInstructions`, `WithTools`, `WithToolsets`, `WithMaxTurns`, `WithMaxTokens`, `WithTemperature`, `WithReasoning`, `WithToolChoice`, `WithParallelToolCalls`, `WithOutputSchemaFrom`, `WithWebSearch`, `WithAPIKey`, `WithBaseURL`, `WithHTTPClient`, `WithMaxRetries`.
+Common agent options: `WithInstructions`, `WithTools`, `WithToolsets`, `WithMaxTurns`, `WithMaxTokens`, `WithTemperature`, `WithReasoning`, `WithToolChoice`, `WithParallelToolCalls`, `WithOutputSchemaFrom`, `WithWebSearch`, `WithAPIKey`, `WithBaseURL`, `WithMaxRetries`. The HTTP client is a session option, `crux.WithHTTPClient(client)`, inherited by subagent sessions.
 
 ## Testing your agents
 
-`cruxtest` is a mock HTTP transport that speaks each provider's wire format, so you can test agent logic without network calls:
+`cruxtest` is a mock HTTP transport that speaks each provider's wire format, so you can test your real agents without network calls or keys. Hand the mock's client to the session:
 
 ```go
 mock := cruxtest.NewMock()
 mock.Expect().ReturnToolCall("get_weather", map[string]any{"city": "Paris"})
 mock.Expect().ReturnText("It's sunny in Paris.")
 
-agent := crux.Must(crux.New("assistant", crux.ClaudeHaiku4_5,
-	append(mock.AgentOptions(), crux.WithTools([]string{"get_weather"}))...))
+session, _ := crux.NewSession(ctx, assistant, crux.WithHTTPClient(mock.Client()))
+answer, _ := session.Run(ctx, "Weather in Paris?")
 ```
+
+See [docs/testing.md](docs/testing.md) for testing an application's agents.
 
 ## Examples
 

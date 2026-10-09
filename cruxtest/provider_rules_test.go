@@ -17,12 +17,12 @@ import (
 
 func rulesSession(t *testing.T, provider crux.Provider, model string, mock *cruxtest.Mock, opts ...crux.AgentOption) *crux.Session {
 	t.Helper()
-	options := append(mock.AgentOptions(), crux.WithProvider(provider),
-		crux.WithToolsRegistry([]string{"get_weather"}, registerMockTools(t)))
+	options := []crux.AgentOption{crux.WithProvider(provider),
+		crux.WithToolsRegistry([]string{"get_weather"}, registerMockTools(t))}
 	options = append(options, opts...)
 	a, err := crux.New("rules", model, options...)
 	require.NoError(t, err)
-	s, err := crux.NewSession(t.Context(), a)
+	s, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	return s
 }
@@ -113,13 +113,13 @@ func TestGeminiStructuredOutputWithTools(t *testing.T) {
 		t.Run(fmt.Sprintf("%s tools=%v", tc.model, tc.tools), func(t *testing.T) {
 			mock := cruxtest.NewMock(cruxtest.WithProvider(crux.ProviderGoogle))
 			mock.Expect().ReturnText(`{"status":"ok","score":2,"note":null}`)
-			options := append(mock.AgentOptions(), crux.WithProvider(crux.ProviderGoogle), crux.WithOutputSchemaFrom[structuredAnswer]())
+			options := []crux.AgentOption{crux.WithProvider(crux.ProviderGoogle), crux.WithOutputSchemaFrom[structuredAnswer]()}
 			if tc.tools {
 				options = append(options, crux.WithToolsRegistry([]string{"get_weather"}, registerMockTools(t)))
 			}
 			a, err := crux.New("structured", tc.model, options...)
 			require.NoError(t, err)
-			s, err := crux.NewSession(t.Context(), a)
+			s, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 			require.NoError(t, err)
 			_, err = s.Run(t.Context(), "Rate it")
 			require.NoError(t, err)

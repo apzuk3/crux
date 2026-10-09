@@ -41,3 +41,12 @@ Thumbs.db
 
 # Example databases
 crux-example.db
+
+# docs site
+/.site-build/
+site/node_modules/
+site/public/
+site/resources/
+site/_vendor/
+site/.hugo_build.lock
+site/.wrangler/

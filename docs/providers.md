@@ -1,4 +1,7 @@
-# Providers and models
+---
+title: Providers and models
+weight: 100
+---
 
 The model constant picks the provider; the key comes from the environment.
 
@@ -19,8 +22,11 @@ Run `go doc crux.foo | grep -i <provider>` for the full list.
 
 - A model ID crux doesn't know: `crux.New(name, "some-model", crux.WithProvider(crux.ProviderOpenAI))`.
 - `crux.WithAPIKey(key)` instead of the environment; `crux.WithBaseURL(url)` for
-  proxies and compatible servers; `crux.WithHTTPClient(c)`;
-  `crux.WithMaxRetries(n)` (default 2).
+  proxies and compatible servers; `crux.WithMaxRetries(n)` (default 2).
+- The HTTP client belongs to the session: `crux.NewSession(ctx, agent,
+  crux.WithHTTPClient(c))`. Subagent sessions, spawned agents and compaction
+  use it too, and `Fork` keeps it. A decider takes one with
+  `d.WithHTTPClient(c)`, which returns a copy.
 - An agent is the same code on every provider: switch by changing the model.
 
 ## Request settings

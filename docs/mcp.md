@@ -1,4 +1,7 @@
-# MCP servers
+---
+title: MCP servers
+weight: 30
+---
 
 crux connects to Model Context Protocol servers and turns their tools into
 ordinary crux tools.

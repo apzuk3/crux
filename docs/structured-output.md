@@ -1,4 +1,7 @@
-# Structured output
+---
+title: Structured output
+weight: 60
+---
 
 Make an agent answer with a Go type instead of text.
 

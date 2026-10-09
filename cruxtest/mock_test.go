@@ -30,12 +30,11 @@ func TestOpenAIMock_TextPrompt(t *testing.T) {
 	agent, err := crux.New(
 		"test-agent",
 		crux.OpenAIGPT5_6Sol,
-		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
 	)
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	out, err := sess.Run(context.Background(), "Hi")
@@ -62,13 +61,12 @@ func TestOpenAIMock_ToolCalling(t *testing.T) {
 	agent, err := crux.New(
 		"weather-agent",
 		crux.OpenAIGPT5_6Sol,
-		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
 		crux.WithToolsRegistry([]string{"get_weather"}, tools),
 	)
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	out, err := sess.Run(context.Background(), "What's the weather in Paris?")
@@ -94,13 +92,12 @@ func TestOpenAIMock_StructuredOutput(t *testing.T) {
 	agent, err := crux.New(
 		"sentiment-agent",
 		crux.OpenAIGPT5_6Sol,
-		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
 		crux.WithOutputSchemaFrom[SentimentResult](),
 	)
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	var res SentimentResult
@@ -119,12 +116,11 @@ func TestAnthropicMock_TextPrompt(t *testing.T) {
 	agent, err := crux.New(
 		"anthropic-agent",
 		crux.ClaudeHaiku4_5,
-		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
 	)
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	out, err := sess.Run(context.Background(), "Hello Claude")
@@ -145,13 +141,12 @@ func TestAnthropicMock_ToolCalling(t *testing.T) {
 	agent, err := crux.New(
 		"anthropic-agent",
 		crux.ClaudeHaiku4_5,
-		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
 		crux.WithToolsRegistry([]string{"get_weather"}, tools),
 	)
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	out, err := sess.Run(context.Background(), "How is Tokyo?")
@@ -169,12 +164,11 @@ func TestAnthropicMock_Refusal(t *testing.T) {
 	agent, err := crux.New(
 		"anthropic-agent",
 		crux.ClaudeHaiku4_5,
-		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
 	)
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	_, err = sess.Run(context.Background(), "Do something bad")
@@ -189,12 +183,11 @@ func TestGeminiMock_TextPrompt(t *testing.T) {
 	agent, err := crux.New(
 		"gemini-agent",
 		crux.Gemini3_5FlashLite,
-		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
 	)
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	out, err := sess.Run(context.Background(), "Hello Gemini")
@@ -215,13 +208,12 @@ func TestGeminiMock_ToolCalling(t *testing.T) {
 	agent, err := crux.New(
 		"gemini-agent",
 		crux.Gemini3_5FlashLite,
-		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
 		crux.WithToolsRegistry([]string{"get_weather"}, tools),
 	)
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	out, err := sess.Run(context.Background(), "How is Berlin?")
@@ -239,16 +231,16 @@ func TestMock_ErrorStatus(t *testing.T) {
 	agent, err := crux.New(
 		"error-agent",
 		crux.OpenAIGPT5_6Sol,
-		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
+		crux.WithMaxRetries(0),
 	)
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	_, err = sess.Run(context.Background(), "Trigger 429")
-	require.Error(t, err)
+	require.ErrorIs(t, err, crux.ErrRateLimited)
 }
 
 func TestMock_UnexpectedRequestError(t *testing.T) {
@@ -258,36 +250,16 @@ func TestMock_UnexpectedRequestError(t *testing.T) {
 	agent, err := crux.New(
 		"agent",
 		crux.OpenAIGPT5_6Sol,
-		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-api-key"),
 	)
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	_, err = sess.Run(context.Background(), "Hi")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no more expected turns")
-}
-
-func TestMock_AgentOptionsHelper(t *testing.T) {
-	mock := cruxtest.NewMock()
-	mock.Expect().ReturnText("Works with AgentOptions!")
-
-	agent, err := crux.New(
-		"helper-agent",
-		crux.OpenAIGPT5_6Sol,
-		mock.AgentOptions()...,
-	)
-	require.NoError(t, err)
-
-	sess, err := crux.NewSession(t.Context(), agent)
-	require.NoError(t, err)
-
-	out, err := sess.Run(context.Background(), "Test helper")
-	require.NoError(t, err)
-	require.Equal(t, "Works with AgentOptions!", out)
 }
 
 func TestMock_TokenUsage(t *testing.T) {
@@ -304,12 +276,11 @@ func TestMock_TokenUsage(t *testing.T) {
 	agent, err := crux.New(
 		"usage-agent",
 		crux.ClaudeHaiku4_5,
-		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-key"),
 	)
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	out, err := sess.Run(context.Background(), "Test usage")
@@ -343,13 +314,12 @@ func TestMock_ParallelToolCalls(t *testing.T) {
 	agent, err := crux.New(
 		"parallel-agent",
 		crux.OpenAIGPT5_6Sol,
-		crux.WithHTTPClient(mock.Client()),
 		crux.WithAPIKey("mock-key"),
 		crux.WithToolsRegistry([]string{"tool_a", "tool_b"}, reg),
 	)
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	out, err := sess.Run(context.Background(), "Execute both")
@@ -369,12 +339,11 @@ func TestMock_OpenRouterAndDeepSeek(t *testing.T) {
 			agent, err := crux.New(
 				"provider-agent",
 				model,
-				crux.WithHTTPClient(mock.Client()),
 				crux.WithAPIKey("mock-key"),
 			)
 			require.NoError(t, err)
 
-			sess, err := crux.NewSession(t.Context(), agent)
+			sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 			require.NoError(t, err)
 
 			out, err := sess.Run(context.Background(), "Ping")

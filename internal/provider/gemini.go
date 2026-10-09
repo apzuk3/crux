@@ -22,8 +22,8 @@ const geminiGroundingMetadataOpaqueKey = "gemini.candidate.grounding_metadata"
 
 func newGeminiClient(ctx context.Context, req *Request) (*genai.Client, error) {
 	config := &genai.ClientConfig{Backend: genai.BackendGeminiAPI}
-	if req.APIKey != "" {
-		config.APIKey = req.APIKey
+	if key := req.apiKey(); key != "" {
+		config.APIKey = key
 	}
 	if req.BaseURL != "" {
 		config.HTTPOptions.BaseURL = req.BaseURL

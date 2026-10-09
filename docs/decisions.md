@@ -1,4 +1,7 @@
-# Decisions
+---
+title: Decisions
+weight: 70
+---
 
 `crux.Decide[T]` answers typed questions about some input: yes or no, one of a
 set of options, or a level on a scale. Use it for classification, routing,
@@ -44,12 +47,14 @@ slices, nested structs) is rejected before a request is sent.
 ## Details
 
 - `NewDecider(model, opts...)` takes the connection options (`WithAPIKey`,
-  `WithBaseURL`, `WithHTTPClient`, `WithMaxRetries`, `WithProvider`) and
+  `WithBaseURL`, `WithMaxRetries`, `WithProvider`) and
   `WithInstructions` (context for every question). Tools, output schemas and
   compaction are rejected; decision models also reject sampling options.
 - The state passed to `Decide` is strings or JSON values (several become an
   array). Decision models take no attachments.
 - A `Decider` is stateless and safe for concurrent use. Nothing is logged.
+- `d.WithHTTPClient(client)` returns a copy that sends its requests through
+  `client` (a proxy, or `cruxtest`'s `mock.Client()` in tests); `d` is unchanged.
 - `Decision[T]` also has `Model`, `Usage` and `Cost` (USD, when reported).
 - `crux.New` rejects decision models: they can't run agents.
 - Too much state fails with `crux.ErrContextTooLong` (Jev's limit is about 32k tokens).

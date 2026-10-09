@@ -25,10 +25,9 @@ func TestNetworkToolsInARun(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnToolCall(crux.NetList, map[string]any{})
 	mock.Expect().ReturnToolCall(crux.NetHTTPRequest, map[string]any{"url": ts.URL + "/health"})
-	agent := crux.Must(crux.New("netops", crux.OpenAIGPT5_4,
-		append(mock.AgentOptions(), crux.WithToolsetsRegistry(reg, crux.ToolsetNetwork))...))
+	agent := crux.Must(crux.New("netops", crux.OpenAIGPT5_4, crux.WithToolsetsRegistry(reg, crux.ToolsetNetwork)))
 
-	s := crux.MustSession(crux.NewSession(t.Context(), agent))
+	s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
 	_, err := s.Run(t.Context(), "is the service up?")
 	require.ErrorIs(t, err, crux.ErrApprovalNeeded, "http_request needs approval; net_list does not")
 	require.Contains(t, mock.Requests()[1].BodyString(), "no open handles")
