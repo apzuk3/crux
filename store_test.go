@@ -21,6 +21,11 @@ func openTestDB(t *testing.T) *gorm.DB {
 	dsn := "file:" + filepath.Join(t.TempDir(), "crux.db") + "?_pragma=busy_timeout(10000)"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: logger.Discard})
 	require.NoError(t, err)
+	// Close before t.TempDir removes the directory: Windows can't delete an
+	// open file.
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { sqlDB.Close() })
 	return db
 }
 
