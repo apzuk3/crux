@@ -71,13 +71,17 @@ func main() {
 
 `Run` sends the input, executes every tool the model calls, sends the results back, and repeats until the model gives a final answer or `WithMaxTurns` (default 10) is reached.
 
-### Chat in the terminal
+No API key? Run the same agent on a local model with [Ollama](https://ollama.com): `ollama pull qwen3 && go run ./examples/ollama`.
 
-`crux.CLI` opens a full-screen chat with any agent: answers stream in as rendered markdown, each tool call and subagent shows up as a live card, a sidebar on the right lists the agent's tools with call counts and token usage, and a progress bar follows each run from request to answer. Tools registered with `WithApprovalNeeded` ask for approval in a dialog, and `ctrl+o` (or `/model`) switches the model mid-conversation: the chat continues in a fork of the session on the new model, listing every provider that has an API key in the environment.
+### Chat with your agent before you ship it
+
+While you build an agent, `crux.CLI` lets you talk to it in the terminal and watch what it does, before you wire it into your app. It opens a full-screen chat with any agent: answers stream in as rendered markdown, each tool call and subagent shows up as a live card, a sidebar on the right lists the agent's tools with call counts and token usage, and a progress bar follows each run from request to answer. Tools registered with `WithApprovalNeeded` ask for approval in a dialog, and `ctrl+o` (or `/model`) switches the model mid-conversation: the chat continues in a fork of the session on the new model, listing every provider that has an API key in the environment.
 
 ```go
 crux.CLI(agent) // blocks until the user quits
 ```
+
+![Trying out an agent in crux.CLI: it calls tools on Gemini, then the chat switches to Grok mid-conversation](.github/assets/demo.gif)
 
 Session options work too: `crux.CLI(agent, crux.WithStore(store), crux.WithSessionID(id))` reopens a stored conversation with its history.
 
@@ -472,7 +476,7 @@ See [docs/testing.md](docs/testing.md) for testing an application's agents.
 
 ## Examples
 
-See [`examples/`](examples): `basic` (multi-tool planner with structured output), `attachments` (an embedded CSV, a chart drawn in memory, files from the command line and HTTP uploads), `stream`, `store`, `fork`, `subagents`, `spawning` (an assistant with no instructions whose only tool creates agents, and which works out the rest itself), `websearch`, `filesystem`, `skills` (a terminal chat with a commit-message skill that can save new skills), `lifecycle` (live trace with WithEntryHandler, approvals, per-run summary from the log), `cli` (a coding agent in the terminal chat), `mcp` (chat about your Linear issues through Linear's MCP server, with OAuth login), `network` (a network assistant with DNS, whois, HTTP, sockets and servers), `domains` (a terminal chat that proposes available domain names for an idea, checked by the network toolset with RDAP and whois), `oncall` (an on-call engineer with an investigator subagent and approved rollbacks, in the terminal chat).
+See [`examples/`](examples): `ollama` (the quickstart on a local model, no API key), `basic` (multi-tool planner with structured output), `attachments` (an embedded CSV, a chart drawn in memory, files from the command line and HTTP uploads), `stream`, `store`, `fork`, `subagents`, `spawning` (an assistant with no instructions whose only tool creates agents, and which works out the rest itself), `websearch`, `filesystem`, `skills` (a terminal chat with a commit-message skill that can save new skills), `lifecycle` (live trace with WithEntryHandler, approvals, per-run summary from the log), `cli` (a coding agent in the terminal chat), `mcp` (chat about your Linear issues through Linear's MCP server, with OAuth login), `network` (a network assistant with DNS, whois, HTTP, sockets and servers), `domains` (a terminal chat that proposes available domain names for an idea, checked by the network toolset with RDAP and whois), `oncall` (an on-call engineer with an investigator subagent and approved rollbacks, in the terminal chat).
 
 ## Development
 
