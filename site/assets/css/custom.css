@@ -48,13 +48,23 @@
     grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
   }
 }
+/* The wizard gopher peeks over the code panel, its feet hidden behind the
+   solid code background. Every example tab has the height of the tallest, so
+   switching tabs doesn't jump. */
+.crux-hero-code {
+  position: relative;
+  min-width: 0;
+  padding-top: 6rem;
+}
 .crux-hero-code pre {
   margin: 0 !important;
+  min-height: 18.25rem;
   border-radius: 1rem;
+  background-color: hsl(220 14% 92%) !important;
   box-shadow: 0 25px 60px -20px hsl(220 40% 5% / 0.6);
 }
-.crux-hero-code {
-  min-width: 0;
+.dark .crux-hero-code pre {
+  background-color: hsl(215 16% 15%) !important;
 }
 
 /* Tabbed examples in the hero */
@@ -109,11 +119,6 @@
   background: hsl(220 10% 50% / 0.08);
 }
 
-/* The wizard gopher peeks over the code panel, its feet hidden behind it. */
-.crux-hero-code {
-  position: relative;
-  padding-top: 6rem;
-}
 .crux-hero-gopher {
   position: absolute;
   top: -2.75rem;
@@ -214,18 +219,6 @@
 
 /* Hero headline: Hextra's tracking is a little too tight at this size. */
 .crux-hero-text h1 {
-  letter-spacing: -0.02em !important;
+  letter-spacing: -0.02em;
 }
 
-/* Solid code background in the hero, so the gopher's feet hide behind it. */
-.crux-hero-code pre {
-  background-color: hsl(220 14% 92%) !important;
-}
-.dark .crux-hero-code pre {
-  background-color: hsl(215 16% 15%) !important;
-}
-
-/* Every example tab has the height of the tallest, so switching tabs doesn't jump. */
-.crux-hero-code pre {
-  min-height: 18.25rem;
-}
