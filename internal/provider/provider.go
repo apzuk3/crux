@@ -76,6 +76,16 @@ func (req *Request) Retries() int {
 	return 2
 }
 
+// apiKey returns req.APIKey. Without one, a request through a custom client
+// sends a placeholder: the SDKs refuse to start without a key, but the client
+// may be a proxy that adds it, or a test mock, so the server answers instead.
+func (req *Request) apiKey() string {
+	if req.APIKey == "" && req.HTTPClient != nil {
+		return "unset"
+	}
+	return req.APIKey
+}
+
 // Tool is a function the model may call.
 type Tool struct {
 	Name        string

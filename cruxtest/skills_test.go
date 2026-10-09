@@ -38,10 +38,10 @@ func TestSkills(t *testing.T) {
 			mock.Expect().ReturnToolCall(crux.SkillLoadResource, map[string]any{"skill_name": "pdf", "resource_path": "references/forms.md"})
 			mock.Expect().ReturnText("done")
 
-			agent, err := crux.New("forms", "test-model", append(mock.AgentOptions(),
-				crux.WithProvider(provider), crux.WithInstructions("Be brief."), crux.WithSkills())...)
+			agent, err := crux.New("forms", "test-model",
+				crux.WithProvider(provider), crux.WithInstructions("Be brief."), crux.WithSkills())
 			require.NoError(t, err)
-			s, err := crux.NewSession(t.Context(), agent)
+			s, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 			require.NoError(t, err)
 			out, err := s.Run(t.Context(), "Fill this form")
 			require.NoError(t, err)
@@ -73,9 +73,9 @@ func TestSkills(t *testing.T) {
 		mock.Expect().ReturnText("saved")
 		mock.Expect().ReturnText("ok")
 
-		agent, err := crux.New("writer", crux.OpenAIGPT5_6Sol, append(mock.AgentOptions(), crux.WithSkills())...)
+		agent, err := crux.New("writer", crux.OpenAIGPT5_6Sol, crux.WithSkills())
 		require.NoError(t, err)
-		s, err := crux.NewSession(t.Context(), agent)
+		s, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 		require.NoError(t, err)
 
 		_, err = s.Run(t.Context(), "Remember how to write release notes")
@@ -93,7 +93,7 @@ func TestSkills(t *testing.T) {
 		require.Contains(t, mock.Requests()[1].BodyString(), `Created skill \"release-notes\"`)
 
 		// The new skill is listed from the next request on, in any session.
-		other, err := crux.NewSession(t.Context(), agent)
+		other, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 		require.NoError(t, err)
 		_, err = other.Run(t.Context(), "hi")
 		require.NoError(t, err)

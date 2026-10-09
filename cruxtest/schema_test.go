@@ -23,10 +23,10 @@ func TestStructuredOutputWireAndValidation(t *testing.T) {
 			mock.Expect().ReturnText(`{"status":"ok","score":2,"note":null}`)
 			mock.Expect().ReturnText(`{"status":"wrong","score":2,"note":null}`)
 			a, err := crux.New("structured", "test-model",
-				crux.WithProvider(provider), crux.WithAPIKey("mock"), crux.WithHTTPClient(mock.Client()),
+				crux.WithProvider(provider),
 				crux.WithOutputSchemaFrom[structuredAnswer]())
 			require.NoError(t, err)
-			sess, err := crux.NewSession(t.Context(), a)
+			sess, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 			require.NoError(t, err)
 			var answer structuredAnswer
 			require.NoError(t, sess.RunInto(context.Background(), &answer, "extract"))
@@ -86,10 +86,9 @@ func TestStructuredOutputRepair(t *testing.T) {
 				mock.Expect().ReturnText(response)
 			}
 			a, err := crux.New("repair", "test-model", crux.WithProvider(crux.ProviderOpenAI),
-				crux.WithHTTPClient(mock.Client()), crux.WithAPIKey("mock"),
 				crux.WithOutputSchemaFrom[structuredAnswer](), crux.WithMaxRepairs(tc.retries), crux.WithMaxTurns(tc.turns))
 			require.NoError(t, err)
-			sess, err := crux.NewSession(t.Context(), a)
+			sess, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 			require.NoError(t, err)
 			_, err = sess.Run(context.Background(), "extract")
 			if tc.wantError {
@@ -112,10 +111,9 @@ func TestStructuredOutputAcrossToolTurns(t *testing.T) {
 	mock.Expect().ReturnToolCall("get_weather", WeatherArgs{City: "Paris"})
 	mock.Expect().ReturnText(`{"status":"ok","score":1,"note":null}`)
 	a, err := crux.New("tools", "test-model", crux.WithProvider(crux.ProviderOpenAI),
-		crux.WithAPIKey("mock"), crux.WithHTTPClient(mock.Client()),
 		crux.WithOutputSchemaFrom[structuredAnswer](), crux.WithToolsRegistry([]string{"get_weather"}, reg))
 	require.NoError(t, err)
-	sess, err := crux.NewSession(t.Context(), a)
+	sess, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	_, err = sess.Run(context.Background(), "check the weather")
 	require.NoError(t, err)
@@ -130,10 +128,9 @@ func TestStructuredOutputAcrossToolTurns(t *testing.T) {
 func TestRunIntoValidatesBeforeMutatingTarget(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnText(`{"status":"ok","score":0,"note":null}`)
-	a, err := crux.New("validate", "test-model", crux.WithProvider(crux.ProviderAnthropic),
-		crux.WithHTTPClient(mock.Client()), crux.WithAPIKey("mock"), crux.WithOutputSchemaFrom[structuredAnswer]())
+	a, err := crux.New("validate", "test-model", crux.WithProvider(crux.ProviderAnthropic), crux.WithOutputSchemaFrom[structuredAnswer]())
 	require.NoError(t, err)
-	sess, err := crux.NewSession(t.Context(), a)
+	sess, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	require.Error(t, sess.RunInto(context.Background(), nil, "extract"))
 	mock.AssertTurnCount(t, 0)
@@ -154,11 +151,10 @@ func TestMapOutputSchemaCompatibility(t *testing.T) {
 		mock := cruxtest.NewMock(cruxtest.WithProvider(crux.ProviderGoogle))
 		mock.Expect().ReturnText(`{"labels":{"env":"prod"}}`)
 		a, err := crux.New("map-gemini", "test-model",
-			crux.WithProvider(crux.ProviderGoogle), crux.WithAPIKey("mock"),
-			crux.WithHTTPClient(mock.Client()),
+			crux.WithProvider(crux.ProviderGoogle),
 			crux.WithOutputSchemaFrom[withMapAnswer]())
 		require.NoError(t, err)
-		sess, err := crux.NewSession(t.Context(), a)
+		sess, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 		require.NoError(t, err)
 		var res withMapAnswer
 		require.NoError(t, sess.RunInto(context.Background(), &res, "get labels"))
@@ -175,11 +171,10 @@ func TestMapOutputSchemaCompatibility(t *testing.T) {
 	t.Run("openai rejects dynamic map schema before request", func(t *testing.T) {
 		mock := cruxtest.NewMock(cruxtest.WithProvider(crux.ProviderOpenAI))
 		a, err := crux.New("map-openai", "test-model",
-			crux.WithProvider(crux.ProviderOpenAI), crux.WithAPIKey("mock"),
-			crux.WithHTTPClient(mock.Client()),
+			crux.WithProvider(crux.ProviderOpenAI),
 			crux.WithOutputSchemaFrom[withMapAnswer]())
 		require.NoError(t, err)
-		sess, err := crux.NewSession(t.Context(), a)
+		sess, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 		require.NoError(t, err)
 		var res withMapAnswer
 		err = sess.RunInto(context.Background(), &res, "get labels")
@@ -196,12 +191,11 @@ func TestInvalidSchemaFailsEarlyZeroRequests(t *testing.T) {
 		Ref: "#/$defs/DoesNotExist",
 	}
 	a, err := crux.New("bad-schema", "test-model",
-		crux.WithProvider(crux.ProviderOpenAI), crux.WithAPIKey("mock"),
-		crux.WithHTTPClient(mock.Client()),
+		crux.WithProvider(crux.ProviderOpenAI),
 		crux.WithOutputSchema(schema))
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), a)
+	sess, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	_, err = sess.Run(context.Background(), "run")
 	require.Error(t, err)
@@ -218,12 +212,11 @@ func TestLargeNumberPrecisionPreserved(t *testing.T) {
 	// 9007199254740993 (2^53 + 1) would be rounded to 9007199254740992 if parsed as float64
 	mock.Expect().ReturnText(`{"id": 9007199254740993}`)
 	a, err := crux.New("large-num", "test-model",
-		crux.WithProvider(crux.ProviderOpenAI), crux.WithAPIKey("mock"),
-		crux.WithHTTPClient(mock.Client()),
+		crux.WithProvider(crux.ProviderOpenAI),
 		crux.WithOutputSchemaFrom[largeNumberAnswer]())
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), a)
+	sess, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	var res largeNumberAnswer
 	require.NoError(t, sess.RunInto(context.Background(), &res, "get id"))
@@ -247,12 +240,11 @@ func TestRawOutputSchemaAcceptsNullForOptional(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnText(`{"status":"ok","note":null}`)
 	a, err := crux.New("raw-schema", "test-model",
-		crux.WithProvider(crux.ProviderOpenAI), crux.WithAPIKey("mock"),
-		crux.WithHTTPClient(mock.Client()),
+		crux.WithProvider(crux.ProviderOpenAI),
 		crux.WithOutputSchema(schema))
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), a)
+	sess, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	var res rawSchemaAnswer
 	require.NoError(t, sess.RunInto(context.Background(), &res, "status"))
@@ -269,14 +261,14 @@ func TestResumeRepairsStoredInvalidOutput(t *testing.T) {
 	mock.Expect().ReturnText(`{"status":"ok","score":1,"note":null}`)
 
 	strict := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithOutputSchemaFrom[structuredAnswer]())
-	session := crux.MustSession(crux.NewSession(t.Context(), strict))
+	session := crux.MustSession(crux.NewSession(t.Context(), strict, crux.WithHTTPClient(mock.Client())))
 	_, err := session.Run(t.Context(), "extract")
 	require.ErrorIs(t, err, crux.ErrOutputValidation)
 
 	repairing := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol,
 		crux.WithOutputSchemaFrom[structuredAnswer](), crux.WithMaxRepairs(1), crux.WithMaxTurns(1))
 	resumed := crux.MustSession(crux.NewSession(t.Context(), repairing,
-		crux.WithSessionID(session.ID()), crux.WithStore(session.Store())))
+		crux.WithSessionID(session.ID()), crux.WithStore(session.Store()), crux.WithHTTPClient(mock.Client())))
 	out, err := resumed.Resume(t.Context())
 	require.NoError(t, err)
 	require.JSONEq(t, `{"status":"ok","score":1,"note":null}`, out)
@@ -290,9 +282,9 @@ func TestOutputSchemaNumbersStayNumbersOnOpenAI(t *testing.T) {
 	}
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnJSON(map[string]any{"stars": 5})
-	a, err := crux.New("rater", crux.OpenAIGPT5_4Nano, append(mock.AgentOptions(), crux.WithOutputSchemaFrom[rating]())...)
+	a, err := crux.New("rater", crux.OpenAIGPT5_4Nano, crux.WithOutputSchemaFrom[rating]())
 	require.NoError(t, err)
-	s, err := crux.NewSession(t.Context(), a)
+	s, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	_, err = s.Run(t.Context(), "rate it")
 	require.NoError(t, err)

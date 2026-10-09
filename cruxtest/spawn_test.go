@@ -25,9 +25,9 @@ func spawnAgent(t *testing.T, mock *cruxtest.Mock, opts ...crux.SpawnOption) (*c
 		deleted.Add(1)
 		return "deleted " + in.Path, nil, nil
 	}, crux.WithApprovalNeeded(true))
-	a := crux.Must(crux.New("boss", crux.OpenAIGPT5_4, append(mock.AgentOptions(),
+	a := crux.Must(crux.New("boss", crux.OpenAIGPT5_4,
 		crux.WithToolsRegistry([]string{"lookup", "delete_file"}, reg),
-		crux.WithAgentSpawning(opts...))...))
+		crux.WithAgentSpawning(opts...)))
 	return a, &deleted
 }
 
@@ -58,7 +58,7 @@ func TestSpawnRunsAgent(t *testing.T) {
 	mock.Expect().ReturnText("done")
 	a, _ := spawnAgent(t, mock)
 
-	s := crux.MustSession(crux.NewSession(t.Context(), a))
+	s := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client())))
 	out, err := s.Run(t.Context(), "research go")
 	require.NoError(t, err)
 	require.Equal(t, "done", out)
@@ -106,7 +106,7 @@ func TestSpawnRejectsDisallowed(t *testing.T) {
 	mock.Expect().ReturnText("could not")
 	a, _ := spawnAgent(t, mock)
 
-	s := crux.MustSession(crux.NewSession(t.Context(), a))
+	s := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client())))
 	out, err := s.Run(t.Context(), "go")
 	require.NoError(t, err)
 	require.Equal(t, "could not", out)
@@ -138,7 +138,7 @@ func TestSpawnOptions(t *testing.T) {
 			return reg
 		}(), "other"))
 
-	s := crux.MustSession(crux.NewSession(t.Context(), a))
+	s := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client())))
 	_, err := s.Run(t.Context(), "go")
 	require.NoError(t, err)
 
@@ -164,11 +164,11 @@ func TestSpawnApprovalSurvivesReload(t *testing.T) {
 	mock.Expect().ReturnToolCall("delete_file", map[string]any{"path": "a.txt"})
 	a, deleted := spawnAgent(t, mock)
 
-	first := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithStore(store)))
+	first := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithStore(store), crux.WithHTTPClient(mock.Client())))
 	_, err := first.Run(t.Context(), "clean up")
 	require.ErrorIs(t, err, crux.ErrApprovalNeeded)
 
-	loaded := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithStore(store), crux.WithSessionID(first.ID())))
+	loaded := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithStore(store), crux.WithSessionID(first.ID()), crux.WithHTTPClient(mock.Client())))
 	pending := loaded.PendingApprovals()
 	require.Len(t, pending, 1)
 	require.Equal(t, "cleaner", pending[0].Agent)
@@ -214,10 +214,10 @@ func TestSpawnConcurrency(t *testing.T) {
 	}
 	mock.Expect().ReturnText("done")
 
-	a := crux.Must(crux.New("boss", crux.OpenAIGPT5_4, append(mock.AgentOptions(),
+	a := crux.Must(crux.New("boss", crux.OpenAIGPT5_4,
 		crux.WithToolsRegistry([]string{"probe"}, reg),
-		crux.WithAgentSpawning(crux.WithSpawnConcurrency(1)))...))
-	s := crux.MustSession(crux.NewSession(t.Context(), a))
+		crux.WithAgentSpawning(crux.WithSpawnConcurrency(1))))
+	s := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client())))
 	out, err := s.Run(t.Context(), "probe three times")
 	require.NoError(t, err)
 	require.Equal(t, "done", out)

@@ -45,8 +45,9 @@ func TestDecideJev(t *testing.T) {
 		"anger":    cruxtest.Score(1.25, 0.9, 0, 0.75, 0.25),
 	}).WithUsage(cruxtest.TokenUsage{InputTokens: 300, OutputTokens: 20})
 
-	d, err := crux.NewDecider(crux.Jev, append(mock.AgentOptions(), crux.WithInstructions("You triage support tickets."))...)
+	d, err := crux.NewDecider(crux.Jev, crux.WithAPIKey("cruxtest-mock-key"), crux.WithInstructions("You triage support tickets."))
 	require.NoError(t, err)
+	d = d.WithHTTPClient(mock.Client())
 	require.Equal(t, crux.ProviderTypeSafe, d.Provider())
 
 	res, err := crux.Decide[triage](t.Context(), d, "My payouts have failed for 3 days!")
@@ -80,7 +81,7 @@ func TestDecideStateShapes(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnDecision(map[string]cruxtest.Answer{"team": cruxtest.Choice("web", 0.9, nil)})
 	mock.Expect().ReturnDecision(map[string]cruxtest.Answer{"team": cruxtest.Choice("infra", 0.9, nil)})
-	d := crux.MustDecider(crux.NewDecider(crux.Jev1_13, mock.AgentOptions()...))
+	d := crux.MustDecider(crux.NewDecider(crux.Jev1_13)).WithHTTPClient(mock.Client())
 
 	res, err := crux.Decide[routed](t.Context(), d, map[string]any{"page": "/checkout", "status": 500})
 	require.NoError(t, err)
@@ -100,8 +101,9 @@ func TestDecideOpenRouterJev(t *testing.T) {
 	mock.Expect().ReturnRaw(http.StatusOK, []byte(`{"id":"dec_1","model":"typesafe/jev-1.13","provider":"TypeSafe",
 		"answers":{"team":{"type":"choice","choice":"infra","confidence":0.7,"probabilities":{"infra":0.8,"web":0.2}}},
 		"usage":{"input_tokens":12,"output_tokens":3,"cost":0.0000005}}`))
-	d, err := crux.NewDecider(crux.OpenRouterDecisionModelJev1_13, mock.AgentOptions()...)
+	d, err := crux.NewDecider(crux.OpenRouterDecisionModelJev1_13)
 	require.NoError(t, err)
+	d = d.WithHTTPClient(mock.Client())
 	require.Equal(t, crux.ProviderOpenrouter, d.Provider())
 
 	res, err := crux.Decide[routed](t.Context(), d, "disk full on db-3")
@@ -115,8 +117,9 @@ func TestDecideOpenRouterJev(t *testing.T) {
 func TestDecideOpenRouterChatModelUsesOutputSchema(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnJSON(map[string]any{"team": "web"})
-	d, err := crux.NewDecider(crux.OpenRouterChatModelGPT5_4Mini, mock.AgentOptions()...)
+	d, err := crux.NewDecider(crux.OpenRouterChatModelGPT5_4Mini)
 	require.NoError(t, err)
+	d = d.WithHTTPClient(mock.Client())
 
 	res, err := crux.Decide[routed](t.Context(), d, "the checkout page is blank")
 	require.NoError(t, err)
@@ -137,8 +140,9 @@ func TestDecideWithLLMs(t *testing.T) {
 		t.Run(string(tt.provider), func(t *testing.T) {
 			mock := cruxtest.NewMock()
 			mock.Expect().ReturnJSON(map[string]any{"urgent": true, "area": "bug", "severity": 3, "anger": 2})
-			d, err := crux.NewDecider(tt.model, mock.AgentOptions()...)
+			d, err := crux.NewDecider(tt.model)
 			require.NoError(t, err)
+			d = d.WithHTTPClient(mock.Client())
 
 			res, err := crux.Decide[triage](t.Context(), d, "Everything is down")
 			require.NoError(t, err)
@@ -153,7 +157,7 @@ func TestDecideWithLLMs(t *testing.T) {
 func TestDecideLLMAnswerOutsideSchema(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnJSON(map[string]any{"team": "sales"})
-	d := crux.MustDecider(crux.NewDecider(crux.OpenAIGPT5_4Nano, mock.AgentOptions()...))
+	d := crux.MustDecider(crux.NewDecider(crux.OpenAIGPT5_4Nano)).WithHTTPClient(mock.Client())
 	_, err := crux.Decide[routed](t.Context(), d, "pricing question")
 	require.ErrorIs(t, err, crux.ErrOutputValidation)
 }
@@ -161,7 +165,7 @@ func TestDecideLLMAnswerOutsideSchema(t *testing.T) {
 func TestDecideContextTooLong(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnError(http.StatusUnprocessableEntity, `{"detail":[{"loc":["body","state"],"msg":"state is too long","type":"max_tokens_exceeded"}]}`)
-	d := crux.MustDecider(crux.NewDecider(crux.Jev, mock.AgentOptions()...))
+	d := crux.MustDecider(crux.NewDecider(crux.Jev)).WithHTTPClient(mock.Client())
 	_, err := crux.Decide[routed](t.Context(), d, "a very long ticket")
 	require.ErrorIs(t, err, crux.ErrContextTooLong)
 	mock.AssertTurnCount(t, 1) // 422 is not retried
@@ -171,7 +175,7 @@ func TestDecideRetriesOverload(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnError(529, `{"detail":"overloaded"}`)
 	mock.Expect().ReturnDecision(map[string]cruxtest.Answer{"team": cruxtest.Choice("web", 0.9, nil)})
-	d := crux.MustDecider(crux.NewDecider(crux.Jev, mock.AgentOptions()...))
+	d := crux.MustDecider(crux.NewDecider(crux.Jev)).WithHTTPClient(mock.Client())
 	res, err := crux.Decide[routed](t.Context(), d, "blank page")
 	require.NoError(t, err)
 	require.Equal(t, team("web"), res.Value.Team)
@@ -180,7 +184,7 @@ func TestDecideRetriesOverload(t *testing.T) {
 
 func TestDecideRejectsUndecidableTypes(t *testing.T) {
 	mock := cruxtest.NewMock()
-	d := crux.MustDecider(crux.NewDecider(crux.Jev, mock.AgentOptions()...))
+	d := crux.MustDecider(crux.NewDecider(crux.Jev)).WithHTTPClient(mock.Client())
 
 	_, err := crux.Decide[struct {
 		Summary string `json:"summary"`
@@ -236,7 +240,7 @@ func TestNewDeciderRejectsAgentOptions(t *testing.T) {
 func TestDecideRejectsAnswerOutsideChoices(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnDecision(map[string]cruxtest.Answer{"team": cruxtest.Choice("sales", 0.9, nil)})
-	d := crux.MustDecider(crux.NewDecider(crux.Jev, mock.AgentOptions()...))
+	d := crux.MustDecider(crux.NewDecider(crux.Jev)).WithHTTPClient(mock.Client())
 	_, err := crux.Decide[routed](t.Context(), d, "x")
 	require.Error(t, err)
 	require.False(t, errors.Is(err, crux.ErrContextTooLong))
@@ -246,7 +250,7 @@ func TestDecideRejectsAnswerOutsideChoices(t *testing.T) {
 func TestDecideLLMScoreOutsideLevels(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnJSON(map[string]any{"urgent": false, "area": "other", "severity": 7, "anger": 0})
-	d := crux.MustDecider(crux.NewDecider(crux.OpenAIGPT5_4Nano, mock.AgentOptions()...))
+	d := crux.MustDecider(crux.NewDecider(crux.OpenAIGPT5_4Nano)).WithHTTPClient(mock.Client())
 	_, err := crux.Decide[triage](t.Context(), d, "x")
 	require.ErrorIs(t, err, crux.ErrOutputValidation)
 }

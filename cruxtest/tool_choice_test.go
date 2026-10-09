@@ -28,9 +28,9 @@ func choiceRun(t *testing.T, provider crux.Provider, model string, opts ...crux.
 	mock.Expect().ReturnToolCall("lookup", map[string]any{"query": "go"})
 	mock.Expect().ReturnText("done")
 	opts = append([]crux.AgentOption{crux.WithProvider(provider), crux.WithToolsRegistry([]string{"lookup"}, reg)}, opts...)
-	a, err := crux.New("chooser", model, append(mock.AgentOptions(), opts...)...)
+	a, err := crux.New("chooser", model, opts...)
 	require.NoError(t, err)
-	s, err := crux.NewSession(t.Context(), a)
+	s, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	out, err := s.Run(t.Context(), "look up go")
 	require.NoError(t, err)
@@ -179,10 +179,10 @@ func TestToolChoiceNotRepeatedOnResume(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnToolCall("lookup", map[string]any{"query": "go"})
 	mock.Expect().ReturnText("done")
-	a, err := crux.New("chooser", crux.OpenAIGPT5_4, append(mock.AgentOptions(),
-		crux.WithToolsRegistry([]string{"lookup"}, reg), crux.WithToolChoice(crux.ToolChoiceRequired))...)
+	a, err := crux.New("chooser", crux.OpenAIGPT5_4,
+		crux.WithToolsRegistry([]string{"lookup"}, reg), crux.WithToolChoice(crux.ToolChoiceRequired))
 	require.NoError(t, err)
-	s, err := crux.NewSession(t.Context(), a)
+	s, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	_, err = s.Run(t.Context(), "look up go")
 	require.ErrorIs(t, err, crux.ErrApprovalNeeded)
@@ -212,10 +212,10 @@ func TestMaxRetries(t *testing.T) {
 				for range retries + 1 {
 					mock.Expect().ReturnError(http.StatusInternalServerError, `{"error":{"message":"boom"}}`)
 				}
-				a, err := crux.New("retry", tt.model, append(mock.AgentOptions(),
-					crux.WithProvider(tt.provider), crux.WithMaxRetries(retries))...)
+				a, err := crux.New("retry", tt.model,
+					crux.WithProvider(tt.provider), crux.WithMaxRetries(retries))
 				require.NoError(t, err)
-				s, err := crux.NewSession(t.Context(), a)
+				s, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 				require.NoError(t, err)
 				_, err = s.Run(t.Context(), "hi")
 				require.Error(t, err)
@@ -251,10 +251,10 @@ func TestToolTimeout(t *testing.T) {
 		cruxtest.ToolCall{Name: "quick", Args: map[string]any{"query": "c"}},
 	)
 	mock.Expect().ReturnText("done")
-	a, err := crux.New("timeouts", crux.OpenAIGPT5_4, append(mock.AgentOptions(),
-		crux.WithToolsRegistry([]string{"ignores_ctx", "honours_ctx", "quick"}, reg))...)
+	a, err := crux.New("timeouts", crux.OpenAIGPT5_4,
+		crux.WithToolsRegistry([]string{"ignores_ctx", "honours_ctx", "quick"}, reg))
 	require.NoError(t, err)
-	s, err := crux.NewSession(t.Context(), a)
+	s, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	out, err := s.Run(t.Context(), "go")
 	require.NoError(t, err)

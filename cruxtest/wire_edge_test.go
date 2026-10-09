@@ -58,7 +58,7 @@ func TestEmptyFinalAnswerKeepsUsage(t *testing.T) {
 				mock := cruxtest.NewMock()
 				mock.Expect().ReturnEmpty().WithUsage(cruxtest.TokenUsage{InputTokens: 12, OutputTokens: 3})
 				mock.Expect().ReturnText("second")
-				s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, model)))
+				s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, model), crux.WithHTTPClient(mock.Client())))
 
 				var out string
 				var err error
@@ -95,7 +95,7 @@ func TestEmptyFinalAnswerKeepsUsage(t *testing.T) {
 func TestAnthropicToolUseWithoutContentFails(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnRaw(200, []byte(`{"id":"msg_1","type":"message","role":"assistant","content":[],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`))
-	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.ClaudeHaiku4_5)))
+	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.ClaudeHaiku4_5), crux.WithHTTPClient(mock.Client())))
 	_, err := s.Run(t.Context(), "hi")
 	require.ErrorContains(t, err, "no content")
 }
@@ -105,7 +105,7 @@ func TestAnthropicPausedTurnContinuationLimit(t *testing.T) {
 	for range 11 {
 		mock.Expect().ReturnRaw(200, []byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"working"}],"stop_reason":"pause_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
 	}
-	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.ClaudeHaiku4_5)))
+	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.ClaudeHaiku4_5), crux.WithHTTPClient(mock.Client())))
 	_, err := s.Run(t.Context(), "hi")
 	require.ErrorContains(t, err, "continuations")
 	// One initial request plus ten continuations.
@@ -116,7 +116,7 @@ func TestGeminiSkipsEmptyParts(t *testing.T) {
 	t.Run("generate", func(t *testing.T) {
 		mock := cruxtest.NewMock()
 		mock.Expect().ReturnRaw(200, []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":""},{"text":"hello"},{}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2}}`))
-		s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.Gemini2_5Flash)))
+		s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.Gemini2_5Flash), crux.WithHTTPClient(mock.Client())))
 		out, err := s.Run(t.Context(), "hi")
 		require.NoError(t, err)
 		require.Equal(t, "hello", out)
@@ -130,7 +130,7 @@ func TestGeminiSkipsEmptyParts(t *testing.T) {
 			`{"candidates":[{"content":{"role":"model","parts":[{"text":"lo"}]}}]}`,
 			`{"candidates":[{"content":{"role":"model","parts":[{}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2}}`,
 		))
-		s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.Gemini2_5Flash)))
+		s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.Gemini2_5Flash), crux.WithHTTPClient(mock.Client())))
 		for _, err := range s.Stream(t.Context(), "hi") {
 			require.NoError(t, err)
 		}
@@ -149,7 +149,7 @@ func TestAnthropicEmptyToolOutputSendsNoEmptyText(t *testing.T) {
 	mock.Expect().ReturnToolCall("quiet", map[string]any{})
 	mock.Expect().ReturnText("done")
 	agent := newMockAgent(t, mock, crux.ClaudeHaiku4_5, crux.WithToolsRegistry([]string{"quiet"}, reg))
-	s := crux.MustSession(crux.NewSession(t.Context(), agent))
+	s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
 	out, err := s.Run(t.Context(), "go")
 	require.NoError(t, err)
 	require.Equal(t, "done", out)
@@ -181,9 +181,9 @@ func TestAnthropicAuthTokenIsNotAnAPIKey(t *testing.T) {
 
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnText("hi")
-	agent, err := crux.New("auth", crux.ClaudeHaiku4_5, crux.WithHTTPClient(mock.Client()))
+	agent, err := crux.New("auth", crux.ClaudeHaiku4_5)
 	require.NoError(t, err)
-	s := crux.MustSession(crux.NewSession(t.Context(), agent))
+	s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
 	_, err = s.Run(t.Context(), "hello")
 	require.NoError(t, err)
 
@@ -206,7 +206,7 @@ func TestUsageInputTokensIncludeCache(t *testing.T) {
 		t.Run(tc.model, func(t *testing.T) {
 			mock := cruxtest.NewMock()
 			mock.Expect().ReturnRaw(200, []byte(tc.body))
-			s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, tc.model)))
+			s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, tc.model), crux.WithHTTPClient(mock.Client())))
 			_, err := s.Run(t.Context(), "hi")
 			require.NoError(t, err)
 			usage := lastEntry(t, s).Usage
@@ -224,7 +224,7 @@ func TestMockUsageMatchesCruxUsage(t *testing.T) {
 		t.Run(model, func(t *testing.T) {
 			mock := cruxtest.NewMock()
 			mock.Expect().ReturnText("ok").WithUsage(cruxtest.TokenUsage{InputTokens: 100, OutputTokens: 5, CacheReadTokens: 30})
-			s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, model)))
+			s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, model), crux.WithHTTPClient(mock.Client())))
 			_, err := s.Run(t.Context(), "hi")
 			require.NoError(t, err)
 			usage := lastEntry(t, s).Usage
@@ -254,7 +254,7 @@ func TestSafetyStopsAreRefusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mock := cruxtest.NewMock()
 			mock.Expect().ReturnRaw(200, tc.body)
-			s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, tc.model)))
+			s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, tc.model), crux.WithHTTPClient(mock.Client())))
 			var err error
 			if tc.stream {
 				for _, err = range s.Stream(t.Context(), "hi") {
@@ -272,7 +272,7 @@ func TestSafetyStopsAreRefusals(t *testing.T) {
 	t.Run("gemini mock refusal", func(t *testing.T) {
 		mock := cruxtest.NewMock()
 		mock.Expect().ReturnRefusal("no")
-		s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.Gemini2_5Flash)))
+		s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.Gemini2_5Flash), crux.WithHTTPClient(mock.Client())))
 		_, err := s.Run(t.Context(), "hi")
 		require.ErrorIs(t, err, crux.ErrRefused)
 	})
@@ -282,8 +282,7 @@ func TestOllamaWebSearchNeedsRealKey(t *testing.T) {
 	for _, key := range []string{"OLLAMA_API_KEY", "OLLAMA_APIKEY", "OLLAMA_KEY"} {
 		t.Setenv(key, "")
 	}
-	mock := cruxtest.NewMock()
-	_, err := crux.New("ollama", "llama3", crux.WithProvider(crux.ProviderOllama), crux.WithHTTPClient(mock.Client()), crux.WithWebSearch())
+	_, err := crux.New("ollama", "llama3", crux.WithProvider(crux.ProviderOllama), crux.WithWebSearch())
 	require.ErrorContains(t, err, "Ollama API key is required")
 }
 
@@ -295,9 +294,9 @@ func TestNonObjectOutputSchema(t *testing.T) {
 	for _, provider := range []crux.Provider{crux.ProviderOpenAI, crux.ProviderXAI, crux.ProviderOpenrouter, crux.ProviderDeepSeek} {
 		t.Run(string(provider), func(t *testing.T) {
 			mock := cruxtest.NewMock(cruxtest.WithProvider(provider))
-			agent, err := crux.New("list", "test-model", append(mock.AgentOptions(), crux.WithProvider(provider), crux.WithOutputSchemaFrom[[]listItem]())...)
+			agent, err := crux.New("list", "test-model", crux.WithProvider(provider), crux.WithOutputSchemaFrom[[]listItem]())
 			require.NoError(t, err)
-			s := crux.MustSession(crux.NewSession(t.Context(), agent))
+			s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
 			_, err = s.Run(t.Context(), "list")
 			require.ErrorContains(t, err, "object at the root")
 			require.Equal(t, 0, mock.Calls())
@@ -307,7 +306,7 @@ func TestNonObjectOutputSchema(t *testing.T) {
 		mock := cruxtest.NewMock()
 		mock.Expect().ReturnText(`[{"name":"a"},{"name":"b"}]`)
 		agent := newMockAgent(t, mock, crux.Gemini2_5Flash, crux.WithOutputSchemaFrom[[]listItem]())
-		s := crux.MustSession(crux.NewSession(t.Context(), agent))
+		s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
 		var items []listItem
 		require.NoError(t, s.RunInto(t.Context(), &items, "list"))
 		require.Equal(t, []listItem{{"a"}, {"b"}}, items)
@@ -322,7 +321,7 @@ func TestOpenAIReasoningSummaryAndUnknownItems(t *testing.T) {
 		{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok","annotations":[]}]}
 	],"usage":{"input_tokens":1,"output_tokens":1}}`))
 	mock.Expect().ReturnText("again")
-	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.OpenAIGPT5_6Sol)))
+	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.OpenAIGPT5_6Sol), crux.WithHTTPClient(mock.Client())))
 	out, err := s.Run(t.Context(), "hi")
 	require.NoError(t, err)
 	require.Equal(t, "ok", out)
@@ -340,7 +339,7 @@ func TestAnthropicUnknownBlockIsKept(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnRaw(200, []byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"mystery_block","id":"m1"},{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
 	mock.Expect().ReturnText("again")
-	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.ClaudeHaiku4_5)))
+	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.ClaudeHaiku4_5), crux.WithHTTPClient(mock.Client())))
 	out, err := s.Run(t.Context(), "hi")
 	require.NoError(t, err)
 	require.Equal(t, "ok", out)
@@ -354,7 +353,7 @@ func TestGeminiOtherPartsAreKeptAndReplayed(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnRaw(200, []byte(`{"candidates":[{"content":{"role":"model","parts":[{"executableCode":{"language":"PYTHON","code":"print(1)"}},{"text":"ok"}]},"finishReason":"STOP"}]}`))
 	mock.Expect().ReturnText("again")
-	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.Gemini2_5Flash)))
+	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.Gemini2_5Flash), crux.WithHTTPClient(mock.Client())))
 	out, err := s.Run(t.Context(), "hi")
 	require.NoError(t, err)
 	require.Equal(t, "ok", out)
@@ -367,7 +366,7 @@ func TestGeminiOtherPartsAreKeptAndReplayed(t *testing.T) {
 func TestGeminiMaxTokensClamped(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnText("ok")
-	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.Gemini2_5Flash, crux.WithMaxTokens(math.MaxInt))))
+	s := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.Gemini2_5Flash, crux.WithMaxTokens(math.MaxInt)), crux.WithHTTPClient(mock.Client())))
 	_, err := s.Run(t.Context(), "hi")
 	require.NoError(t, err)
 	var body struct {

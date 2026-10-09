@@ -47,10 +47,9 @@ func TestMCPToolsInARun(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnToolCall("notes_list_notes", map[string]any{})
 	mock.Expect().ReturnToolCall("notes_add_note", map[string]any{"text": "call mom"})
-	agent := crux.Must(crux.New("assistant", crux.OpenAIGPT5_4,
-		append(mock.AgentOptions(), crux.WithToolsetsRegistry(reg, "notes"))...))
+	agent := crux.Must(crux.New("assistant", crux.OpenAIGPT5_4, crux.WithToolsetsRegistry(reg, "notes")))
 
-	s := crux.MustSession(crux.NewSession(t.Context(), agent))
+	s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
 	_, err = s.Run(t.Context(), "add a note")
 	require.ErrorIs(t, err, crux.ErrApprovalNeeded, "add_note is not read-only")
 	require.Zero(t, added.Load())

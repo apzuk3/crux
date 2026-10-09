@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"sync"
 	"unicode/utf8"
@@ -22,11 +23,12 @@ import (
 type Decider struct {
 	agent  *Agent
 	native bool
+	client *http.Client // nil uses the default client
 }
 
 // NewDecider returns a Decider for model. It takes the agent options that
 // configure a connection (WithProvider, WithAPIKey, WithBaseURL,
-// WithHTTPClient, WithMaxRetries) and WithInstructions, which every question
+// WithMaxRetries) and WithInstructions, which every question
 // is asked under. Models without a decision API also take sampling options
 // such as WithTemperature.
 func NewDecider(model string, opts ...AgentOption) (*Decider, error) {
@@ -51,6 +53,15 @@ func NewDecider(model string, opts ...AgentOption) (*Decider, error) {
 		return nil, fmt.Errorf("%q is a decision model and takes no sampling settings", model)
 	}
 	return d, nil
+}
+
+// WithHTTPClient returns a copy of d that sends its requests through client;
+// d is unchanged. Nil uses the default client. In tests, pass cruxtest's
+// Mock.Client.
+func (d *Decider) WithHTTPClient(client *http.Client) *Decider {
+	copied := *d
+	copied.client = client
+	return &copied
 }
 
 // MustDecider panics if err is not nil.
@@ -157,7 +168,7 @@ func (d *Decider) decideNatively(ctx context.Context, fields []decide.Field, inp
 		Model:      a.model,
 		APIKey:     a.apiKey,
 		BaseURL:    a.baseURL,
-		HTTPClient: a.httpClient,
+		HTTPClient: d.client,
 		MaxRetries: a.maxRetries,
 		State:      state,
 		Questions:  decide.Questions(fields, a.instructions),
@@ -239,7 +250,7 @@ func (d *Decider) decideWithOutput(ctx context.Context, fields []decide.Field, i
 		agent.instructions = "Answer every question about the user's input."
 	}
 
-	entries, err := agent.step(ctx, []Entry{entry}, nil, true)
+	entries, err := agent.step(ctx, d.client, []Entry{entry}, nil, true)
 	if err != nil {
 		return nil, err
 	}

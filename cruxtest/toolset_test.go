@@ -40,11 +40,10 @@ func TestAddToolsetWithRegistry(t *testing.T) {
 	mock.Expect().ReturnToolCall("multiply", map[string]any{"a": 5, "b": 4})
 	mock.Expect().ReturnText("20")
 
-	agent, err := crux.New("calc", crux.OpenAIGPT5_6Sol,
-		append(mock.AgentOptions(), crux.WithToolsetsRegistry(reg, "math"))...)
+	agent, err := crux.New("calc", crux.OpenAIGPT5_6Sol, crux.WithToolsetsRegistry(reg, "math"))
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	out, err := sess.Run(t.Context(), "(2+3)*4")
@@ -79,11 +78,10 @@ func TestFilesystemWriteNeedsApproval(t *testing.T) {
 	mock.Expect().ReturnToolCall("read_file", map[string]any{"path": "notes/todo.txt"})
 	mock.Expect().ReturnText("done")
 
-	agent, err := crux.New("writer", crux.OpenAIGPT5_6Sol,
-		append(mock.AgentOptions(), crux.WithToolsetsRegistry(reg, "filesystem"))...)
+	agent, err := crux.New("writer", crux.OpenAIGPT5_6Sol, crux.WithToolsetsRegistry(reg, "filesystem"))
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	_, err = sess.Run(t.Context(), "Write a todo")
@@ -116,13 +114,12 @@ func TestWithToolsetsCombinesWithTools(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnText("ok")
 
-	agent, err := crux.New("calc", crux.OpenAIGPT5_6Sol, append(mock.AgentOptions(),
+	agent, err := crux.New("calc", crux.OpenAIGPT5_6Sol,
 		crux.WithToolsRegistry([]string{"echo", "add"}, reg),
-		crux.WithToolsetsRegistry(reg, "math"),
-	)...)
+		crux.WithToolsetsRegistry(reg, "math"))
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	_, err = sess.Run(t.Context(), "hi")
 	require.NoError(t, err)
@@ -133,7 +130,7 @@ func TestWithToolsetsCombinesWithTools(t *testing.T) {
 	}
 	require.Equal(t, 1, strings.Count(body, `"name":"add"`), body)
 
-	_, err = crux.New("calc", crux.OpenAIGPT5_6Sol, append(mock.AgentOptions(), crux.WithToolsetsRegistry(reg, "nope"))...)
+	_, err = crux.New("calc", crux.OpenAIGPT5_6Sol, crux.WithToolsetsRegistry(reg, "nope"))
 	require.ErrorIs(t, err, crux.ErrToolNotFound)
 }
 
@@ -145,12 +142,11 @@ func TestFilesystemIndividualTools(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnText("ok")
 
-	agent, err := crux.New("reader", crux.OpenAIGPT5_6Sol, append(mock.AgentOptions(),
-		crux.WithToolsRegistry([]string{crux.FsReadFile, crux.FsGlob}, reg),
-	)...)
+	agent, err := crux.New("reader", crux.OpenAIGPT5_6Sol,
+		crux.WithToolsRegistry([]string{crux.FsReadFile, crux.FsGlob}, reg))
 	require.NoError(t, err)
 
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	_, err = sess.Run(t.Context(), "read something")
 	require.NoError(t, err)
@@ -171,10 +167,10 @@ func TestFilesystemAgentsFile(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnText("one")
 	mock.Expect().ReturnText("two")
-	agent, err := crux.New("coder", crux.OpenAIGPT5_6Sol, append(mock.AgentOptions(),
-		crux.WithInstructions("You are a coder."), crux.WithToolsetsRegistry(reg, "filesystem"))...)
+	agent, err := crux.New("coder", crux.OpenAIGPT5_6Sol,
+		crux.WithInstructions("You are a coder."), crux.WithToolsetsRegistry(reg, "filesystem"))
 	require.NoError(t, err)
-	sess, err := crux.NewSession(t.Context(), agent)
+	sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 
 	_, err = sess.Run(t.Context(), "hi")
@@ -198,10 +194,10 @@ func TestFilesystemAgentsFile(t *testing.T) {
 		require.NoError(t, crux.AddToolsetWithRegistry(reg, ts))
 		mock := cruxtest.NewMock()
 		mock.Expect().ReturnText("ok")
-		agent, err := crux.New("coder", crux.OpenAIGPT5_6Sol, append(mock.AgentOptions(),
-			crux.WithToolsRegistry([]string{"read_file"}, reg))...)
+		agent, err := crux.New("coder", crux.OpenAIGPT5_6Sol,
+			crux.WithToolsRegistry([]string{"read_file"}, reg))
 		require.NoError(t, err)
-		sess, err := crux.NewSession(t.Context(), agent)
+		sess, err := crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client()))
 		require.NoError(t, err)
 		_, err = sess.Run(t.Context(), "hi")
 		require.NoError(t, err)

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"reflect"
 	"slices"
 	"strings"
@@ -27,7 +26,6 @@ type Agent struct {
 	provider     Provider
 	apiKey       string
 	baseURL      string
-	httpClient   *http.Client
 	maxRetries   *int // nil uses the default of two retries
 
 	// Capabilities & Schemas
@@ -370,11 +368,6 @@ func WithBaseURL(url string) AgentOption {
 	return func(a *Agent) error { a.baseURL = url; return nil }
 }
 
-// WithHTTPClient configures a custom HTTP client for API requests across all providers.
-func WithHTTPClient(client *http.Client) AgentOption {
-	return func(a *Agent) error { a.httpClient = client; return nil }
-}
-
 // WithMaxRetries sets how many times a failed provider request is retried:
 // connection errors, timeouts, rate limits (429) and server errors, with
 // backoff and the provider's Retry-After. A rate limit or overload reported
@@ -687,7 +680,6 @@ func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {
 		fork.instructions = a.instructions
 		fork.provider = "" // set after opts, so an explicit WithProvider is detectable
 		fork.baseURL = a.baseURL
-		fork.httpClient = a.httpClient
 		fork.maxRetries = a.maxRetries
 		fork.outputSchema = a.outputSchema
 		fork.maxRepairs = a.maxRepairs

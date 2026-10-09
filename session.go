@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"net/http"
 	"reflect"
 	"slices"
 	"strings"
@@ -24,6 +25,7 @@ type Session struct {
 	agent    *Agent
 	logs     []Entry // cache of the entries the store has accepted
 	store    Store
+	client   *http.Client        // nil uses the default client
 	children map[string]*Session // subagent sessions waiting for approval, by openToolCall.key
 	onEntry  []func(context.Context, *Session, Entry)
 	entryMu  *sync.Mutex // serialises onEntry across the session and its subagents
@@ -73,6 +75,9 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 		session.parentID = parent.id
 		if session.store == nil {
 			session.store = parent.store
+		}
+		if session.client == nil {
+			session.client = parent.client
 		}
 		if len(parent.onEntry) > 0 {
 			// The parent's handlers see every descendant, before the child's own.
@@ -356,7 +361,7 @@ func (s *Session) run(ctx context.Context, inputs []any, emit chunkSink) (text s
 				return "", err
 			}
 			start = time.Now()
-			produced, err = s.agent.step(ctx, s.logs, sink, turn == 0 && userEntry != nil)
+			produced, err = s.agent.step(ctx, s.client, s.logs, sink, turn == 0 && userEntry != nil)
 			if err == nil {
 				break
 			}
@@ -986,6 +991,13 @@ func WithSessionLogs(logs []Entry) SessionOption {
 	return func(s *Session) error { s.logs = cloneEntries(logs); return nil }
 }
 
+// WithHTTPClient sends the session's provider requests through client,
+// including compaction and the sessions of its subagents, which inherit it.
+// Nil uses the default client. In tests, pass cruxtest's Mock.Client.
+func WithHTTPClient(client *http.Client) SessionOption {
+	return func(s *Session) error { s.client = client; return nil }
+}
+
 // WithStore persists the session in store. The default is a MemoryStore.
 func WithStore(store Store) SessionOption {
 	return func(s *Session) error {
@@ -1063,7 +1075,7 @@ func (s *Session) forkWith(ctx context.Context, from int, sessionOpts []SessionO
 		})
 	}
 
-	sessionOpts = append([]SessionOption{WithSessionLogs(forkedLogs), WithStore(s.store)}, sessionOpts...)
+	sessionOpts = append([]SessionOption{WithSessionLogs(forkedLogs), WithStore(s.store), WithHTTPClient(s.client)}, sessionOpts...)
 	return NewSession(ctx, clonedAgent, sessionOpts...)
 }
 
