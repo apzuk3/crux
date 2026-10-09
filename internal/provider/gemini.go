@@ -64,12 +64,55 @@ func geminiFunctionCalling(req *Request) *genai.FunctionCallingConfig {
 	return nil
 }
 
-// geminiStep returns the model's ordered parts with usage attached.
+// Gemini returns the model's ordered parts with usage attached.
 func Gemini(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 	contents, err := toGeminiContents(req.Log)
 	if err != nil {
 		return nil, err
 	}
+	config, err := geminiConfig(req)
+	if err != nil {
+		return nil, err
+	}
+	// The SDK constructor can fail, so initialization errors flow through Run.
+	client, err := newGeminiClient(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("gemini client: %w", err)
+	}
+	var response *genai.GenerateContentResponse
+	if emit == nil {
+		response, err = client.Models.GenerateContent(ctx, req.Model, contents, config)
+	} else {
+		response, err = streamGemini(ctx, client, req.Model, contents, config, emit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("gemini generate content: %w", geminiLimit(err))
+	}
+	candidate, err := geminiCandidate(response)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	produced, err := geminiItems(candidate, req.Seq, now)
+	if err != nil {
+		return nil, err
+	}
+	produced = ensureAnswer(produced, now)
+	last := &produced[len(produced)-1]
+	if err := attachGrounding(last, candidate.GroundingMetadata); err != nil {
+		return nil, err
+	}
+	if response.ResponseID != "" {
+		last.Response = &ResponseInfo{ID: response.ResponseID}
+	}
+	if usage := response.UsageMetadata; usage != nil {
+		last.Usage = geminiUsage(usage)
+	}
+	return produced, nil
+}
+
+// geminiConfig builds the generation config from req.
+func geminiConfig(req *Request) (*genai.GenerateContentConfig, error) {
 	tools, err := geminiTools(req.Tools)
 	if err != nil {
 		return nil, err
@@ -86,14 +129,7 @@ func Gemini(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 		config.ThinkingConfig = geminiThinking(req.Model, req.Reasoning)
 	}
 	if req.Search != nil {
-		config.Tools = append(config.Tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
-		if location := req.Search.Location; location != nil && location.Latitude != nil && location.Longitude != nil {
-			config.ToolConfig = &genai.ToolConfig{
-				RetrievalConfig: &genai.RetrievalConfig{
-					LatLng: &genai.LatLng{Latitude: location.Latitude, Longitude: location.Longitude},
-				},
-			}
-		}
+		setGeminiSearch(config, req.Search)
 	}
 	if req.Instructions != "" {
 		config.SystemInstruction = &genai.Content{Parts: []*genai.Part{genai.NewPartFromText(req.Instructions)}}
@@ -104,40 +140,51 @@ func Gemini(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 		}
 		config.ToolConfig.FunctionCallingConfig = calling
 	}
-	if schema := req.OutputSchema; schema != nil {
-		// Gemini before 3 rejects structured output combined with tools, so
-		// the schema goes into the instructions instead; crux validates the
-		// answer either way.
-		// https://ai.google.dev/gemini-api/docs/structured-output
-		if len(config.Tools) == 0 || geminiStructuredOutputWithTools(req.Model) {
-			config.ResponseMIMEType = "application/json"
-			config.ResponseJsonSchema = schema
-		} else {
-			raw, err := json.Marshal(schema)
-			if err != nil {
-				return nil, fmt.Errorf("marshal output schema: %w", err)
-			}
-			if config.SystemInstruction == nil {
-				config.SystemInstruction = &genai.Content{}
-			}
-			config.SystemInstruction.Parts = append(config.SystemInstruction.Parts,
-				genai.NewPartFromText("Your final answer must be only JSON matching this JSON schema: "+string(raw)))
+	if err := applyGeminiOutputSchema(config, req); err != nil {
+		return nil, err
+	}
+	return config, nil
+}
+
+func setGeminiSearch(config *genai.GenerateContentConfig, search *Search) {
+	config.Tools = append(config.Tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
+	if location := search.Location; location != nil && location.Latitude != nil && location.Longitude != nil {
+		config.ToolConfig = &genai.ToolConfig{
+			RetrievalConfig: &genai.RetrievalConfig{
+				LatLng: &genai.LatLng{Latitude: location.Latitude, Longitude: location.Longitude},
+			},
 		}
 	}
-	// The SDK constructor can fail, so initialization errors flow through Run.
-	client, err := newGeminiClient(ctx, req)
+}
+
+// applyGeminiOutputSchema asks for structured output. Gemini before 3 rejects
+// it combined with tools, so the schema then goes into the instructions
+// instead; crux validates the answer either way.
+// https://ai.google.dev/gemini-api/docs/structured-output
+func applyGeminiOutputSchema(config *genai.GenerateContentConfig, req *Request) error {
+	schema := req.OutputSchema
+	if schema == nil {
+		return nil
+	}
+	if len(config.Tools) == 0 || geminiStructuredOutputWithTools(req.Model) {
+		config.ResponseMIMEType = "application/json"
+		config.ResponseJsonSchema = schema
+		return nil
+	}
+	raw, err := json.Marshal(schema)
 	if err != nil {
-		return nil, fmt.Errorf("gemini client: %w", err)
+		return fmt.Errorf("marshal output schema: %w", err)
 	}
-	var response *genai.GenerateContentResponse
-	if emit == nil {
-		response, err = client.Models.GenerateContent(ctx, req.Model, contents, config)
-	} else {
-		response, err = streamGemini(ctx, client, req.Model, contents, config, emit)
+	if config.SystemInstruction == nil {
+		config.SystemInstruction = &genai.Content{}
 	}
-	if err != nil {
-		return nil, fmt.Errorf("gemini generate content: %w", geminiLimit(err))
-	}
+	config.SystemInstruction.Parts = append(config.SystemInstruction.Parts,
+		genai.NewPartFromText("Your final answer must be only JSON matching this JSON schema: "+string(raw)))
+	return nil
+}
+
+// geminiCandidate returns the response's candidate when it completed.
+func geminiCandidate(response *genai.GenerateContentResponse) (*genai.Candidate, error) {
 	if len(response.Candidates) == 0 {
 		// A blocked prompt has no candidates, only prompt feedback:
 		// https://ai.google.dev/api/generate-content#BlockReason
@@ -159,7 +206,11 @@ func Gemini(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 	default:
 		return nil, fmt.Errorf("gemini response did not complete: finish reason %q", candidate.FinishReason)
 	}
-	now := time.Now().UTC()
+	return candidate, nil
+}
+
+// geminiItems converts the candidate's parts, in order.
+func geminiItems(candidate *genai.Candidate, seq int, now time.Time) ([]Item, error) {
 	var parts []*genai.Part
 	if candidate.Content != nil {
 		parts = foldGeminiSignatures(candidate.Content.Parts)
@@ -176,45 +227,42 @@ func Gemini(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 		// Gemini can omit call IDs. Keep a local reference without changing
 		// the original part replayed to the API.
 		if entry.ToolCall != nil && entry.ToolCall.ID == "" {
-			entry.ToolCall.ID = fmt.Sprintf("gemini-call-%d-%d", req.Seq, i)
+			entry.ToolCall.ID = fmt.Sprintf("gemini-call-%d-%d", seq, i)
 		}
 		produced = append(produced, entry)
 	}
-	if !hasAnswerOrCall(produced) {
-		// The model may stop (finish reason STOP) without saying anything;
-		// that is still a final answer, and its usage must not be lost.
-		// https://ai.google.dev/api/generate-content#FinishReason
-		produced = append(produced, Item{At: now, Kind: KindAssistant})
-	}
-	if candidate.GroundingMetadata != nil {
-		raw, err := json.Marshal(candidate.GroundingMetadata)
-		if err != nil {
-			return nil, fmt.Errorf("marshal Gemini grounding metadata: %w", err)
-		}
-		last := &produced[len(produced)-1]
-		if last.Opaque == nil {
-			last.Opaque = make(map[string][]byte)
-		}
-		last.Opaque[geminiGroundingMetadataOpaqueKey] = raw
-	}
-	if response.ResponseID != "" {
-		produced[len(produced)-1].Response = &ResponseInfo{ID: response.ResponseID}
-	}
-	if usage := response.UsageMetadata; usage != nil {
-		var cacheRead int
-		if usage.CachedContentTokenCount > 0 {
-			cacheRead = int(usage.CachedContentTokenCount)
-		}
-		// PromptTokenCount already includes cached content; tool-use prompt
-		// tokens (such as search results) are counted separately.
-		// https://ai.google.dev/api/generate-content#UsageMetadata
-		produced[len(produced)-1].Usage = &Usage{
-			InputTokens:     int(usage.PromptTokenCount + usage.ToolUsePromptTokenCount),
-			OutputTokens:    int(usage.CandidatesTokenCount + usage.ThoughtsTokenCount),
-			CacheReadTokens: cacheRead,
-		}
-	}
 	return produced, nil
+}
+
+// attachGrounding keeps the grounding metadata on the last item.
+func attachGrounding(last *Item, metadata *genai.GroundingMetadata) error {
+	if metadata == nil {
+		return nil
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("marshal Gemini grounding metadata: %w", err)
+	}
+	if last.Opaque == nil {
+		last.Opaque = make(map[string][]byte)
+	}
+	last.Opaque[geminiGroundingMetadataOpaqueKey] = raw
+	return nil
+}
+
+// geminiUsage converts the usage. PromptTokenCount already includes cached
+// content; tool-use prompt tokens (such as search results) are counted
+// separately. https://ai.google.dev/api/generate-content#UsageMetadata
+func geminiUsage(usage *genai.GenerateContentResponseUsageMetadata) *Usage {
+	var cacheRead int
+	if usage.CachedContentTokenCount > 0 {
+		cacheRead = int(usage.CachedContentTokenCount)
+	}
+	return &Usage{
+		InputTokens:     int(usage.PromptTokenCount + usage.ToolUsePromptTokenCount),
+		OutputTokens:    int(usage.CandidatesTokenCount + usage.ThoughtsTokenCount),
+		CacheReadTokens: cacheRead,
+	}
 }
 
 // geminiStructuredOutputWithTools reports whether the model accepts a response
@@ -272,53 +320,13 @@ func streamGemini(ctx context.Context, client *genai.Client, model string, conte
 		if chunk == nil {
 			return nil, errors.New("gemini returned a nil stream chunk")
 		}
-		if chunk.UsageMetadata != nil {
-			response.UsageMetadata = chunk.UsageMetadata
-		}
-		if chunk.ResponseID != "" {
-			response.ResponseID = chunk.ResponseID
-		}
-		if chunk.PromptFeedback != nil {
-			response.PromptFeedback = chunk.PromptFeedback
-		}
+		mergeGeminiChunkMeta(response, chunk)
 		if len(chunk.Candidates) == 0 {
 			continue
 		}
 		sawCandidate = true
-		current := chunk.Candidates[0]
-		if current.FinishReason != "" {
-			candidate.FinishReason = current.FinishReason
-		}
-		if current.GroundingMetadata != nil {
-			candidate.GroundingMetadata = current.GroundingMetadata
-		}
-		if current.Content == nil {
-			continue
-		}
-		for _, part := range current.Content.Parts {
-			if part == nil {
-				return nil, errors.New("gemini returned a nil part")
-			}
-			if geminiPartEmpty(part) {
-				continue
-			}
-			parts := candidate.Content.Parts
-			if n := len(parts); n > 0 && canMergeGeminiText(parts[n-1], part) {
-				// A streamed answer arrives as many text parts; keep them as the
-				// one part a non-streamed response has, signed by the last.
-				parts[n-1].Text += part.Text
-				parts[n-1].ThoughtSignature = part.ThoughtSignature
-			} else {
-				merged := *part
-				candidate.Content.Parts = append(parts, &merged)
-			}
-			kind := ChunkText
-			if part.Thought {
-				kind = ChunkReasoning
-			}
-			if err := emitChunk(emit, kind, part.Text); err != nil {
-				return nil, err
-			}
+		if err := mergeGeminiCandidate(candidate, chunk.Candidates[0], emit); err != nil {
+			return nil, err
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -330,6 +338,68 @@ func streamGemini(ctx context.Context, client *genai.Client, model string, conte
 		response.Candidates = nil
 	}
 	return response, nil
+}
+
+// mergeGeminiChunkMeta keeps the response-level fields of a streamed chunk.
+func mergeGeminiChunkMeta(response, chunk *genai.GenerateContentResponse) {
+	if chunk.UsageMetadata != nil {
+		response.UsageMetadata = chunk.UsageMetadata
+	}
+	if chunk.ResponseID != "" {
+		response.ResponseID = chunk.ResponseID
+	}
+	if chunk.PromptFeedback != nil {
+		response.PromptFeedback = chunk.PromptFeedback
+	}
+}
+
+// mergeGeminiCandidate folds a streamed candidate into the accumulated one
+// and emits its parts.
+func mergeGeminiCandidate(candidate, current *genai.Candidate, emit Emit) error {
+	if current.FinishReason != "" {
+		candidate.FinishReason = current.FinishReason
+	}
+	if current.GroundingMetadata != nil {
+		candidate.GroundingMetadata = current.GroundingMetadata
+	}
+	if current.Content == nil {
+		return nil
+	}
+	for _, part := range current.Content.Parts {
+		if part == nil {
+			return errors.New("gemini returned a nil part")
+		}
+		if geminiPartEmpty(part) {
+			continue
+		}
+		appendGeminiPart(candidate.Content, part)
+		if err := emitGeminiPart(emit, part); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// appendGeminiPart adds a streamed part to content. A streamed answer arrives
+// as many text parts; they are kept as the one part a non-streamed response
+// has, signed by the last.
+func appendGeminiPart(content *genai.Content, part *genai.Part) {
+	parts := content.Parts
+	if n := len(parts); n > 0 && canMergeGeminiText(parts[n-1], part) {
+		parts[n-1].Text += part.Text
+		parts[n-1].ThoughtSignature = part.ThoughtSignature
+		return
+	}
+	merged := *part
+	content.Parts = append(parts, &merged)
+}
+
+func emitGeminiPart(emit Emit, part *genai.Part) error {
+	kind := ChunkText
+	if part.Thought {
+		kind = ChunkReasoning
+	}
+	return emitChunk(emit, kind, part.Text)
 }
 
 // foldGeminiSignatures drops empty parts and moves the signature of a part
@@ -462,29 +532,47 @@ func toGeminiContents(log []Item) ([]*genai.Content, error) {
 			continue
 		}
 		if len(parts) == 1 && geminiSignatureOnly(parts[0]) {
-			// Sessions recorded before signatures were folded into the part
-			// they sign may hold one on its own; attach it to that part.
-			if n := len(contents); n > 0 && contents[n-1].Role == "model" {
-				if prev := contents[n-1].Parts[len(contents[n-1].Parts)-1]; len(prev.ThoughtSignature) == 0 {
-					prev.ThoughtSignature = parts[0].ThoughtSignature
-				}
-			}
+			attachOrphanSignature(contents, parts[0].ThoughtSignature)
 			continue
 		}
 		if e.Kind == KindToolCall && e.ToolCall != nil {
 			calls[e.ToolCall.ID] = parts[0].FunctionCall
 		}
-		role := "model"
-		if e.Kind == KindUser || e.Kind == KindToolResult {
-			role = "user"
-		}
-		if len(contents) == 0 || contents[len(contents)-1].Role != role {
-			contents = append(contents, &genai.Content{Role: role})
-		}
-		last := contents[len(contents)-1]
-		last.Parts = append(last.Parts, parts...)
+		contents = appendGeminiContent(contents, geminiRole(e.Kind), parts)
 	}
 	return contents, nil
+}
+
+// attachOrphanSignature moves a signature on its own onto the last model
+// part. Sessions recorded before signatures were folded into the part they
+// sign may hold one on its own.
+func attachOrphanSignature(contents []*genai.Content, signature []byte) {
+	n := len(contents)
+	if n == 0 || contents[n-1].Role != "model" {
+		return
+	}
+	parts := contents[n-1].Parts
+	if prev := parts[len(parts)-1]; len(prev.ThoughtSignature) == 0 {
+		prev.ThoughtSignature = signature
+	}
+}
+
+func geminiRole(kind Kind) string {
+	if kind == KindUser || kind == KindToolResult {
+		return "user"
+	}
+	return "model"
+}
+
+// appendGeminiContent adds parts to the last content when it has the same
+// role, or starts a new one.
+func appendGeminiContent(contents []*genai.Content, role string, parts []*genai.Part) []*genai.Content {
+	if len(contents) == 0 || contents[len(contents)-1].Role != role {
+		contents = append(contents, &genai.Content{Role: role})
+	}
+	last := contents[len(contents)-1]
+	last.Parts = append(last.Parts, parts...)
+	return contents
 }
 
 // geminiStandInSignature is the documented "skip_thought_signature_validator"
@@ -502,68 +590,88 @@ func toGeminiParts(e Item, calls map[string]*genai.FunctionCall) ([]*genai.Part,
 		}
 		return []*genai.Part{&part}, nil
 	}
-	var parts []*genai.Part
 	switch e.Kind {
 	case KindUser, KindAssistant:
-		for _, part := range e.Content {
-			if text, ok := part.InlineText(); ok {
-				parts = append(parts, genai.NewPartFromText(text))
-				continue
-			}
-			if part.Kind == ContentKindFile {
-				if part.URL != "" {
-					parts = append(parts, genai.NewPartFromURI(part.URL, part.MIME))
-				} else {
-					parts = append(parts, genai.NewPartFromBytes(part.Data, part.MIME))
-				}
-				continue
-			}
-			if part.Kind != ContentKindText && part.Kind != ContentKindRefusal {
-				return nil, fmt.Errorf("unsupported content part kind %q", part.Kind)
-			}
-			if strings.TrimSpace(part.Text) == "" {
-				continue // Gemini rejects empty text parts.
-			}
-			parts = append(parts, genai.NewPartFromText(part.Text))
-		}
+		return geminiContentParts(e.Content)
 	case KindReasoning:
 		// Reasoning without signed provider data cannot be replayed.
+		return nil, nil
 	case KindToolCall:
 		if e.ToolCall == nil {
 			return nil, errors.New("tool call entry carries no tool call")
 		}
-		call := e.ToolCall
-		args := make(map[string]any)
-		if len(call.Args) > 0 {
-			if err := json.Unmarshal(call.objectArgs(), &args); err != nil {
-				return nil, fmt.Errorf("decode Gemini function arguments: %w", err)
-			}
-		}
-		// History from another provider has no thought signature, which
-		// Gemini 3 requires on function calls; this is the documented stand-in:
-		// https://ai.google.dev/gemini-api/docs/thought-signatures
-		parts = []*genai.Part{{
-			FunctionCall:     &genai.FunctionCall{ID: call.ID, Name: call.Name, Args: args},
-			ThoughtSignature: geminiStandInSignature,
-		}}
+		return geminiFunctionCallPart(e.ToolCall)
 	case KindToolResult:
 		if e.ToolResult == nil {
 			return nil, errors.New("tool result entry carries no tool result")
 		}
-		r := e.ToolResult
-		call := calls[r.CallID]
-		if call == nil {
-			return nil, fmt.Errorf("Gemini function response has no matching call %q", r.CallID)
-		}
-		response := map[string]any{"output": r.Output}
-		if r.Error != "" {
-			response = map[string]any{"error": r.Error}
-		}
-		parts = []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: response}}}
+		return geminiFunctionResponsePart(e.ToolResult, calls)
 	default:
 		return nil, fmt.Errorf("unsupported entry kind %d for Gemini part", e.Kind)
 	}
+}
+
+// geminiContentParts renders a message's parts as text and file parts.
+func geminiContentParts(content []ContentPart) ([]*genai.Part, error) {
+	var parts []*genai.Part
+	for _, part := range content {
+		if text, ok := part.InlineText(); ok {
+			parts = append(parts, genai.NewPartFromText(text))
+			continue
+		}
+		if part.Kind == ContentKindFile {
+			parts = append(parts, geminiFilePart(part))
+			continue
+		}
+		if part.Kind != ContentKindText && part.Kind != ContentKindRefusal {
+			return nil, fmt.Errorf("unsupported content part kind %q", part.Kind)
+		}
+		if strings.TrimSpace(part.Text) == "" {
+			continue // Gemini rejects empty text parts.
+		}
+		parts = append(parts, genai.NewPartFromText(part.Text))
+	}
 	return parts, nil
+}
+
+func geminiFilePart(part ContentPart) *genai.Part {
+	if part.URL != "" {
+		return genai.NewPartFromURI(part.URL, part.MIME)
+	}
+	return genai.NewPartFromBytes(part.Data, part.MIME)
+}
+
+// geminiFunctionCallPart renders a tool call. History from another provider
+// has no thought signature, which Gemini 3 requires on function calls; the
+// part carries the documented stand-in:
+// https://ai.google.dev/gemini-api/docs/thought-signatures
+func geminiFunctionCallPart(call *ToolCall) ([]*genai.Part, error) {
+	args := make(map[string]any)
+	if len(call.Args) > 0 {
+		if err := json.Unmarshal(call.objectArgs(), &args); err != nil {
+			return nil, fmt.Errorf("decode Gemini function arguments: %w", err)
+		}
+	}
+	return []*genai.Part{{
+		FunctionCall:     &genai.FunctionCall{ID: call.ID, Name: call.Name, Args: args},
+		ThoughtSignature: geminiStandInSignature,
+	}}, nil
+}
+
+// geminiFunctionResponsePart renders a tool result, named after the call it
+// answers.
+func geminiFunctionResponsePart(r *ToolResult, calls map[string]*genai.FunctionCall) ([]*genai.Part, error) {
+	call := calls[r.CallID]
+	if call == nil {
+		return nil, fmt.Errorf("Gemini function response has no matching call %q", r.CallID)
+	}
+	text, isError := r.text()
+	key := "output"
+	if isError {
+		key = "error"
+	}
+	response := map[string]any{key: text}
+	return []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: response}}}, nil
 }
 
 // geminiLimit returns err as a *LimitError when Gemini reported a limit. Its

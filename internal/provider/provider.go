@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -106,6 +107,11 @@ type Location struct {
 	Timezone  string
 	Latitude  *float64
 	Longitude *float64
+}
+
+// empty reports whether the location names no place at all.
+func (l *Location) empty() bool {
+	return l.Country == "" && l.City == "" && l.Region == "" && l.Timezone == ""
 }
 
 // Kind is the kind of an Item: the kinds of crux log entries the model sees.
@@ -216,6 +222,15 @@ type ToolResult struct {
 	CallID string
 	Output string
 	Error  string
+}
+
+// text returns what the model reads back and whether the call failed: the
+// error when there is one, otherwise the output.
+func (r *ToolResult) text() (string, bool) {
+	if r.Error != "" {
+		return r.Error, true
+	}
+	return r.Output, false
 }
 
 type ResponseInfo struct {
@@ -329,6 +344,44 @@ func hasAnswerOrCall(items []Item) bool {
 	return slices.ContainsFunc(items, func(e Item) bool {
 		return e.Kind == KindAssistant || e.Kind == KindToolCall
 	})
+}
+
+// ensureAnswer appends an empty assistant item to a turn with no answer or
+// tool call. Every provider may end a turn without saying anything; that is
+// still a final answer, and its usage must not be lost.
+// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons
+// https://ai.google.dev/api/generate-content#FinishReason
+// https://platform.openai.com/docs/api-reference/responses/object
+func ensureAnswer(produced []Item, now time.Time) []Item {
+	if !hasAnswerOrCall(produced) {
+		produced = append(produced, Item{At: now, Kind: KindAssistant})
+	}
+	return produced
+}
+
+// finishTurn ends a model turn: the last item carries the response and its
+// usage, which is reported per response rather than spread over the items.
+func finishTurn(produced []Item, now time.Time, id string, usage *Usage) []Item {
+	produced = ensureAnswer(produced, now)
+	last := &produced[len(produced)-1]
+	last.Response = &ResponseInfo{ID: id}
+	last.Usage = usage
+	return produced
+}
+
+// streamEnd checks how a stream ended: its own error first, then the context,
+// then whether the terminal event arrived, which incomplete describes.
+func streamEnd(ctx context.Context, streamErr error, complete bool, incomplete string) error {
+	if streamErr != nil {
+		return streamErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !complete {
+		return errors.New(incomplete)
+	}
+	return nil
 }
 
 // normalizeToolArgs keeps arguments that are not valid JSON as a JSON string,
