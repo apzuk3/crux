@@ -11,8 +11,6 @@ A small Go toolkit for building LLM agents that run the same way on every major 
 
 > Status: `v0.0.x`. The API may still change between releases.
 
-![crux.CLI: an agent calls tools on Gemini, then the chat switches to Grok mid-conversation](.github/assets/demo.gif)
-
 ## Install
 
 ```sh
@@ -82,6 +80,8 @@ No API key? Run the same agent on a local model with [Ollama](https://ollama.com
 ```go
 crux.CLI(agent) // blocks until the user quits
 ```
+
+![crux.CLI: an agent calls tools on Gemini, then the chat switches to Grok mid-conversation](.github/assets/demo.gif)
 
 Session options work too: `crux.CLI(agent, crux.WithStore(store), crux.WithSessionID(id))` reopens a stored conversation with its history.
 
