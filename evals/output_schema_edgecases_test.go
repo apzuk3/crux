@@ -15,7 +15,6 @@ package evals
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -67,34 +66,6 @@ type MarkdownWrappedOutput struct {
 // Shared helpers
 // -----------------------------------------------------------------------------
 
-func hasOutputSchemaAPIKey(provider crux.Provider) bool {
-	var envVars []string
-	switch provider {
-	case crux.ProviderOpenAI:
-		envVars = []string{"OPENAI_API_KEY", "OPENAI_APIKEY", "OPENAI_KEY"}
-	case crux.ProviderAnthropic:
-		envVars = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_APIKEY", "ANTHROPIC_KEY", "ANTHROPIC_AUTH_TOKEN"}
-	case crux.ProviderGoogle:
-		envVars = []string{"GOOGLE_API_KEY", "GOOGLE_APIKEY", "GOOGLE_KEY", "GEMINI_API_KEY", "GEMINI_APIKEY", "GEMINI_KEY"}
-	case crux.ProviderXAI:
-		envVars = []string{"XAI_API_KEY", "XAI_APIKEY", "XAI_KEY"}
-	case crux.ProviderDeepSeek:
-		envVars = []string{"DEEPSEEK_API_KEY", "DEEPSEEK_APIKEY", "DEEPSEEK_KEY"}
-	case crux.ProviderOpenrouter:
-		envVars = []string{"OPENROUTER_API_KEY", "OPENROUTER_APIKEY", "OPENROUTER_KEY"}
-	case crux.ProviderOllama:
-		envVars = []string{"OLLAMA_API_KEY", "OLLAMA_APIKEY", "OLLAMA_KEY", "OLLAMA_HOST"}
-	default:
-		return false
-	}
-	for _, env := range envVars {
-		if os.Getenv(env) != "" {
-			return true
-		}
-	}
-	return false
-}
-
 func newAgent(t *testing.T, name string, provider crux.Provider, model string, opts ...crux.AgentOption) *crux.Agent {
 	t.Helper()
 	opts = append([]crux.AgentOption{
@@ -142,7 +113,7 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			if !hasOutputSchemaAPIKey(tc.provider) {
+			if !hasAPIKey(tc.provider) {
 				t.Skipf("No API key for %s, skipping live test", tc.provider)
 			}
 

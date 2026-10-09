@@ -36,7 +36,6 @@ package evals
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -67,34 +66,18 @@ func setupTaxTools(t *testing.T) crux.ToolsRegistry {
 	return reg
 }
 
-func hasProviderAPIKey(provider crux.Provider) bool {
-	var envVars []string
-	switch provider {
-	case crux.ProviderOpenAI:
-		envVars = []string{"OPENAI_API_KEY", "OPENAI_APIKEY", "OPENAI_KEY"}
-	case crux.ProviderAnthropic:
-		envVars = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_APIKEY", "ANTHROPIC_KEY", "ANTHROPIC_AUTH_TOKEN"}
-	case crux.ProviderGoogle:
-		envVars = []string{"GOOGLE_API_KEY", "GOOGLE_APIKEY", "GOOGLE_KEY", "GEMINI_API_KEY", "GEMINI_APIKEY", "GEMINI_KEY"}
-	}
-	for _, env := range envVars {
-		if os.Getenv(env) != "" {
-			return true
-		}
-	}
-	return false
+type forkCase struct {
+	name        string
+	fromProv    crux.Provider
+	toProv      crux.Provider
+	sourceModel string
+	targetModel string
 }
 
 func Test_CrossProviderForking(t *testing.T) {
 	t.Parallel()
 
-	testCases := []struct {
-		name        string
-		fromProv    crux.Provider
-		toProv      crux.Provider
-		sourceModel string
-		targetModel string
-	}{
+	testCases := []forkCase{
 		{
 			name:        "Anthropic_to_OpenAI",
 			fromProv:    crux.ProviderAnthropic,
@@ -141,72 +124,65 @@ func Test_CrossProviderForking(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			if !hasProviderAPIKey(tc.fromProv) {
-				t.Skipf("Skipping %s: API key for source provider %s not set in environment", tc.name, tc.fromProv)
-			}
-			if !hasProviderAPIKey(tc.toProv) {
-				t.Skipf("Skipping %s: API key for target provider %s not set in environment", tc.name, tc.toProv)
-			}
-
-			tools := setupTaxTools(t)
-			agent, err := crux.New(
-				"tax-calculator",
-				tc.sourceModel,
-				crux.WithInstructions(turn1Instructions),
-				crux.WithToolsRegistry([]string{"calculate_tax"}, tools),
-				crux.WithMaxTurns(10),
-			)
-			require.NoError(t, err)
-
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-
-			sess, err := crux.NewSession(ctx, agent)
-			require.NoError(t, err)
-
-			// Turn 1 on Provider A
-			out1, err := sess.Run(ctx, turn1Prompt)
-			require.NoError(t, err)
-			require.NotEmpty(t, out1)
-			t.Logf("[%s] Turn 1 out: %s", tc.name, out1)
-
-			// Verify Provider A invoked calculate_tax tool
-			var sawTaxToolCall bool
-			for _, entry := range sess.Logs() {
-				if entry.Kind == crux.KindToolCall && entry.ToolCall != nil && entry.ToolCall.Name == "calculate_tax" {
-					sawTaxToolCall = true
-					t.Logf("[%s] ToolCall Args: %s", tc.name, string(entry.ToolCall.Args))
-				}
-				if entry.Kind == crux.KindToolResult && entry.ToolResult != nil {
-					t.Logf("[%s] ToolResult Output: %s", tc.name, entry.ToolResult.Output)
-				}
-			}
-			require.True(t, sawTaxToolCall, "expected Turn 1 to invoke calculate_tax tool")
-
-			// Fork onto Provider B
-			forkedSession, err := sess.Fork(
-				ctx,
-				crux.WithModel(tc.targetModel),
-				crux.WithInstructions(forkedInstructions),
-			)
-			require.NoError(t, err)
-
-			// Verify forking strips Opaque provider-specific entries without crashing
-			for _, entry := range forkedSession.Logs() {
-				require.Empty(t, entry.Opaque, "expected Opaque entries to be stripped across providers")
-			}
-
-			// Turn 2 on Provider B
-			out2, err := forkedSession.Run(ctx, forkedPrompt)
-			require.NoError(t, err)
-			require.NotEmpty(t, out2)
-			t.Logf("[%s] Turn 2 out: %s", tc.name, out2)
-
-			// Verify Provider B parsed replayed history and emitted verified total
-			require.Contains(t, strings.ToUpper(out2), "VERIFIED")
-			require.Contains(t, out2, "110")
+			runForkCase(t, tc)
 		})
 	}
+}
+
+func runForkCase(t *testing.T, tc forkCase) {
+	t.Parallel()
+
+	if !hasAPIKey(tc.fromProv) {
+		t.Skipf("Skipping %s: API key for source provider %s not set in environment", tc.name, tc.fromProv)
+	}
+	if !hasAPIKey(tc.toProv) {
+		t.Skipf("Skipping %s: API key for target provider %s not set in environment", tc.name, tc.toProv)
+	}
+
+	tools := setupTaxTools(t)
+	agent, err := crux.New(
+		"tax-calculator",
+		tc.sourceModel,
+		crux.WithInstructions(turn1Instructions),
+		crux.WithToolsRegistry([]string{"calculate_tax"}, tools),
+		crux.WithMaxTurns(10),
+	)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	sess, err := crux.NewSession(ctx, agent)
+	require.NoError(t, err)
+
+	// Turn 1 on Provider A
+	out1, err := sess.Run(ctx, turn1Prompt)
+	require.NoError(t, err)
+	require.NotEmpty(t, out1)
+	t.Logf("[%s] Turn 1 out: %s", tc.name, out1)
+
+	// Verify Provider A invoked calculate_tax tool
+	requireToolCalled(t, tc.name, sess.Logs(), "calculate_tax")
+	logToolResults(t, tc.name, sess.Logs())
+
+	// Fork onto Provider B
+	forkedSession, err := sess.Fork(
+		ctx,
+		crux.WithModel(tc.targetModel),
+		crux.WithInstructions(forkedInstructions),
+	)
+	require.NoError(t, err)
+
+	// Verify forking strips Opaque provider-specific entries without crashing
+	requireNoOpaque(t, forkedSession.Logs())
+
+	// Turn 2 on Provider B
+	out2, err := forkedSession.Run(ctx, forkedPrompt)
+	require.NoError(t, err)
+	require.NotEmpty(t, out2)
+	t.Logf("[%s] Turn 2 out: %s", tc.name, out2)
+
+	// Verify Provider B parsed replayed history and emitted verified total
+	require.Contains(t, strings.ToUpper(out2), "VERIFIED")
+	require.Contains(t, out2, "110")
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 
 	"crux.foo"
 )
@@ -177,40 +178,54 @@ func calculateTripCost(ctx context.Context, args costArgs) (TripCost, error) {
 	if args.PartySize <= 0 || len(args.ActivityIDs) == 0 {
 		return TripCost{}, fmt.Errorf("provide a positive party_size and at least one activity")
 	}
-	var selected Transport
-	for _, option := range transports {
-		if option.ID == args.TransportID {
-			selected = option
-			break
-		}
-	}
-	if selected.ID == "" {
+	transport, ok := findTransport(args.TransportID)
+	if !ok {
 		return TripCost{}, fmt.Errorf("unknown transport ID %q; use search_transport first", args.TransportID)
 	}
-	cost := TripCost{Currency: "USD", TransportCents: selected.PricePerPersonCents * args.PartySize}
+	cost := TripCost{Currency: "USD", TransportCents: transport.PricePerPersonCents * args.PartySize}
 	seen := make(map[string]bool)
 	for _, id := range args.ActivityIDs {
 		if seen[id] {
 			return TripCost{}, fmt.Errorf("duplicate activity ID %q", id)
 		}
 		seen[id] = true
-		var selectedActivity Activity
-		for _, activity := range activities {
-			if activity.ID == id {
-				selectedActivity = activity
-				break
-			}
+		cents, err := activityCost(id, transport.City, args.PartySize)
+		if err != nil {
+			return TripCost{}, err
 		}
-		if selectedActivity.ID == "" || selectedActivity.City != selected.City {
-			return TripCost{}, fmt.Errorf("activity %q must be a known activity in %s", id, selected.City)
-		}
-		if remainingSpots[id] < args.PartySize {
-			return TripCost{}, fmt.Errorf("activity %q has insufficient availability; choose a replacement", id)
-		}
-		cost.ActivityCents += selectedActivity.PricePerPersonCents * args.PartySize
+		cost.ActivityCents += cents
 	}
 	cost.TotalCents = cost.TransportCents + cost.ActivityCents
 	return cost, nil
+}
+
+func findTransport(id string) (Transport, bool) {
+	i := slices.IndexFunc(transports, func(t Transport) bool { return t.ID == id })
+	if i < 0 {
+		return Transport{}, false
+	}
+	return transports[i], true
+}
+
+func findActivity(id string) (Activity, bool) {
+	i := slices.IndexFunc(activities, func(a Activity) bool { return a.ID == id })
+	if i < 0 {
+		return Activity{}, false
+	}
+	return activities[i], true
+}
+
+// activityCost is the price of one activity for the whole party, after
+// checking that it is in the destination city and has room.
+func activityCost(id, city string, partySize int) (int, error) {
+	activity, ok := findActivity(id)
+	if !ok || activity.City != city {
+		return 0, fmt.Errorf("activity %q must be a known activity in %s", id, city)
+	}
+	if remainingSpots[id] < partySize {
+		return 0, fmt.Errorf("activity %q has insufficient availability; choose a replacement", id)
+	}
+	return activity.PricePerPersonCents * partySize, nil
 }
 
 func init() {

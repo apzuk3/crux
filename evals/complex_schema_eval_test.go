@@ -34,7 +34,6 @@ package evals
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -63,34 +62,10 @@ const (
 	complexSchemaPrompt       = `Project 'Apollo' started on 2026-01-10 with budget 50000.50. Lead is Sarah (sarah@example.com). Milestones: 'Alpha' due 2026-03-01 (completed), 'Beta' due 2026-06-01 (pending). Assigned tags: ["infra", "core"].`
 )
 
-func hasComplexSchemaAPIKey(provider crux.Provider) bool {
-	var envVars []string
-	switch provider {
-	case crux.ProviderOpenAI:
-		envVars = []string{"OPENAI_API_KEY", "OPENAI_APIKEY", "OPENAI_KEY"}
-	case crux.ProviderAnthropic:
-		envVars = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_APIKEY", "ANTHROPIC_KEY", "ANTHROPIC_AUTH_TOKEN"}
-	case crux.ProviderGoogle:
-		envVars = []string{"GOOGLE_API_KEY", "GOOGLE_APIKEY", "GOOGLE_KEY", "GEMINI_API_KEY", "GEMINI_APIKEY", "GEMINI_KEY"}
-	case crux.ProviderXAI:
-		envVars = []string{"XAI_API_KEY", "XAI_APIKEY", "XAI_KEY"}
-	}
-	for _, env := range envVars {
-		if os.Getenv(env) != "" {
-			return true
-		}
-	}
-	return false
-}
-
 func Test_ComplexStructuredOutputValidation(t *testing.T) {
 	t.Parallel()
 
-	testCases := []struct {
-		name     string
-		provider crux.Provider
-		model    string
-	}{
+	testCases := []providerCase{
 		{
 			name:     "OpenAI_GPT4_1Mini",
 			provider: crux.ProviderOpenAI,
@@ -115,73 +90,87 @@ func Test_ComplexStructuredOutputValidation(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			if !hasComplexSchemaAPIKey(tc.provider) {
-				t.Skipf("Skipping %s: API key for provider %s not set in environment", tc.name, tc.provider)
-			}
-
-			agent, err := crux.New(
-				"entity-extractor",
-				tc.model,
-				crux.WithInstructions(complexSchemaInstructions),
-				crux.WithOutputSchemaFrom[ProjectReport](),
-				crux.WithMaxTurns(5),
-			)
-			if err != nil && strings.Contains(err.Error(), "API key for provider") {
-				t.Skipf("Skipping %s: %v", tc.name, err)
-			}
-			require.NoError(t, err)
-
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-
-			sess, err := crux.NewSession(ctx, agent)
-			require.NoError(t, err)
-
-			var report ProjectReport
-			err = sess.RunInto(ctx, &report, complexSchemaPrompt)
-			require.NoError(t, err, "sess.RunInto should execute and decode response into ProjectReport struct")
-
-			// Validate top-level scalar and numeric fields
-			require.Equal(t, "Apollo", report.Name, "project name should match")
-			require.Equal(t, "2026-01-10", report.StartDate, "start date should match")
-			require.InDelta(t, 50000.50, report.Budget, 0.01, "budget float should decode accurately")
-			require.Equal(t, "sarah@example.com", report.LeadEmail, "lead email should match")
-
-			// Validate string slice
-			require.Len(t, report.Tags, 2, "tags slice should contain exactly 2 tags")
-			require.ElementsMatch(t, []string{"infra", "core"}, report.Tags, "tags should match expected values")
-
-			// Validate nested struct slice
-			require.Len(t, report.Milestones, 2, "milestones slice should contain exactly 2 milestones")
-
-			milestoneMap := make(map[string]Milestone)
-			for _, m := range report.Milestones {
-				milestoneMap[m.Name] = m
-			}
-
-			alpha, hasAlpha := milestoneMap["Alpha"]
-			require.True(t, hasAlpha, "expected milestone 'Alpha' to be present")
-			require.Equal(t, "2026-03-01", alpha.DueDate, "Alpha due date should match")
-			require.True(t, alpha.Completed, "Alpha should be completed")
-
-			beta, hasBeta := milestoneMap["Beta"]
-			require.True(t, hasBeta, "expected milestone 'Beta' to be present")
-			require.Equal(t, "2026-06-01", beta.DueDate, "Beta due date should match")
-			require.False(t, beta.Completed, "Beta should not be completed")
-
-			// Verify session history integrity
-			logs := sess.Logs()
-			require.NotEmpty(t, logs, "session history should contain entries")
-			var hasAssistantEntry bool
-			for _, entry := range logs {
-				if entry.Kind == crux.KindAssistant {
-					hasAssistantEntry = true
-					require.NotEmpty(t, entry.Text(), "assistant entry text should not be empty")
-				}
-			}
-			require.True(t, hasAssistantEntry, "session history must record an assistant response entry")
+			runComplexSchemaCase(t, tc)
 		})
 	}
+}
+
+func runComplexSchemaCase(t *testing.T, tc providerCase) {
+	t.Parallel()
+
+	if !hasAPIKey(tc.provider) {
+		t.Skipf("Skipping %s: API key for provider %s not set in environment", tc.name, tc.provider)
+	}
+
+	agent, err := crux.New(
+		"entity-extractor",
+		tc.model,
+		crux.WithInstructions(complexSchemaInstructions),
+		crux.WithOutputSchemaFrom[ProjectReport](),
+		crux.WithMaxTurns(5),
+	)
+	if err != nil && strings.Contains(err.Error(), "API key for provider") {
+		t.Skipf("Skipping %s: %v", tc.name, err)
+	}
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	sess, err := crux.NewSession(ctx, agent)
+	require.NoError(t, err)
+
+	var report ProjectReport
+	err = sess.RunInto(ctx, &report, complexSchemaPrompt)
+	require.NoError(t, err, "sess.RunInto should execute and decode response into ProjectReport struct")
+
+	requireProjectReport(t, report)
+
+	// Verify session history integrity
+	requireAssistantEntry(t, sess.Logs())
+}
+
+func requireProjectReport(t *testing.T, report ProjectReport) {
+	t.Helper()
+
+	// Validate top-level scalar and numeric fields
+	require.Equal(t, "Apollo", report.Name, "project name should match")
+	require.Equal(t, "2026-01-10", report.StartDate, "start date should match")
+	require.InDelta(t, 50000.50, report.Budget, 0.01, "budget float should decode accurately")
+	require.Equal(t, "sarah@example.com", report.LeadEmail, "lead email should match")
+
+	// Validate string slice
+	require.Len(t, report.Tags, 2, "tags slice should contain exactly 2 tags")
+	require.ElementsMatch(t, []string{"infra", "core"}, report.Tags, "tags should match expected values")
+
+	// Validate nested struct slice
+	require.Len(t, report.Milestones, 2, "milestones slice should contain exactly 2 milestones")
+
+	milestoneMap := make(map[string]Milestone)
+	for _, m := range report.Milestones {
+		milestoneMap[m.Name] = m
+	}
+
+	alpha, hasAlpha := milestoneMap["Alpha"]
+	require.True(t, hasAlpha, "expected milestone 'Alpha' to be present")
+	require.Equal(t, "2026-03-01", alpha.DueDate, "Alpha due date should match")
+	require.True(t, alpha.Completed, "Alpha should be completed")
+
+	beta, hasBeta := milestoneMap["Beta"]
+	require.True(t, hasBeta, "expected milestone 'Beta' to be present")
+	require.Equal(t, "2026-06-01", beta.DueDate, "Beta due date should match")
+	require.False(t, beta.Completed, "Beta should not be completed")
+}
+
+func requireAssistantEntry(t *testing.T, logs []crux.Entry) {
+	t.Helper()
+	require.NotEmpty(t, logs, "session history should contain entries")
+	var hasAssistantEntry bool
+	for _, entry := range logs {
+		if entry.Kind == crux.KindAssistant {
+			hasAssistantEntry = true
+			require.NotEmpty(t, entry.Text(), "assistant entry text should not be empty")
+		}
+	}
+	require.True(t, hasAssistantEntry, "session history must record an assistant response entry")
 }

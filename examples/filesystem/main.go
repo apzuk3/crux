@@ -29,8 +29,26 @@ func run() error {
 		dir = os.Args[1]
 	}
 
-	if err := crux.AddToolset(crux.Filesystem(dir)); err != nil {
+	session, err := newFilesAgentSession(ctx, dir)
+	if err != nil {
 		return err
+	}
+
+	in := bufio.NewScanner(os.Stdin)
+	fmt.Print("> ")
+	for in.Scan() {
+		answer, err := answerWithApprovals(ctx, session, in, in.Text())
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s\n> ", answer)
+	}
+	return in.Err()
+}
+
+func newFilesAgentSession(ctx context.Context, dir string) (*crux.Session, error) {
+	if err := crux.AddToolset(crux.Filesystem(dir)); err != nil {
+		return nil, err
 	}
 
 	agent, err := crux.New("files", crux.OpenAIGPT5_4,
@@ -39,36 +57,31 @@ func run() error {
 		crux.WithMaxTurns(30),
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	session, err := crux.NewSession(ctx, agent)
-	if err != nil {
-		return err
-	}
+	return crux.NewSession(ctx, agent)
+}
 
-	in := bufio.NewScanner(os.Stdin)
-	fmt.Print("> ")
-	for in.Scan() {
-		answer, err := session.Run(ctx, in.Text())
-		for errors.Is(err, crux.ErrApprovalNeeded) {
-			for _, call := range session.PendingApprovals() {
-				fmt.Printf("Allow %s %s? [y/N] ", call.Name, call.Args)
-				if in.Scan() && strings.EqualFold(strings.TrimSpace(in.Text()), "y") {
-					err = session.Approve(ctx, call.ID)
-				} else {
-					err = session.Reject(ctx, call.ID, "the user declined")
-				}
-				if err != nil {
-					return err
-				}
+// answerWithApprovals runs one prompt, asking on the terminal about each tool
+// call that needs approval, and returns the answer.
+func answerWithApprovals(ctx context.Context, session *crux.Session, in *bufio.Scanner, prompt string) (string, error) {
+	answer, err := session.Run(ctx, prompt)
+	for errors.Is(err, crux.ErrApprovalNeeded) {
+		for _, call := range session.PendingApprovals() {
+			if err := decide(ctx, session, in, call); err != nil {
+				return "", err
 			}
-			answer, err = session.Resume(ctx)
 		}
-		if err != nil {
-			return err
-		}
-		fmt.Printf("%s\n> ", answer)
+		answer, err = session.Resume(ctx)
 	}
-	return in.Err()
+	return answer, err
+}
+
+func decide(ctx context.Context, session *crux.Session, in *bufio.Scanner, call *crux.ToolCall) error {
+	fmt.Printf("Allow %s %s? [y/N] ", call.Name, call.Args)
+	if in.Scan() && strings.EqualFold(strings.TrimSpace(in.Text()), "y") {
+		return session.Approve(ctx, call.ID)
+	}
+	return session.Reject(ctx, call.ID, "the user declined")
 }
