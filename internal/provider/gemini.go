@@ -242,7 +242,7 @@ func geminiMajorVersion(model string) int {
 // thinking budget on Gemini 2.5, which has no levels. Thought summaries are
 // requested so they can stream.
 // https://ai.google.dev/gemini-api/docs/thinking
-func geminiThinking(model string, effort string) *genai.ThinkingConfig {
+func geminiThinking(model, effort string) *genai.ThinkingConfig {
 	if major := geminiMajorVersion(model); major > 0 && major < 3 {
 		budgets := map[string]int32{
 			ReasoningOff: 0, ReasoningLow: 1024, ReasoningMedium: 8192, ReasoningHigh: 24576, ReasoningMax: 24576,

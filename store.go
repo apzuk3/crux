@@ -113,6 +113,9 @@ type sessionRecord struct {
 
 func (sessionRecord) TableName() string { return "crux_sessions" }
 
+// bySessionID is the GORM condition that selects one session's log entries.
+const bySessionID = "session_id = ?"
+
 type logRecord struct {
 	ID        uint64    `gorm:"primaryKey;autoIncrement"`
 	SessionID dbUUID    `gorm:"not null;uniqueIndex:idx_crux_session_logs_seq"`
@@ -224,7 +227,7 @@ func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Ent
 		if len(entries) > 0 {
 			var last uint64
 			if err := tx.Model(&logRecord{}).
-				Where("session_id = ?", dbUUID(sessionID)).
+				Where(bySessionID, dbUUID(sessionID)).
 				Select("COALESCE(MAX(seq), 0)").
 				Scan(&last).Error; err != nil {
 				return fmt.Errorf("read last log seq: %w", err)
@@ -268,7 +271,7 @@ func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Ent
 	// the second with a driver-specific error. Report it as a conflict.
 	var last uint64
 	if s.db.WithContext(ctx).Model(&logRecord{}).
-		Where("session_id = ?", dbUUID(sessionID)).
+		Where(bySessionID, dbUUID(sessionID)).
 		Select("COALESCE(MAX(seq), 0)").
 		Scan(&last).Error == nil && entries[0].Seq <= last {
 		return fmt.Errorf("%w: session %s already has entry %d", ErrSessionConflict, sessionID, entries[0].Seq)
@@ -292,7 +295,7 @@ func (s *GORMStore) Get(ctx context.Context, sessionID uuid.UUID) ([]Entry, erro
 
 	var records []logRecord
 	if err := s.db.WithContext(ctx).
-		Where("session_id = ?", dbUUID(sessionID)).
+		Where(bySessionID, dbUUID(sessionID)).
 		Order("seq ASC, id ASC").
 		Find(&records).Error; err != nil {
 		return nil, fmt.Errorf("get session logs: %w", err)

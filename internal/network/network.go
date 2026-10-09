@@ -779,7 +779,7 @@ func (t *Tools) connectWebSocket(ctx context.Context, in ConnectInput) (string, 
 	conn.SetReadLimit(netMaxBuffer)
 
 	buf := newNetBuffer()
-	readCtx, cancelRead := context.WithCancel(context.Background())
+	readCtx, cancelRead := context.WithCancel(context.WithoutCancel(ctx))
 	h := &netHandle{kind: in.Protocol, local: "", remote: in.Address, buf: buf}
 	var once sync.Once
 	h.close = func() error {

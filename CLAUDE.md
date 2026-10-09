@@ -1,1 +1,1 @@
-@AGENT.md
+@CONTRIBUTING.md

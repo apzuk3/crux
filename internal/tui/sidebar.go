@@ -31,7 +31,7 @@ func (m *model) sidebarTools() []sidebarRow {
 func (m *model) renderSidebar(w, h int) string {
 	th := m.th
 	inner := w - 4
-	section := func(title string, extra string) string {
+	section := func(title, extra string) string {
 		t := th.label.Render(strings.ToUpper(title))
 		if extra != "" {
 			t += " " + th.faintText.Render(extra)
