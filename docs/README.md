@@ -1,14 +1,9 @@
----
-name: crux
-description: How to build LLM agents in Go with crux (crux.foo). Use whenever code imports or adds crux.foo, or when creating agents, tools, sessions, MCP servers, approvals, structured output or typed decisions with it.
----
-
-# crux
+# crux documentation
 
 crux is a Go toolkit for LLM agents that run the same way on OpenAI,
 Anthropic, Google Gemini, xAI, DeepSeek, OpenRouter, Ollama and decision models
-such as TypeSafe's Jev. It is young and changes between versions, so trust this
-skill and `go doc crux.foo` over anything you remember.
+such as TypeSafe's Jev. It is young and changes between versions, so trust these
+docs and `go doc crux.foo` over anything you remember.
 
 ## How crux is structured
 
@@ -92,19 +87,19 @@ other setup is needed.
 - Constructors return errors; `crux.Must`, `crux.MustSession` and
   `crux.MustDecider` panic instead, for `main` and examples.
 
-## Reference
+## Topics
 
 Read the page for what you are doing:
 
-- [references/tools.md](references/tools.md): registering tools, schemas, tool options (approval, timeouts, ordering, runtime schemas), session state.
-- [references/toolsets.md](references/toolsets.md): grouping tools, the built-in filesystem and network toolsets.
-- [references/mcp.md](references/mcp.md): using MCP servers' tools, local or remote, with OAuth.
-- [references/skills.md](references/skills.md): giving agents Agent Skills.
-- [references/sessions.md](references/sessions.md): running, streaming, inputs and files, persistence, resuming, the log, forking, long conversations.
-- [references/structured-output.md](references/structured-output.md): typed answers from an agent.
-- [references/decisions.md](references/decisions.md): classification, routing and yes/no with `Decide[T]`.
-- [references/approvals.md](references/approvals.md): tools that wait for a human.
-- [references/multi-agent.md](references/multi-agent.md): subagents and agents that spawn agents.
-- [references/providers.md](references/providers.md): models, providers, keys, reasoning, tool choice, web search.
-- [references/errors.md](references/errors.md): the sentinel errors.
-- [references/testing.md](references/testing.md): testing agents without API keys.
+- [tools.md](tools.md): registering tools, schemas, tool options (approval, timeouts, ordering, runtime schemas), session state.
+- [toolsets.md](toolsets.md): grouping tools, the built-in filesystem and network toolsets.
+- [mcp.md](mcp.md): using MCP servers' tools, local or remote, with OAuth.
+- [skills.md](skills.md): giving agents Agent Skills.
+- [sessions.md](sessions.md): running, streaming, inputs and files, persistence, resuming, the log, forking, long conversations.
+- [structured-output.md](structured-output.md): typed answers from an agent.
+- [decisions.md](decisions.md): classification, routing and yes/no with `Decide[T]`.
+- [approvals.md](approvals.md): tools that wait for a human.
+- [multi-agent.md](multi-agent.md): subagents and agents that spawn agents.
+- [providers.md](providers.md): models, providers, keys, reasoning, tool choice, web search.
+- [errors.md](errors.md): the sentinel errors.
+- [testing.md](testing.md): testing agents without API keys.

@@ -87,8 +87,7 @@
 //
 // # More documentation
 //
-// The skills/crux directory of this module is a guide for coding agents: how
-// crux is structured, the rules that matter and a page per topic. Read
-// skills/crux/SKILL.md in the module (under $(go env GOMODCACHE)/crux.foo@<version>),
-// or install the directory as an Agent Skill in your project.
+// The docs directory of this module explains how crux is structured and works,
+// with a page per topic: https://github.com/apzuk3/crux/tree/main/docs, or
+// docs/README.md in the module ($(go env GOMODCACHE)/crux.foo@<version>).
 package crux

@@ -2,7 +2,7 @@
 
 Thanks for helping. crux is a small Go toolkit whose main goal is developer experience: the common path should be obvious, and users should never have to wire many pieces together. This file explains the design and the rules the code follows; read it before larger changes. It is also the context coding agents load when they work on crux (`CLAUDE.md` imports it).
 
-The root [AGENTS.md](AGENTS.md) is not for contributors: it points coding agents that *use* crux to the docs in [skills/crux](skills/crux/SKILL.md).
+The root [AGENTS.md](AGENTS.md) is not for contributors: it points coding agents that *use* crux to the [docs](docs/README.md).
 
 ## Before you start
 
@@ -18,13 +18,13 @@ A cross-platform Go agent development kit. **The primary goal is developer exper
 
 ## Principles (non-negotiable)
 
-- **One flat package.** Everything a user needs comes from `import "crux.foo"`. Do not create subpackages for features (no `crux/store/...`, `crux/tools/...`). `cruxtest` (test helpers), `internal/` (implementation details users never import), `examples/`, `evals/` and `skills/` (documentation for users' coding agents, no Go code) are the only other directories.
+- **One flat package.** Everything a user needs comes from `import "crux.foo"`. Do not create subpackages for features (no `crux/store/...`, `crux/tools/...`). `cruxtest` (test helpers), `internal/` (implementation details users never import), `examples/`, `evals/` and `docs/` (user documentation, no Go code) are the only other directories.
 - **Root holds the API; `internal/` holds the machinery.** The root package keeps every exported identifier and the code bound to `Agent`/`Session` internals (run loop, registry, stores, options). Code that doesn't need them lives in `internal/<pkg>`: provider wire code, the schema engine, toolset implementations, MCP OAuth. Internal packages never import `crux` (it would be a cycle) and define their own plain types; a thin root file adapts (`provider.go` for providers, `cli.go` for the TUI, `toolset.go`/`mcp*.go` for toolsets). Public types stay defined in root, not aliased from `internal`, so `go doc` shows them whole. Moving a built-in tool's input struct must not change its schema, because agent IDs hash tool definitions.
 - **Pure Go, no cgo.** The `crux` package must build and run with `CGO_ENABLED=0`. Never import a cgo SQLite driver (such as `mattn/go-sqlite3`) or any library that needs cgo or loads native libraries. GORM itself is fine because it's pure Go. Users bring their own GORM driver; tests use the pure-Go `github.com/glebarez/sqlite`. CI enforces this.
 - **Small public API.** Don't export something unless users need it. Internal mechanisms stay unexported (for example, session parent tracking). Removing an export later is a breaking change.
 - **Works with zero configuration.** `crux.New(name, model)` + `crux.NewSession(ctx, agent)` + `session.Run(ctx, input)` must work with only an API key in the environment.
 - **Discuss before redesigning public APIs.** The owner wants to talk through design changes (especially tools, sessions and stores) before code is written. Bug fixes and internal changes can go ahead.
-- **Keep the user docs current.** `skills/crux/` is how coding agents learn crux, and their training data is out of date. A change to public API or behaviour updates the matching page in `skills/crux/references/` (and `SKILL.md` when it changes the basics) in the same pull request. `docs_test.go` checks that the skill parses and its links resolve.
+- **Keep the docs current.** `docs/` is how users and their coding agents learn crux, and agents' training data is out of date. A change to public API or behaviour updates the matching page in `docs/` (and `docs/README.md` when it changes the basics) in the same pull request. `docs_test.go` checks that the links in `AGENTS.md` and `docs/` resolve.
 
 ## Core concepts and intentional design decisions
 
@@ -135,7 +135,7 @@ Run the evals your change affects if you touched provider wire code.
 | `cruxtest/` | mock transport for tests |
 | `examples/` | runnable examples (need real API keys) |
 | `evals/` | live evals (`-tags evals`) |
-| `skills/crux/` | the Agent Skill that teaches users' coding agents crux: `SKILL.md` (structure, rules, index) and `references/*.md` (one page per topic); `AGENTS.md` points to it |
+| `docs/` | user documentation: `README.md` (how crux is structured and works, rules, index) and one page per topic; `AGENTS.md` points to it |
 
 ## Pull requests
 
