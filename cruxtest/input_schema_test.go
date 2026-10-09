@@ -42,10 +42,10 @@ func TestWithInputSchema(t *testing.T) {
 			mock.Expect().ReturnToolCall("search", map[string]any{"query": "x", "extra": true})
 			mock.Expect().ReturnText("done")
 
-			a, err := crux.New("docs", provider.model, append(mock.AgentOptions(), crux.WithProvider(provider.provider),
-				crux.WithToolsRegistry([]string{"search"}, reg))...)
+			a, err := crux.New("docs", provider.model, crux.WithProvider(provider.provider),
+				crux.WithToolsRegistry([]string{"search"}, reg))
 			require.NoError(t, err)
-			s, err := crux.NewSession(t.Context(), a)
+			s, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 			require.NoError(t, err)
 			_, err = s.Run(t.Context(), "look it up")
 			require.NoError(t, err)
@@ -76,8 +76,8 @@ func TestWithInputSchemaMapInput(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnToolCall("echo", map[string]any{"a": 1})
 	mock.Expect().ReturnText("done")
-	a := crux.Must(crux.New("e", crux.OpenAIGPT5_4, append(mock.AgentOptions(), crux.WithToolsRegistry([]string{"echo"}, reg))...))
-	s := crux.MustSession(crux.NewSession(t.Context(), a))
+	a := crux.Must(crux.New("e", crux.OpenAIGPT5_4, crux.WithToolsRegistry([]string{"echo"}, reg)))
+	s := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client())))
 	_, err := s.Run(t.Context(), "go")
 	require.NoError(t, err)
 	logs := s.Logs()

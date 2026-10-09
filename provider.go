@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"crux.foo/internal/provider"
 	"crux.foo/internal/schema"
@@ -77,7 +78,7 @@ func inferProvider(modelName string) Provider {
 // removed from the error, because provider SDKs print the request URL.
 // first reports the first request after new input, the only one WithToolChoice
 // applies to.
-func (a *Agent) step(ctx context.Context, log []Entry, emit chunkSink, first bool) ([]Entry, error) {
+func (a *Agent) step(ctx context.Context, client *http.Client, log []Entry, emit chunkSink, first bool) ([]Entry, error) {
 	spec, ok := providerSpecs[a.provider]
 	if !ok {
 		return nil, fmt.Errorf("unsupported provider %q", a.provider)
@@ -86,6 +87,7 @@ func (a *Agent) step(ctx context.Context, log []Entry, emit chunkSink, first boo
 	if err != nil {
 		return nil, redactURLSecrets(err, a.baseURL)
 	}
+	req.HTTPClient = client
 	var sink provider.Emit
 	emitted := false
 	if emit != nil {
@@ -154,7 +156,6 @@ func (a *Agent) wireRequest(log []Entry, first bool) (*provider.Request, error) 
 		Instructions: a.instructions,
 		APIKey:       a.apiKey,
 		BaseURL:      a.baseURL,
-		HTTPClient:   a.httpClient,
 		MaxTokens:    a.maxTokens,
 		Temperature:  a.temperature,
 		Reasoning:    string(a.reasoning),

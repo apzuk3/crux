@@ -25,10 +25,10 @@ func approvalAgents(t *testing.T, mock *cruxtest.Mock) (*crux.Agent, *atomic.Int
 		return "deleted " + in.Path, nil, nil
 	}, crux.WithApprovalNeeded(true))
 
-	worker := crux.Must(crux.New("worker", crux.OpenAIGPT5_4, append(mock.AgentOptions(),
-		crux.WithToolsRegistry([]string{"delete_file"}, reg))...))
-	coordinator := crux.Must(crux.New("coordinator", crux.OpenAIGPT5_4, append(mock.AgentOptions(),
-		crux.WithSubAgent(worker, "Does file work"))...))
+	worker := crux.Must(crux.New("worker", crux.OpenAIGPT5_4,
+		crux.WithToolsRegistry([]string{"delete_file"}, reg)))
+	coordinator := crux.Must(crux.New("coordinator", crux.OpenAIGPT5_4,
+		crux.WithSubAgent(worker, "Does file work")))
 	return coordinator, &deleted
 }
 
@@ -38,7 +38,7 @@ func TestSubagentApprovalReachesParent(t *testing.T) {
 	mock.Expect().ReturnToolCall("delete_file", map[string]any{"path": "a.txt"})
 	coordinator, deleted := approvalAgents(t, mock)
 
-	s := crux.MustSession(crux.NewSession(t.Context(), coordinator))
+	s := crux.MustSession(crux.NewSession(t.Context(), coordinator, crux.WithHTTPClient(mock.Client())))
 	_, err := s.Run(t.Context(), "clean up")
 	require.ErrorIs(t, err, crux.ErrApprovalNeeded)
 	require.Zero(t, deleted.Load())
@@ -79,7 +79,7 @@ func TestSubagentRejection(t *testing.T) {
 	mock.Expect().ReturnToolCall("delete_file", map[string]any{"path": "a.txt"})
 	coordinator, deleted := approvalAgents(t, mock)
 
-	s := crux.MustSession(crux.NewSession(t.Context(), coordinator))
+	s := crux.MustSession(crux.NewSession(t.Context(), coordinator, crux.WithHTTPClient(mock.Client())))
 	_, err := s.Run(t.Context(), "clean up")
 	require.ErrorIs(t, err, crux.ErrApprovalNeeded)
 	require.NoError(t, s.Reject(t.Context(), s.PendingApprovals()[0].ID, "keep it"))
@@ -104,13 +104,13 @@ func TestSubagentApprovalSurvivesReload(t *testing.T) {
 	mock.Expect().ReturnToolCall("delete_file", map[string]any{"path": "b.txt"})
 	coordinator, deleted := approvalAgents(t, mock)
 
-	first := crux.MustSession(crux.NewSession(t.Context(), coordinator, crux.WithStore(store)))
+	first := crux.MustSession(crux.NewSession(t.Context(), coordinator, crux.WithStore(store), crux.WithHTTPClient(mock.Client())))
 	_, err := first.Run(t.Context(), "clean up")
 	require.ErrorIs(t, err, crux.ErrApprovalNeeded)
 	require.Len(t, first.PendingApprovals(), 2)
 
 	// Another process loads the session and decides.
-	loaded := crux.MustSession(crux.NewSession(t.Context(), coordinator, crux.WithStore(store), crux.WithSessionID(first.ID())))
+	loaded := crux.MustSession(crux.NewSession(t.Context(), coordinator, crux.WithStore(store), crux.WithSessionID(first.ID()), crux.WithHTTPClient(mock.Client())))
 	pending := loaded.PendingApprovals()
 	require.Len(t, pending, 2)
 	var paths []string
@@ -141,9 +141,9 @@ func TestSubagentWithoutApprovalsIsUnchanged(t *testing.T) {
 	mock.Expect().ReturnText("hi")
 	mock.Expect().ReturnText("helper said hi")
 
-	helper := crux.Must(crux.New("helper", crux.OpenAIGPT5_4, mock.AgentOptions()...))
-	parent := crux.Must(crux.New("parent", crux.OpenAIGPT5_4, append(mock.AgentOptions(), crux.WithSubAgent(helper, "Helps"))...))
-	s := crux.MustSession(crux.NewSession(t.Context(), parent))
+	helper := crux.Must(crux.New("helper", crux.OpenAIGPT5_4))
+	parent := crux.Must(crux.New("parent", crux.OpenAIGPT5_4, crux.WithSubAgent(helper, "Helps")))
+	s := crux.MustSession(crux.NewSession(t.Context(), parent, crux.WithHTTPClient(mock.Client())))
 	out, err := s.Run(t.Context(), "go")
 	require.NoError(t, err)
 	require.Equal(t, "helper said hi", out)

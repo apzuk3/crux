@@ -16,7 +16,7 @@ import (
 
 func newMockAgent(t *testing.T, mock *cruxtest.Mock, model string, opts ...crux.AgentOption) *crux.Agent {
 	t.Helper()
-	agent, err := crux.New("test-agent", model, append(mock.AgentOptions(), opts...)...)
+	agent, err := crux.New("test-agent", model, opts...)
 	require.NoError(t, err)
 	return agent
 }
@@ -32,7 +32,7 @@ func TestToolPanicIsReportedToModel(t *testing.T) {
 	mock.Expect().ReturnText("The tool failed.")
 
 	agent := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithToolsRegistry([]string{"explode"}, reg))
-	session := crux.MustSession(crux.NewSession(t.Context(), agent))
+	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
 
 	out, err := session.Run(t.Context(), "go")
 	require.NoError(t, err)
@@ -60,7 +60,7 @@ func TestMaxTurnsIsSentinel(t *testing.T) {
 
 	agent := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol,
 		crux.WithToolsRegistry([]string{"noop"}, reg), crux.WithMaxTurns(2))
-	session := crux.MustSession(crux.NewSession(t.Context(), agent))
+	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
 
 	_, err := session.Run(t.Context(), "go")
 	require.ErrorIs(t, err, crux.ErrMaxTurns)
@@ -72,7 +72,7 @@ func TestRefusalIsSentinel(t *testing.T) {
 			mock := cruxtest.NewMock()
 			mock.Expect().ReturnRefusal("no")
 
-			session := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, model)))
+			session := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, model), crux.WithHTTPClient(mock.Client())))
 			_, err := session.Run(t.Context(), "do something bad")
 			require.ErrorIs(t, err, crux.ErrRefused)
 		})
@@ -90,7 +90,7 @@ func TestSessionUsageSumsAllRequests(t *testing.T) {
 	mock.Expect().ReturnText("done").WithUsage(cruxtest.TokenUsage{InputTokens: 15, OutputTokens: 3})
 
 	agent := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithToolsRegistry([]string{"noop"}, reg))
-	session := crux.MustSession(crux.NewSession(t.Context(), agent))
+	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
 	_, err := session.Run(t.Context(), "go")
 	require.NoError(t, err)
 
@@ -132,7 +132,7 @@ func TestMaxTokensAndTemperatureReachTheWire(t *testing.T) {
 			mock.Expect().ReturnText("hi")
 
 			agent := newMockAgent(t, mock, tc.model, crux.WithMaxTokens(321), crux.WithTemperature(0.25))
-			session := crux.MustSession(crux.NewSession(t.Context(), agent))
+			session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
 			_, err := session.Run(t.Context(), "hello")
 			require.NoError(t, err)
 
@@ -148,7 +148,7 @@ func TestAnthropicDefaultMaxTokens(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnText("hi")
 
-	session := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.ClaudeHaiku4_5)))
+	session := crux.MustSession(crux.NewSession(t.Context(), newMockAgent(t, mock, crux.ClaudeHaiku4_5), crux.WithHTTPClient(mock.Client())))
 	_, err := session.Run(t.Context(), "hello")
 	require.NoError(t, err)
 
@@ -162,18 +162,17 @@ func TestSubAgentTakesTaskAndReturnsOutput(t *testing.T) {
 		Text string `json:"text"`
 	}
 
-	child := cruxtest.NewMock()
-	child.Expect().ReturnJSON(Brief{Text: "brief"})
-	subAgent, err := crux.New("researcher", crux.OpenAIGPT5_6Sol,
-		append(child.AgentOptions(), crux.WithOutputSchemaFrom[Brief]())...)
+	subAgent, err := crux.New("researcher", crux.OpenAIGPT5_6Sol, crux.WithOutputSchemaFrom[Brief]())
 	require.NoError(t, err)
 
-	parent := cruxtest.NewMock()
-	parent.Expect().ReturnToolCall("agent_researcher", map[string]any{"task": "research the lantern"})
-	parent.Expect().ReturnText("final")
-	agent := newMockAgent(t, parent, crux.OpenAIGPT5_6Sol, crux.WithSubAgent(subAgent, "Researches things"))
+	// The child session inherits the parent's client, so one mock serves both.
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnToolCall("agent_researcher", map[string]any{"task": "research the lantern"})
+	mock.Expect().ReturnJSON(Brief{Text: "brief"})
+	mock.Expect().ReturnText("final")
+	agent := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithSubAgent(subAgent, "Researches things"))
 
-	session := crux.MustSession(crux.NewSession(t.Context(), agent))
+	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
 	out, err := session.Run(t.Context(), "go")
 	require.NoError(t, err)
 	require.Equal(t, "final", out)
@@ -185,15 +184,15 @@ func TestSubAgentTakesTaskAndReturnsOutput(t *testing.T) {
 			Parameters map[string]any `json:"parameters"`
 		} `json:"tools"`
 	}
-	require.NoError(t, parent.Requests()[0].UnmarshalBody(&parentBody))
+	require.NoError(t, mock.Requests()[0].UnmarshalBody(&parentBody))
 	require.Len(t, parentBody.Tools, 1)
 	require.Equal(t, "agent_researcher", parentBody.Tools[0].Name)
 	require.Contains(t, parentBody.Tools[0].Parameters["properties"], "task")
 	require.NotContains(t, parentBody.Tools[0].Parameters["properties"], "text")
 
 	// The child receives the task as plain text.
-	require.Contains(t, child.Requests()[0].BodyString(), `research the lantern`)
-	require.NotContains(t, child.Requests()[0].BodyString(), `\"task\"`)
+	require.Contains(t, mock.Requests()[1].BodyString(), `research the lantern`)
+	require.NotContains(t, mock.Requests()[1].BodyString(), `\"task\"`)
 
 	var result *crux.ToolResult
 	for _, entry := range session.Logs() {
@@ -213,17 +212,16 @@ func TestSubAgentSessionIsStoredAsChild(t *testing.T) {
 	store, err := crux.NewGORMStore(db)
 	require.NoError(t, err)
 
-	child := cruxtest.NewMock()
-	child.Expect().ReturnText("brief")
-	subAgent, err := crux.New("researcher", crux.OpenAIGPT5_6Sol, child.AgentOptions()...)
+	subAgent, err := crux.New("researcher", crux.OpenAIGPT5_6Sol)
 	require.NoError(t, err)
 
-	parent := cruxtest.NewMock()
-	parent.Expect().ReturnToolCall("agent_researcher", map[string]any{"task": "research"})
-	parent.Expect().ReturnText("final")
-	agent := newMockAgent(t, parent, crux.OpenAIGPT5_6Sol, crux.WithSubAgent(subAgent, "Researches things"))
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnToolCall("agent_researcher", map[string]any{"task": "research"})
+	mock.Expect().ReturnText("brief")
+	mock.Expect().ReturnText("final")
+	agent := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithSubAgent(subAgent, "Researches things"))
 
-	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithStore(store)))
+	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithStore(store), crux.WithHTTPClient(mock.Client())))
 	_, err = session.Run(t.Context(), "go")
 	require.NoError(t, err)
 
@@ -268,7 +266,7 @@ func TestMalformedToolArgumentsAreReportedAndStored(t *testing.T) {
 	mock.Expect().ReturnText("Sorry, try again.")
 	agent := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithToolsRegistry([]string{"lookup"}, reg))
 
-	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithStore(store)))
+	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithStore(store), crux.WithHTTPClient(mock.Client())))
 	out, err := session.Run(t.Context(), "weather?")
 	require.NoError(t, err)
 	require.Equal(t, "Sorry, try again.", out)
@@ -308,7 +306,7 @@ func TestAnthropicLargeMaxTokensRuns(t *testing.T) {
 	mock.Expect().ReturnText("long answer")
 
 	agent := newMockAgent(t, mock, crux.ClaudeHaiku4_5, crux.WithMaxTokens(64000))
-	session := crux.MustSession(crux.NewSession(t.Context(), agent))
+	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
 	out, err := session.Run(t.Context(), "write a lot")
 	require.NoError(t, err)
 	require.Equal(t, "long answer", out)
@@ -347,7 +345,7 @@ func TestUnsavedToolResultRunsAgainOnResume(t *testing.T) {
 	agent := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithToolsRegistry([]string{"count"}, reg))
 
 	store := &failingStore{MemoryStore: crux.NewMemoryStore(), failToolResults: true}
-	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithStore(store)))
+	session := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithStore(store), crux.WithHTTPClient(mock.Client())))
 
 	_, err := session.Run(t.Context(), "go")
 	require.ErrorContains(t, err, "database unavailable")

@@ -62,14 +62,6 @@ func (m *Mock) Client() *http.Client {
 	return &http.Client{Transport: m}
 }
 
-// AgentOptions returns standard crux.AgentOption helpers: WithHTTPClient and a mock WithAPIKey.
-func (m *Mock) AgentOptions() []crux.AgentOption {
-	return []crux.AgentOption{
-		crux.WithHTTPClient(m.Client()),
-		crux.WithAPIKey("cruxtest-mock-key"),
-	}
-}
-
 // Calls returns the number of HTTP requests processed so far.
 func (m *Mock) Calls() int {
 	m.mu.Lock()

@@ -62,8 +62,8 @@ func withoutForeignOpenAIItems(log []Item, provider string) []Item {
 
 func newOpenAIClient(req *Request) *openai.Client {
 	var opts []option.RequestOption
-	if req.APIKey != "" {
-		opts = append(opts, option.WithAPIKey(req.APIKey))
+	if key := req.apiKey(); key != "" {
+		opts = append(opts, option.WithAPIKey(key))
 	}
 	if req.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(req.BaseURL))

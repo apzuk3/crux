@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,8 +25,13 @@ const anthropicUnknownContentBlockOpaqueKey = "anthropic.message.unknown_content
 
 func newAnthropicClient(req *Request) *anthropic.Client {
 	var opts []option.RequestOption
-	if req.APIKey != "" {
-		opts = append(opts, option.WithAPIKey(req.APIKey))
+	key := req.APIKey
+	if key == "" && os.Getenv("ANTHROPIC_AUTH_TOKEN") == "" && os.Getenv("ANTHROPIC_FEDERATION_RULE_ID") == "" {
+		// Without these the SDK finds no credentials and refuses to start.
+		key = req.apiKey()
+	}
+	if key != "" {
+		opts = append(opts, option.WithAPIKey(key))
 	}
 
 	if req.BaseURL != "" {

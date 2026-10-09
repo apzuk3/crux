@@ -63,10 +63,10 @@ func TestSequentialToolOrder(t *testing.T) {
 		cruxtest.ToolCall{Name: "step", Args: map[string]any{"n": 3}},
 	)
 	mock.Expect().ReturnText("done")
-	a, err := crux.New("seq", crux.OpenAIGPT5_4, append(mock.AgentOptions(),
-		crux.WithToolsRegistry([]string{"step", "other"}, reg))...)
+	a, err := crux.New("seq", crux.OpenAIGPT5_4,
+		crux.WithToolsRegistry([]string{"step", "other"}, reg))
 	require.NoError(t, err)
-	s, err := crux.NewSession(t.Context(), a)
+	s, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	_, err = s.Run(t.Context(), "go")
 	require.NoError(t, err)
@@ -97,10 +97,10 @@ func TestSequentialToolState(t *testing.T) {
 		cruxtest.ToolCall{Name: "increment", Args: map[string]any{"n": 3}},
 	)
 	mock.Expect().ReturnText("done")
-	a, err := crux.New("counter", crux.OpenAIGPT5_4, append(mock.AgentOptions(),
-		crux.WithToolsRegistry([]string{"increment"}, reg))...)
+	a, err := crux.New("counter", crux.OpenAIGPT5_4,
+		crux.WithToolsRegistry([]string{"increment"}, reg))
 	require.NoError(t, err)
-	s, err := crux.NewSession(t.Context(), a)
+	s, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	_, err = s.Run(t.Context(), "count to three")
 	require.NoError(t, err)
@@ -123,10 +123,10 @@ func TestFilesystemCallsKeepOrder(t *testing.T) {
 		cruxtest.ToolCall{Name: crux.FsReadFile, Args: map[string]any{"path": "notes/todo.txt"}},
 	)
 	mock.Expect().ReturnText("done")
-	a, err := crux.New("writer", crux.OpenAIGPT5_4, append(mock.AgentOptions(),
-		crux.WithToolsetsRegistry(reg, crux.ToolsetFilesystem))...)
+	a, err := crux.New("writer", crux.OpenAIGPT5_4,
+		crux.WithToolsetsRegistry(reg, crux.ToolsetFilesystem))
 	require.NoError(t, err)
-	s, err := crux.NewSession(t.Context(), a)
+	s, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	_, err = s.Run(t.Context(), "write a todo")
 	require.ErrorIs(t, err, crux.ErrApprovalNeeded)

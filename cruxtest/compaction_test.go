@@ -24,10 +24,10 @@ func compactionSession(t *testing.T, provider crux.Provider, mock *cruxtest.Mock
 	crux.RegisterToolWithRegistry(reg, "read_page", "Read a page", func(ctx context.Context, in PageArgs) (string, *crux.StateDelta, error) {
 		return fmt.Sprintf("PAGE %d:", in.Page) + strings.Repeat("x", 6000), nil, nil
 	})
-	options := append(mock.AgentOptions(), crux.WithProvider(provider), crux.WithToolsRegistry([]string{"read_page"}, reg))
+	options := []crux.AgentOption{crux.WithProvider(provider), crux.WithToolsRegistry([]string{"read_page"}, reg)}
 	a, err := crux.New("reader", "test-model", append(options, opts...)...)
 	require.NoError(t, err)
-	s, err := crux.NewSession(t.Context(), a)
+	s, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
 	require.NoError(t, err)
 	return s
 }
@@ -188,9 +188,8 @@ func TestContextTooLongIsRecovered(t *testing.T) {
 }
 
 func TestCompactionOptions(t *testing.T) {
-	mock := cruxtest.NewMock()
-	_, err := crux.New("a", "test-model", append(mock.AgentOptions(), crux.WithProvider(crux.ProviderOpenAI),
-		crux.WithCompaction(crux.CompactAt(1.5)))...)
+	_, err := crux.New("a", "test-model", crux.WithProvider(crux.ProviderOpenAI),
+		crux.WithCompaction(crux.CompactAt(1.5)))
 	require.ErrorContains(t, err, "between 0 and 1")
 
 	plain := crux.Must(crux.New("a", crux.ClaudeHaiku4_5, crux.WithAPIKey("k")))
