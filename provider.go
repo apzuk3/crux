@@ -164,12 +164,34 @@ func (a *Agent) wireRequest(log []Entry, first bool) (*provider.Request, error) 
 		Seq:          len(log),
 	}
 	if first {
-		if name, ok := a.toolChoice.tool(); ok {
-			req.ToolChoice, req.ToolName = provider.ToolChoiceTool, name
-		} else {
-			req.ToolChoice = string(a.toolChoice)
-		}
+		a.wireToolChoice(req)
 	}
+	if err := a.wireTools(req); err != nil {
+		return nil, err
+	}
+	req.Search = a.wireSearch()
+	if a.outputSchema != nil {
+		schema, err := wireSchemaFor(a.outputSchema, a.provider)
+		if err != nil {
+			return nil, err
+		}
+		req.OutputSchema = schema
+	}
+	req.Log = wireLog(log)
+	return req, nil
+}
+
+func (a *Agent) wireToolChoice(req *provider.Request) {
+	if name, ok := a.toolChoice.tool(); ok {
+		req.ToolChoice, req.ToolName = provider.ToolChoiceTool, name
+		return
+	}
+	req.ToolChoice = string(a.toolChoice)
+}
+
+// wireTools adds the tools to the request, and the instructions tools carry
+// to its instructions, each set once.
+func (a *Agent) wireTools(req *provider.Request) error {
 	added := make(map[*toolInstructions]bool)
 	for _, tool := range a.tools {
 		req.Tools = append(req.Tools, provider.Tool{Name: tool.name, Description: tool.description, Schema: tool.schema})
@@ -179,35 +201,38 @@ func (a *Agent) wireRequest(log []Entry, first bool) (*provider.Request, error) 
 		added[tool.instructions] = true
 		text, err := tool.instructions.text()
 		if err != nil {
-			return nil, fmt.Errorf("instructions of tool %q: %w", tool.name, err)
+			return fmt.Errorf("instructions of tool %q: %w", tool.name, err)
 		}
 		if text != "" && req.Instructions != "" {
 			req.Instructions += "\n\n"
 		}
 		req.Instructions += text
 	}
-	if a.searchOptions != nil {
-		req.Search = &provider.Search{}
-		if l := a.searchOptions.UserLocation; l != nil {
-			req.Search.Location = &provider.Location{
-				Country: l.Country, City: l.City, Region: l.Region, Timezone: l.Timezone,
-				Latitude: l.Latitude, Longitude: l.Longitude,
-			}
+	return nil
+}
+
+func (a *Agent) wireSearch() *provider.Search {
+	if a.searchOptions == nil {
+		return nil
+	}
+	search := &provider.Search{}
+	if l := a.searchOptions.UserLocation; l != nil {
+		search.Location = &provider.Location{
+			Country: l.Country, City: l.City, Region: l.Region, Timezone: l.Timezone,
+			Latitude: l.Latitude, Longitude: l.Longitude,
 		}
 	}
-	if a.outputSchema != nil {
-		schema, err := wireSchemaFor(a.outputSchema, a.provider)
-		if err != nil {
-			return nil, err
-		}
-		req.OutputSchema = schema
-	}
+	return search
+}
+
+// wireLog converts the entries of log the model sees.
+func wireLog(log []Entry) []provider.Item {
 	view := modelView(log)
-	req.Log = make([]provider.Item, 0, len(view))
+	items := make([]provider.Item, 0, len(view))
 	for _, e := range view {
-		req.Log = append(req.Log, toItem(e))
+		items = append(items, toItem(e))
 	}
-	return req, nil
+	return items
 }
 
 var itemKinds = map[Kind]provider.Kind{

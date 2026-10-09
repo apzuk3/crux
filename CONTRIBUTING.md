@@ -100,7 +100,7 @@ go test -tags evals ./evals/...    # live provider evals; needs API keys, don't 
 Run the evals your change affects if you touched provider wire code.
 
 - Test agent behaviour end to end with `cruxtest` (a mock HTTP transport that speaks each provider's wire format): `mock.Expect().ReturnText/ReturnToolCall/ReturnRefusal/WithUsage`, `crux.WithHTTPClient(mock.Client())` on the session, `mock.Requests()`. Tests that need `cruxtest` go in `cruxtest/*_test.go` (package `cruxtest_test`), because the root package can't import it.
-- Tests that need unexported fields go in the root package (see `approval_test.go`, `store_test.go`). You can drive tools without a provider by seeding tool calls with `WithSessionLogs` and calling `executeUnexecutedToolCalls`.
+- Tests that need unexported fields go in the root package (see `session_test.go`, `store_test.go`, `util_test.go`). You can drive tools without a provider by seeding tool calls with `WithSessionLogs` and calling `executeUnexecutedToolCalls`.
 - Live evals in `evals/` carry `//go:build evals`. Keep `evals/doc.go` untagged so `go test ./...` still finds the package.
 - CI (`.github/workflows/ci.yml`) runs gofmt, vet, `go test -race`, and a `CGO_ENABLED=0` test on Go 1.26 and stable, on Linux, macOS and Windows (no `-race` on Windows). It also fails if the `crux` package depends on a SQLite driver.
 

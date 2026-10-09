@@ -182,99 +182,128 @@ func (s *GORMStore) Append(ctx context.Context, session *Session, entries ...Ent
 	if session == nil {
 		return errors.New("session cannot be nil")
 	}
-	sessionID, agent := session.id, session.agent
-	if agent == nil {
+	if session.agent == nil {
 		return errors.New("agent cannot be nil")
 	}
-
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		now := time.Now().UTC()
-
-		// 1. Upsert crux_agents
-		agentRec := agentRecord{
-			ID:        dbUUID(agent.ID()),
-			Data:      agent.canonicalData(),
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-		if err := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "id"}},
-			DoUpdates: clause.AssignmentColumns([]string{"data", "updated_at"}),
-		}).Create(&agentRec).Error; err != nil {
-			return fmt.Errorf("upsert agent record: %w", err)
-		}
-
-		// 2. Upsert crux_sessions
-		sessRec := sessionRecord{
-			ID:        dbUUID(sessionID),
-			AgentID:   dbUUID(agent.ID()),
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-		if session.parentID != uuid.Nil {
-			parentID := dbUUID(session.parentID)
-			sessRec.ParentID = &parentID
-		}
-		if err := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "id"}},
-			DoUpdates: clause.AssignmentColumns([]string{"updated_at"}),
-		}).Create(&sessRec).Error; err != nil {
-			return fmt.Errorf("upsert session record: %w", err)
-		}
-
-		// 3. Insert crux_session_logs, refusing entries another writer already
-		// stored. The unique (session_id, seq) index catches concurrent writers.
-		if len(entries) > 0 {
-			var last uint64
-			if err := tx.Model(&logRecord{}).
-				Where(bySessionID, dbUUID(sessionID)).
-				Select("COALESCE(MAX(seq), 0)").
-				Scan(&last).Error; err != nil {
-				return fmt.Errorf("read last log seq: %w", err)
-			}
-			if entries[0].Seq <= last {
-				return fmt.Errorf("%w: session %s already has entry %d", ErrSessionConflict, sessionID, entries[0].Seq)
-			}
-
-			logs := make([]logRecord, len(entries))
-			for i, entry := range entries {
-				data, err := json.Marshal(entry)
-				if err != nil {
-					return fmt.Errorf("marshal log entry seq %d: %w", entry.Seq, err)
-				}
-				at := entry.At
-				if at.IsZero() {
-					at = now
-				}
-				logs[i] = logRecord{
-					SessionID: dbUUID(sessionID),
-					Seq:       entry.Seq,
-					Data:      data,
-					CreatedAt: at,
-				}
-			}
-
-			// Batches keep each INSERT under the database's limit on bound
-			// parameters (999 on older SQLite); the transaction keeps the
-			// write all-or-nothing.
-			if err := tx.CreateInBatches(&logs, 200).Error; err != nil {
-				return fmt.Errorf("insert session logs: %w", err)
-			}
-		}
-
-		return nil
+		return appendIn(tx, session, entries)
 	})
+	return s.asConflict(ctx, session.id, entries, err)
+}
+
+// appendIn writes the session's records and its new entries in tx, refusing
+// entries another writer already stored.
+func appendIn(tx *gorm.DB, session *Session, entries []Entry) error {
+	now := time.Now().UTC()
+	if err := upsertAgentAndSession(tx, session, now); err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	last, err := lastLogSeq(tx, session.id)
+	if err != nil {
+		return fmt.Errorf("read last log seq: %w", err)
+	}
+	if entries[0].Seq <= last {
+		return seqConflict(session.id, entries[0].Seq)
+	}
+	logs, err := logRecords(session.id, entries, now)
+	if err != nil {
+		return err
+	}
+	return insertLogs(tx, logs)
+}
+
+func upsertAgentAndSession(tx *gorm.DB, session *Session, now time.Time) error {
+	agent := session.agent
+	agentRec := agentRecord{
+		ID:        dbUUID(agent.ID()),
+		Data:      agent.canonicalData(),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"data", "updated_at"}),
+	}).Create(&agentRec).Error; err != nil {
+		return fmt.Errorf("upsert agent record: %w", err)
+	}
+
+	sessRec := sessionRecord{
+		ID:        dbUUID(session.id),
+		AgentID:   dbUUID(agent.ID()),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if session.parentID != uuid.Nil {
+		parentID := dbUUID(session.parentID)
+		sessRec.ParentID = &parentID
+	}
+	if err := tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"updated_at"}),
+	}).Create(&sessRec).Error; err != nil {
+		return fmt.Errorf("upsert session record: %w", err)
+	}
+	return nil
+}
+
+// lastLogSeq returns the highest Seq stored for the session, or 0.
+func lastLogSeq(db *gorm.DB, sessionID uuid.UUID) (uint64, error) {
+	var last uint64
+	err := db.Model(&logRecord{}).
+		Where(bySessionID, dbUUID(sessionID)).
+		Select("COALESCE(MAX(seq), 0)").
+		Scan(&last).Error
+	return last, err
+}
+
+func seqConflict(sessionID uuid.UUID, seq uint64) error {
+	return fmt.Errorf("%w: session %s already has entry %d", ErrSessionConflict, sessionID, seq)
+}
+
+func logRecords(sessionID uuid.UUID, entries []Entry, now time.Time) ([]logRecord, error) {
+	logs := make([]logRecord, len(entries))
+	for i, entry := range entries {
+		data, err := json.Marshal(entry)
+		if err != nil {
+			return nil, fmt.Errorf("marshal log entry seq %d: %w", entry.Seq, err)
+		}
+		at := entry.At
+		if at.IsZero() {
+			at = now
+		}
+		logs[i] = logRecord{
+			SessionID: dbUUID(sessionID),
+			Seq:       entry.Seq,
+			Data:      data,
+			CreatedAt: at,
+		}
+	}
+	return logs, nil
+}
+
+// insertLogs writes the records in batches, which keep each INSERT under
+// the database's limit on bound parameters (999 on older SQLite); the
+// transaction keeps the write all-or-nothing.
+func insertLogs(tx *gorm.DB, logs []logRecord) error {
+	if err := tx.CreateInBatches(&logs, 200).Error; err != nil {
+		return fmt.Errorf("insert session logs: %w", err)
+	}
+	return nil
+}
+
+// asConflict reports err as ErrSessionConflict when another writer stored
+// the entries meanwhile: two writers can both pass the seq check, and the
+// unique (session_id, seq) index then rejects the second with a
+// driver-specific error.
+func (s *GORMStore) asConflict(ctx context.Context, sessionID uuid.UUID, entries []Entry, err error) error {
 	if err == nil || errors.Is(err, ErrSessionConflict) || len(entries) == 0 {
 		return err
 	}
-	// Two writers can both pass the seq check; the unique index then rejects
-	// the second with a driver-specific error. Report it as a conflict.
-	var last uint64
-	if s.db.WithContext(ctx).Model(&logRecord{}).
-		Where(bySessionID, dbUUID(sessionID)).
-		Select("COALESCE(MAX(seq), 0)").
-		Scan(&last).Error == nil && entries[0].Seq <= last {
-		return fmt.Errorf("%w: session %s already has entry %d", ErrSessionConflict, sessionID, entries[0].Seq)
+	if last, readErr := lastLogSeq(s.db.WithContext(ctx), sessionID); readErr == nil && entries[0].Seq <= last {
+		return seqConflict(sessionID, entries[0].Seq)
 	}
 	return err
 }

@@ -17,6 +17,7 @@ import (
 
 	"crux.foo/internal/schema"
 	"github.com/google/uuid"
+	sjs "github.com/santhosh-tekuri/jsonschema/v5"
 )
 
 type Session struct {
@@ -71,58 +72,76 @@ func NewSession(ctx context.Context, agent *Agent, opts ...SessionOption) (*Sess
 	if session.id == uuid.Nil {
 		return nil, errors.New("session ID cannot be nil")
 	}
-	if parent, ok := ctx.Value(sessionContextKey{}).(*Session); ok && parent.id != session.id {
-		session.parentID = parent.id
-		if session.store == nil {
-			session.store = parent.store
-		}
-		if session.client == nil {
-			session.client = parent.client
-		}
-		if len(parent.onEntry) > 0 {
-			// The parent's handlers see every descendant, before the child's own.
-			session.onEntry = append(slices.Clone(parent.onEntry), session.onEntry...)
-			session.entryMu = parent.entryMu
-		}
-	}
+	session.inheritParent(ctx)
 	if len(session.onEntry) > 0 && session.entryMu == nil {
 		session.entryMu = new(sync.Mutex)
 	}
 	if session.store == nil {
 		session.store = NewMemoryStore()
 	}
-
-	stored, err := session.store.Get(ctx, session.id)
-	if err != nil && !errors.Is(err, ErrSessionNotFound) {
-		return nil, fmt.Errorf("load session %s: %w", session.id, err)
+	if err := session.loadHistory(ctx); err != nil {
+		return nil, err
 	}
-
-	switch {
-	case len(stored) > 0 && len(session.logs) > 0:
-		return nil, fmt.Errorf("session %s already has history; WithSessionLogs cannot replace it", session.id)
-	case len(stored) > 0:
-		session.logs = stored
-		if err := session.loadWaitingChildren(ctx); err != nil {
-			return nil, err
-		}
-	case len(session.logs) > 0:
-		now := time.Now().UTC()
-		var prev uint64
-		for i := range session.logs {
-			if session.logs[i].Seq <= prev {
-				session.logs[i].Seq = prev + 1
-			}
-			prev = session.logs[i].Seq
-			if session.logs[i].At.IsZero() {
-				session.logs[i].At = now
-			}
-		}
-		if err := session.store.Append(ctx, session, session.logs...); err != nil {
-			return nil, fmt.Errorf("persist session logs: %w", err)
-		}
-	}
-
 	return session, nil
+}
+
+// inheritParent records the session whose tool call creates this one as its
+// parent and takes over its store, client and entry handlers.
+func (s *Session) inheritParent(ctx context.Context) {
+	parent, ok := ctx.Value(sessionContextKey{}).(*Session)
+	if !ok || parent.id == s.id {
+		return
+	}
+	s.parentID = parent.id
+	if s.store == nil {
+		s.store = parent.store
+	}
+	if s.client == nil {
+		s.client = parent.client
+	}
+	if len(parent.onEntry) > 0 {
+		// The parent's handlers see every descendant, before the child's own.
+		s.onEntry = append(slices.Clone(parent.onEntry), s.onEntry...)
+		s.entryMu = parent.entryMu
+	}
+}
+
+// loadHistory continues from the history the store holds, or writes the
+// seeded one to it.
+func (s *Session) loadHistory(ctx context.Context) error {
+	stored, err := s.store.Get(ctx, s.id)
+	if err != nil && !errors.Is(err, ErrSessionNotFound) {
+		return fmt.Errorf("load session %s: %w", s.id, err)
+	}
+	switch {
+	case len(stored) > 0 && len(s.logs) > 0:
+		return fmt.Errorf("session %s already has history; WithSessionLogs cannot replace it", s.id)
+	case len(stored) > 0:
+		s.logs = stored
+		return s.loadWaitingChildren(ctx)
+	case len(s.logs) > 0:
+		normaliseSeeded(s.logs)
+		if err := s.store.Append(ctx, s, s.logs...); err != nil {
+			return fmt.Errorf("persist session logs: %w", err)
+		}
+	}
+	return nil
+}
+
+// normaliseSeeded makes the sequence numbers of seeded entries increasing
+// and gives the entries without a time the current one.
+func normaliseSeeded(logs []Entry) {
+	now := time.Now().UTC()
+	var prev uint64
+	for i := range logs {
+		if logs[i].Seq <= prev {
+			logs[i].Seq = prev + 1
+		}
+		prev = logs[i].Seq
+		if logs[i].At.IsZero() {
+			logs[i].At = now
+		}
+	}
 }
 
 // loadWaitingChildren finds the subagent sessions that stopped for approval
@@ -246,50 +265,12 @@ func (s *Session) run(ctx context.Context, inputs []any, emit chunkSink) (text s
 	if len(s.PendingApprovals()) > 0 {
 		return "", ErrApprovalNeeded
 	}
-
-	hasInput := slices.ContainsFunc(inputs, func(v any) bool { return v != nil })
-	if !hasInput && len(s.logs) == 0 {
-		return "", errors.New("cannot run agent with no input and empty history")
-	}
-
-	validator, err := schema.CompileOutput(s.agent.outputSchema)
+	r, err := s.startRun(inputs)
 	if err != nil {
-		return "", fmt.Errorf("invalid output schema: %w", err)
+		return "", err
 	}
-
-	repairsLeft := s.agent.maxRepairs
-	var repair error // a stored answer that fails validation is repaired like a new one
-	if !hasInput {
-		if text, ok := s.FinalOutput(); ok {
-			if validator == nil {
-				return text, nil
-			}
-			valErr := validateOutput(validator, text)
-			if valErr == nil {
-				return text, nil
-			}
-			if repairsLeft == 0 {
-				return "", valErr
-			}
-			repair = valErr
-		}
-	}
-
-	var userEntry *Entry
-	if hasInput {
-		if s.hasUnexecutedToolCalls() {
-			return "", errors.New("cannot run agent with new user input while tool calls are pending execution; call Resume first")
-		}
-		// The user turn is part of the log, so every provider sees one shape and a
-		// resumed session needs nothing but its history.
-		entry, err := NewUserEntry(inputs...)
-		if err != nil {
-			return "", err
-		}
-		if strings.TrimSpace(entry.Text()) == "" && !slices.ContainsFunc(entry.Content, func(p ContentPart) bool { return p.Kind == ContentKindFile }) {
-			return "", errors.New("user input produced empty text")
-		}
-		userEntry = &entry
+	if r.answered {
+		return r.answer, nil
 	}
 
 	// From here the run does work, so it is recorded between a started and a
@@ -297,131 +278,278 @@ func (s *Session) run(ctx context.Context, inputs []any, emit chunkSink) (text s
 	if err := s.appendLogs(ctx, Entry{Kind: KindRunStarted}); err != nil {
 		return "", err
 	}
-	defer func() {
-		status := runStatus(err)
-		if finishErr := s.appendLogs(context.WithoutCancel(ctx), Entry{Kind: KindRunFinished, Run: &status}); finishErr != nil {
-			text, err = "", errors.Join(err, finishErr)
-		}
-	}()
+	defer func() { text, err = s.finishRun(ctx, text, err) }()
 
-	if repair != nil {
-		repairsLeft--
-		if err := s.requestRepair(ctx, repair); err != nil {
-			return "", err
-		}
+	if err := s.openRun(ctx, r); err != nil {
+		return "", err
 	}
-	if userEntry != nil {
-		if err := s.appendLogs(ctx, *userEntry); err != nil {
-			return "", err
-		}
-	}
-
 	// Repair requests do not count against maxTurns.
-	for turn := 0; turn < s.agent.maxTurns+s.agent.maxRepairs-repairsLeft; turn++ {
-		if err := ctx.Err(); err != nil {
+	first := r.userEntry != nil
+	for turn := 0; turn < s.agent.maxTurns+s.agent.maxRepairs-r.repairsLeft; turn++ {
+		if err := s.runTools(ctx); err != nil {
 			return "", err
 		}
-
-		toolResults, err := s.executeUnexecutedToolCalls(ctx)
+		produced, err := s.requestTurn(ctx, turn, first, emit)
 		if err != nil {
 			return "", err
 		}
-		if len(toolResults) > 0 {
-			// The tools have already run, so their results are kept even if ctx
-			// was cancelled meanwhile; otherwise the next Resume would run them again.
-			if err := s.appendLogs(context.WithoutCancel(ctx), toolResults...); err != nil {
-				return "", err
-			}
-		}
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		if len(s.PendingApprovals()) > 0 {
-			return "", ErrApprovalNeeded // a subagent stopped for approval
-		}
-
-		// The request usually still fits when compaction fails, so it is sent
-		// anyway; the failure is reported only if the request fails too.
-		compactErr := s.maybeCompact(ctx)
-		var sink chunkSink
-		var firstToken time.Time
-		if emit != nil {
-			sink = func(chunk Chunk) error {
-				if firstToken.IsZero() {
-					firstToken = time.Now()
-				}
-				chunk.Turn = turn + 1
-				return emit(chunk)
-			}
-		}
-		var start time.Time
-		var produced []Entry
-		for attempt := 0; ; attempt++ {
-			if err := s.appendLogs(ctx, Entry{Kind: KindTurnStarted, Turn: s.agent.turnInfo()}); err != nil {
-				return "", err
-			}
-			start = time.Now()
-			produced, err = s.agent.step(ctx, s.client, s.logs, sink, turn == 0 && userEntry != nil)
-			if err == nil {
-				break
-			}
-			// A request too large for the model is sent again after compacting.
-			retry, err := s.recoverContext(ctx, err, attempt)
-			if !retry {
-				if compactErr != nil {
-					err = errors.Join(err, compactErr)
-				}
-				return "", err
-			}
-		}
-		if len(produced) > 0 {
-			last := &produced[len(produced)-1]
-			last.Duration = time.Since(start)
-			if !firstToken.IsZero() {
-				if last.Response == nil {
-					last.Response = &ResponseInfo{}
-				}
-				last.Response.FirstTokenAfter = firstToken.Sub(start)
-			}
-		}
-
-		// Retain all model entries in history before dispatching local tools.
-		if len(produced) > 0 {
-			if err := s.appendLogs(ctx, produced...); err != nil {
-				return "", err
-			}
-		}
-
-		if len(s.PendingApprovals()) > 0 {
-			return "", ErrApprovalNeeded
-		}
-
-		if refusal, refused := latestRefusal(produced); refused {
-			if refusal != "" {
-				return "", fmt.Errorf("%w: %s", ErrRefused, refusal)
-			}
-			return "", ErrRefused
-		}
-
-		// If the latest turn produced the final answer without requesting further tools:
-		if text, ok := s.FinalOutput(); ok {
-			if validator != nil {
-				if valErr := validateOutput(validator, text); valErr != nil {
-					if repairsLeft > 0 {
-						repairsLeft--
-						if err := s.requestRepair(ctx, valErr); err != nil {
-							return "", err
-						}
-						continue
-					}
-					return "", valErr
-				}
-			}
-			return text, nil
+		first = false
+		answer, done, err := s.checkTurnOutcome(ctx, produced, r)
+		if done {
+			return answer, err
 		}
 	}
-
 	return "", fmt.Errorf("%w (%d)", ErrMaxTurns, s.agent.maxTurns)
+}
+
+// runState is what a run keeps from its start through its turns.
+type runState struct {
+	validator   *sjs.Schema
+	repairsLeft int
+	userEntry   *Entry // the new input, recorded once the run has started
+	repair      error  // a stored answer that failed validation, repaired like a new one
+	answer      string // a stored answer that needs no work
+	answered    bool
+}
+
+// startRun checks the input and compiles the output schema. Without input,
+// a stored final answer is returned as it is when it is valid.
+func (s *Session) startRun(inputs []any) (*runState, error) {
+	hasInput := slices.ContainsFunc(inputs, func(v any) bool { return v != nil })
+	if !hasInput && len(s.logs) == 0 {
+		return nil, errors.New("cannot run agent with no input and empty history")
+	}
+	validator, err := schema.CompileOutput(s.agent.outputSchema)
+	if err != nil {
+		return nil, fmt.Errorf("invalid output schema: %w", err)
+	}
+	r := &runState{validator: validator, repairsLeft: s.agent.maxRepairs}
+	if !hasInput {
+		return r, s.storedAnswer(r)
+	}
+	userEntry, err := s.newUserEntry(inputs)
+	if err != nil {
+		return nil, err
+	}
+	r.userEntry = userEntry
+	return r, nil
+}
+
+// storedAnswer takes the final answer the log already holds, if any: a
+// valid one answers the run, one that fails validation is repaired when
+// repairs are left, and is the run's error otherwise.
+func (s *Session) storedAnswer(r *runState) error {
+	text, ok := s.FinalOutput()
+	if !ok {
+		return nil
+	}
+	if r.validator == nil {
+		r.answer, r.answered = text, true
+		return nil
+	}
+	valErr := validateOutput(r.validator, text)
+	switch {
+	case valErr == nil:
+		r.answer, r.answered = text, true
+	case r.repairsLeft == 0:
+		return valErr
+	default:
+		r.repair = valErr
+	}
+	return nil
+}
+
+// newUserEntry builds the user turn for inputs. It is part of the log, so
+// every provider sees one shape and a resumed session needs nothing but its
+// history.
+func (s *Session) newUserEntry(inputs []any) (*Entry, error) {
+	if s.hasUnexecutedToolCalls() {
+		return nil, errors.New("cannot run agent with new user input while tool calls are pending execution; call Resume first")
+	}
+	entry, err := NewUserEntry(inputs...)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(entry.Text()) == "" && !slices.ContainsFunc(entry.Content, func(p ContentPart) bool { return p.Kind == ContentKindFile }) {
+		return nil, errors.New("user input produced empty text")
+	}
+	return &entry, nil
+}
+
+// openRun records what the run starts from: the repair request for a stored
+// answer, or the new user entry.
+func (s *Session) openRun(ctx context.Context, r *runState) error {
+	if r.repair != nil {
+		r.repairsLeft--
+		if err := s.requestRepair(ctx, r.repair); err != nil {
+			return err
+		}
+	}
+	if r.userEntry != nil {
+		return s.appendLogs(ctx, *r.userEntry)
+	}
+	return nil
+}
+
+// finishRun records how the run ended, even if ctx was cancelled, and
+// returns the run's result, or the write's failure joined to its error.
+func (s *Session) finishRun(ctx context.Context, text string, err error) (string, error) {
+	status := runStatus(err)
+	if finishErr := s.appendLogs(context.WithoutCancel(ctx), Entry{Kind: KindRunFinished, Run: &status}); finishErr != nil {
+		return "", errors.Join(err, finishErr)
+	}
+	return text, err
+}
+
+// runTools runs the open tool calls and records their results, and stops
+// the run when a subagent waits for approval.
+func (s *Session) runTools(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	toolResults, err := s.executeUnexecutedToolCalls(ctx)
+	if err != nil {
+		return err
+	}
+	if len(toolResults) > 0 {
+		// The tools have already run, so their results are kept even if ctx
+		// was cancelled meanwhile; otherwise the next Resume would run them again.
+		if err := s.appendLogs(context.WithoutCancel(ctx), toolResults...); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(s.PendingApprovals()) > 0 {
+		return ErrApprovalNeeded // a subagent stopped for approval
+	}
+	return nil
+}
+
+// requestTurn compacts the session when it has grown, sends the request and
+// records what the model produced, with its timing on the last entry.
+func (s *Session) requestTurn(ctx context.Context, turn int, first bool, emit chunkSink) ([]Entry, error) {
+	// The request usually still fits when compaction fails, so it is sent
+	// anyway; the failure is reported only if the request fails too.
+	compactErr := s.maybeCompact(ctx)
+	sink := &turnSink{emit: emit, turn: turn}
+	produced, start, err := s.stepWithRetry(ctx, sink.sink(), first, compactErr)
+	if err != nil {
+		return nil, err
+	}
+	sink.stampTiming(produced, start)
+	// Retain all model entries in history before dispatching local tools.
+	if len(produced) > 0 {
+		if err := s.appendLogs(ctx, produced...); err != nil {
+			return nil, err
+		}
+	}
+	return produced, nil
+}
+
+// stepWithRetry records the turn's start and sends the request, compacting
+// and sending again when the model finds it too long. start is when the
+// request that succeeded was sent.
+func (s *Session) stepWithRetry(ctx context.Context, sink chunkSink, first bool, compactErr error) (produced []Entry, start time.Time, err error) {
+	for attempt := 0; ; attempt++ {
+		if err := s.appendLogs(ctx, Entry{Kind: KindTurnStarted, Turn: s.agent.turnInfo()}); err != nil {
+			return nil, start, err
+		}
+		start = time.Now()
+		produced, err = s.agent.step(ctx, s.client, s.logs, sink, first)
+		if err == nil {
+			return produced, start, nil
+		}
+		retry, stepErr := s.recoverContext(ctx, err, attempt)
+		if retry {
+			continue
+		}
+		if compactErr != nil {
+			stepErr = errors.Join(stepErr, compactErr)
+		}
+		return nil, start, stepErr
+	}
+}
+
+// turnSink forwards the streamed chunks of one turn and notes when the
+// first arrived.
+type turnSink struct {
+	emit       chunkSink
+	turn       int
+	firstToken time.Time
+}
+
+// sink returns the sink to stream through, or nil when nothing listens.
+func (t *turnSink) sink() chunkSink {
+	if t.emit == nil {
+		return nil
+	}
+	return t.send
+}
+
+func (t *turnSink) send(chunk Chunk) error {
+	if t.firstToken.IsZero() {
+		t.firstToken = time.Now()
+	}
+	chunk.Turn = t.turn + 1
+	return t.emit(chunk)
+}
+
+// stampTiming records the response's duration and, when it was streamed,
+// the time to its first token on the last produced entry.
+func (t *turnSink) stampTiming(produced []Entry, start time.Time) {
+	if len(produced) == 0 {
+		return
+	}
+	last := &produced[len(produced)-1]
+	last.Duration = time.Since(start)
+	if t.firstToken.IsZero() {
+		return
+	}
+	if last.Response == nil {
+		last.Response = &ResponseInfo{}
+	}
+	last.Response.FirstTokenAfter = t.firstToken.Sub(start)
+}
+
+// checkTurnOutcome reports whether the run ends with what the turn
+// produced: with an approval or a refusal, with the final answer, or with
+// the answer's validation error once no repairs are left. An answer that
+// fails validation with repairs left asks the model for a correction.
+func (s *Session) checkTurnOutcome(ctx context.Context, produced []Entry, r *runState) (text string, done bool, err error) {
+	if len(s.PendingApprovals()) > 0 {
+		return "", true, ErrApprovalNeeded
+	}
+	if refusal, refused := latestRefusal(produced); refused {
+		return "", true, refusalError(refusal)
+	}
+	text, ok := s.FinalOutput()
+	if !ok {
+		return "", false, nil
+	}
+	if r.validator == nil {
+		return text, true, nil
+	}
+	valErr := validateOutput(r.validator, text)
+	if valErr == nil {
+		return text, true, nil
+	}
+	if r.repairsLeft == 0 {
+		return "", true, valErr
+	}
+	r.repairsLeft--
+	if err := s.requestRepair(ctx, valErr); err != nil {
+		return "", true, err
+	}
+	return "", false, nil
+}
+
+func refusalError(refusal string) error {
+	if refusal != "" {
+		return fmt.Errorf("%w: %s", ErrRefused, refusal)
+	}
+	return ErrRefused
 }
 
 // runStatus describes how a run that returned err ended.
@@ -460,43 +588,48 @@ func (s *Session) FinalOutput() (string, bool) {
 	if len(s.logs) == 0 || len(s.PendingApprovals()) > 0 || s.hasUnexecutedToolCalls() {
 		return "", false
 	}
-
-	start := len(s.logs)
-	for i, v := range slices.Backward(s.logs) {
-		kind := v.Kind
-		if kind == KindUser || kind == KindToolResult || (v.HiddenFromModel() && !kind.lifecycle() && kind != KindCompaction) {
-			start = i + 1
-			break
-		}
-		if i == 0 {
-			start = 0
-		}
-	}
-
-	if start >= len(s.logs) {
+	latestTurn := s.logs[latestTurnStart(s.logs):]
+	if !turnHasFinalAnswer(latestTurn) {
 		return "", false
 	}
+	return finalText(latestTurn), true
+}
 
-	latestTurn := s.logs[start:]
-	if _, refused := latestRefusal(latestTurn); refused {
-		return "", false
+// latestTurnStart returns the index of the first entry of the latest model
+// turn, which follows the latest entry that ends the turn before it.
+func latestTurnStart(log []Entry) int {
+	for i, e := range slices.Backward(log) {
+		if endsPreviousTurn(e) {
+			return i + 1
+		}
 	}
+	return 0
+}
 
+// endsPreviousTurn reports whether e closes the model turn before it: user
+// input, a tool result, or a hidden entry other than the lifecycle records
+// and compactions, which belong to no turn.
+func endsPreviousTurn(e Entry) bool {
+	kind := e.Kind
+	return kind == KindUser || kind == KindToolResult || (e.HiddenFromModel() && !kind.lifecycle() && kind != KindCompaction)
+}
+
+// turnHasFinalAnswer reports whether the turn answered without refusing or
+// requesting tools.
+func turnHasFinalAnswer(turn []Entry) bool {
+	if _, refused := latestRefusal(turn); refused {
+		return false
+	}
 	var hasAssistant bool
-	for _, e := range latestTurn {
+	for _, e := range turn {
 		if e.Kind == KindToolCall {
-			return "", false
+			return false
 		}
 		if e.Kind == KindAssistant {
 			hasAssistant = true
 		}
 	}
-
-	if !hasAssistant {
-		return "", false
-	}
-
-	return finalText(latestTurn), true
+	return hasAssistant
 }
 
 func latestRefusal(entries []Entry) (string, bool) {
@@ -574,134 +707,183 @@ func (s *Session) executeUnexecutedToolCalls(ctx context.Context) ([]Entry, erro
 	if len(unexecuted) == 0 {
 		return nil, nil
 	}
+	batch := &toolBatch{
+		session: s,
+		calls:   unexecuted,
+		results: make([][]Entry, len(unexecuted)),
+		ran:     make([]bool, len(unexecuted)),
+		waiting: make([]*Session, len(unexecuted)),
+		slots:   make(chan struct{}, maxConcurrentToolCalls),
+	}
+	run, err := batch.start(ctx)
+	if err != nil {
+		return nil, err
+	}
+	batch.state = s.StateSnapshot()
+	sequential, spawns, parallel, spawnLimit := batch.partition(run)
+	batch.runSpawns(ctx, spawns, spawnLimit)
+	batch.runSequential(ctx, sequential)
+	batch.runParallel(ctx, parallel)
+	batch.wg.Wait()
+	batch.recordWaiting()
+	return slices.Concat(batch.results...), nil
+}
 
-	// Rejected calls are answered without running. The others are recorded as
-	// started, in one write, before any of them runs.
-	results := make([][]Entry, len(unexecuted))
+// toolBatch runs the open tool calls of one model turn. Calls run
+// concurrently, at most maxConcurrentToolCalls at a time, and see the same
+// state; their results are recorded in the order the model requested them.
+// Calls of sequential tools run one after another in that order, as one of
+// the concurrent tasks, each seeing the state the calls before it left.
+// Spawn calls have their own queue (WithSpawnConcurrency).
+type toolBatch struct {
+	session *Session
+	calls   []openToolCall
+	state   map[string]any
+	results [][]Entry  // by call
+	ran     []bool     // by call
+	waiting []*Session // by call; a subagent that stopped for approval
+	slots   chan struct{}
+	wg      sync.WaitGroup
+}
+
+// start answers the rejected calls without running them and records the
+// others as started, in one write, before any of them runs. It returns the
+// indexes of the calls to run.
+func (b *toolBatch) start(ctx context.Context) ([]int, error) {
 	var run []int
 	var started []Entry
-	for i, open := range unexecuted {
+	for i, open := range b.calls {
 		if ctx.Err() != nil {
 			break
 		}
-		call, dec := open.call, open.decision
-		if dec != nil && !dec.Approved {
-			reason := cmp.Or(dec.Reason, "tool execution declined by user")
-			result := ToolResult{CallID: call.ID, Error: reason, Denied: true}
-			results[i] = []Entry{{Kind: KindToolResult, ToolResult: &result, At: time.Now().UTC()}}
+		if dec := open.decision; dec != nil && !dec.Approved {
+			b.results[i] = []Entry{deniedResult(open.call.ID, dec.Reason)}
 			continue
 		}
 		run = append(run, i)
-		started = append(started, Entry{Kind: KindToolStarted, ToolCall: &ToolCall{ID: call.ID, Name: call.Name}})
+		started = append(started, Entry{Kind: KindToolStarted, ToolCall: &ToolCall{ID: open.call.ID, Name: open.call.Name}})
 	}
-	if len(started) > 0 && ctx.Err() == nil {
-		if err := s.appendLogs(ctx, started...); err != nil {
-			return nil, err
-		}
-	} else {
-		run = nil
+	if len(started) == 0 || ctx.Err() != nil {
+		return nil, nil
 	}
+	if err := b.session.appendLogs(ctx, started...); err != nil {
+		return nil, err
+	}
+	return run, nil
+}
 
-	// Calls from one model turn run concurrently, at most
-	// maxConcurrentToolCalls at a time, and see the same state; their results
-	// are recorded in the order the model requested them. Calls of sequential
-	// tools run one after another in that order, as one of the concurrent
-	// tasks, each seeing the state the calls before it left. Spawn calls
-	// have their own queue (WithSpawnConcurrency).
-	state := s.StateSnapshot()
-	ran := make([]bool, len(unexecuted))
-	waiting := make([]*Session, len(unexecuted))
-	slots := make(chan struct{}, maxConcurrentToolCalls)
-	var wg sync.WaitGroup
-	var sequential []int
+func deniedResult(callID, reason string) Entry {
+	reason = cmp.Or(reason, "tool execution declined by user")
+	result := ToolResult{CallID: callID, Error: reason, Denied: true}
+	return Entry{Kind: KindToolResult, ToolResult: &result, At: time.Now().UTC()}
+}
+
+// partition splits the calls to run into those of sequential tools, the
+// spawn calls with their concurrency limit, and the rest.
+func (b *toolBatch) partition(run []int) (sequential, spawns, parallel []int, spawnLimit int) {
+	agent := b.session.agent
 	for _, i := range run {
-		if s.agent.toolIsSequential(unexecuted[i].call.Name) {
+		name := b.calls[i].call.Name
+		if agent.toolIsSequential(name) {
 			sequential = append(sequential, i)
-		}
-	}
-	var spawns []int
-	var spawnLimit int
-	for _, i := range run {
-		if limit, ok := s.agent.spawnConcurrency(unexecuted[i].call.Name); ok {
+		} else if limit, ok := agent.spawnConcurrency(name); ok {
 			spawns = append(spawns, i)
 			spawnLimit = limit
+		} else {
+			parallel = append(parallel, i)
 		}
 	}
-	if len(spawns) > 0 {
-		spawnSlots := make(chan struct{}, spawnLimit)
-		wg.Go(func() {
-			for _, i := range spawns {
-				select {
-				case spawnSlots <- struct{}{}:
-				case <-ctx.Done():
-					return
-				}
-				ran[i] = true
-				wg.Go(func() {
-					defer func() { <-spawnSlots }()
-					results[i], waiting[i] = s.dispatch(ctx, unexecuted[i], state)
-				})
-			}
-		})
-	}
-	if len(sequential) > 0 {
-		select {
-		case slots <- struct{}{}:
-			wg.Go(func() {
-				defer func() { <-slots }()
-				state := cloneState(state)
-				for _, i := range sequential {
-					if ctx.Err() != nil {
-						return
-					}
-					ran[i] = true
-					results[i], waiting[i] = s.dispatch(ctx, unexecuted[i], state)
-					for _, e := range results[i] {
-						if e.Kind == KindStateDelta {
-							applyDelta(state, e.Delta)
-						}
-					}
-				}
-			})
-		case <-ctx.Done():
-		}
-	}
-calls:
-	for _, i := range run {
-		if slices.Contains(sequential, i) || slices.Contains(spawns, i) {
-			continue
-		}
-		select {
-		case slots <- struct{}{}:
-		case <-ctx.Done():
-			break calls
-		}
-		ran[i] = true
-		wg.Go(func() {
-			defer func() { <-slots }()
-			results[i], waiting[i] = s.dispatch(ctx, unexecuted[i], state)
-		})
-	}
-	wg.Wait()
+	return sequential, spawns, parallel, spawnLimit
+}
 
-	for i, open := range unexecuted {
+// run dispatches one call with the state it sees.
+func (b *toolBatch) run(ctx context.Context, i int, state map[string]any) {
+	b.results[i], b.waiting[i] = b.session.dispatch(ctx, b.calls[i], state)
+}
+
+func (b *toolBatch) runSpawns(ctx context.Context, spawns []int, limit int) {
+	if len(spawns) == 0 {
+		return
+	}
+	spawnSlots := make(chan struct{}, limit)
+	b.wg.Go(func() {
+		for _, i := range spawns {
+			select {
+			case spawnSlots <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			b.ran[i] = true
+			b.wg.Go(func() {
+				defer func() { <-spawnSlots }()
+				b.run(ctx, i, b.state)
+			})
+		}
+	})
+}
+
+func (b *toolBatch) runSequential(ctx context.Context, sequential []int) {
+	if len(sequential) == 0 {
+		return
+	}
+	select {
+	case b.slots <- struct{}{}:
+	case <-ctx.Done():
+		return
+	}
+	b.wg.Go(func() {
+		defer func() { <-b.slots }()
+		state := cloneState(b.state)
+		for _, i := range sequential {
+			if ctx.Err() != nil {
+				return
+			}
+			b.ran[i] = true
+			b.run(ctx, i, state)
+			applyResultDeltas(state, b.results[i])
+		}
+	})
+}
+
+func applyResultDeltas(state map[string]any, entries []Entry) {
+	for _, e := range entries {
+		if e.Kind == KindStateDelta {
+			applyDelta(state, e.Delta)
+		}
+	}
+}
+
+func (b *toolBatch) runParallel(ctx context.Context, parallel []int) {
+	for _, i := range parallel {
+		select {
+		case b.slots <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		b.ran[i] = true
+		b.wg.Go(func() {
+			defer func() { <-b.slots }()
+			b.run(ctx, i, b.state)
+		})
+	}
+}
+
+// recordWaiting keeps the subagent sessions that stopped for approval under
+// the calls that run them, and forgets those of calls that finished.
+func (b *toolBatch) recordWaiting() {
+	s := b.session
+	for i, open := range b.calls {
 		switch {
-		case !ran[i]:
-		case waiting[i] != nil:
+		case !b.ran[i]:
+		case b.waiting[i] != nil:
 			if s.children == nil {
 				s.children = make(map[string]*Session)
 			}
-			s.children[open.key()] = waiting[i]
+			s.children[open.key()] = b.waiting[i]
 		default:
 			delete(s.children, open.key())
 		}
 	}
-
-	var entries []Entry
-	for _, result := range results {
-		entries = append(entries, result...)
-	}
-	return entries, nil
 }
 
 // PendingApprovals returns copies of the tool calls waiting for Approve or
