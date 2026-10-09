@@ -138,30 +138,42 @@ func (m *model) switched(msg switchedMsg) {
 
 func (m *model) renderPicker() string {
 	th := m.th
-	p := m.picker
 	w := min(64, m.width-8)
 	inner := w - 6
 
 	title := lipgloss.NewStyle().Foreground(th.accent).Bold(true).Render("◆ Switch model")
 	cur := th.dim.Render("now ") + th.title.Render(m.info.Model)
-	lines := []string{spread(title, cur, inner), ""}
+	lines := []string{spread(title, cur, inner), "", m.pickerFilterLine(), ""}
+	lines = append(lines, m.pickerRows(inner)...)
+	lines = append(lines, "", m.pickerFooter())
+	return th.modal.BorderForeground(th.accent).Width(w).Background(th.panel).Render(strings.Join(lines, "\n"))
+}
 
+func (m *model) pickerFilterLine() string {
+	th := m.th
 	cursor := ""
 	if m.frame/4%2 == 0 {
 		cursor = "▍"
 	}
-	filter := p.filter
+	filter := m.picker.filter
 	if filter == "" {
 		filter = th.faintText.Italic(true).Render("type to filter, e.g. \"mini\" or \"anthropic\"")
 	} else {
 		filter = th.title.Render(filter)
 	}
-	lines = append(lines, lipgloss.NewStyle().Foreground(th.accent2).Render("› ")+filter+lipgloss.NewStyle().Foreground(th.accent2).Render(cursor), "")
+	return lipgloss.NewStyle().Foreground(th.accent2).Render("› ") + filter + lipgloss.NewStyle().Foreground(th.accent2).Render(cursor)
+}
 
+// pickerRows lists the window of matches around the cursor, grouped by
+// provider, with how many are above and below it.
+func (m *model) pickerRows(inner int) []string {
+	th := m.th
+	p := m.picker
 	matches := m.pickerMatches()
 	if p.cursor >= len(matches) {
 		p.cursor = max(0, len(matches)-1)
 	}
+	var lines []string
 	if len(matches) == 0 {
 		lines = append(lines, th.faintText.Render("  no models match"))
 	}
@@ -178,30 +190,33 @@ func (m *model) renderPicker() string {
 			lastProvider = mod.Provider
 			lines = append(lines, th.label.Render(strings.ToUpper(mod.Provider)))
 		}
-		mark := "  "
-		if mod == m.current() {
-			mark = lipgloss.NewStyle().Foreground(th.ok).Render("● ")
-		}
-		name := ansi.Truncate(mod.Name, inner-4, "…")
-		row := mark + name
-		if i == p.cursor {
-			row = lipgloss.NewStyle().Background(th.accent).Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Width(inner).Render(mark + name)
-		} else {
-			row = mark + lipgloss.NewStyle().Foreground(th.text).Render(name)
-		}
-		lines = append(lines, row)
+		lines = append(lines, m.pickerRow(mod, i == p.cursor, inner))
 	}
 	if rest := len(matches) - end; rest > 0 {
 		lines = append(lines, th.faintText.Render(fmt.Sprintf("  ↓ %d more", rest)))
 	}
+	return lines
+}
 
-	lines = append(lines, "")
-	if p.switching {
-		lines = append(lines, lipgloss.NewStyle().Foreground(th.accent3).Render(m.spinner()+" switching…"))
-	} else {
-		lines = append(lines, th.key.Render("↑↓")+th.keyHelp.Render(" select  ")+th.key.Render("enter")+th.keyHelp.Render(" switch  ")+th.key.Render("esc")+th.keyHelp.Render(" cancel"))
+func (m *model) pickerRow(mod Model, selected bool, inner int) string {
+	th := m.th
+	mark := "  "
+	if mod == m.current() {
+		mark = lipgloss.NewStyle().Foreground(th.ok).Render("● ")
 	}
-	return th.modal.BorderForeground(th.accent).Width(w).Background(th.panel).Render(strings.Join(lines, "\n"))
+	name := ansi.Truncate(mod.Name, inner-4, "…")
+	if selected {
+		return lipgloss.NewStyle().Background(th.accent).Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Width(inner).Render(mark + name)
+	}
+	return mark + lipgloss.NewStyle().Foreground(th.text).Render(name)
+}
+
+func (m *model) pickerFooter() string {
+	th := m.th
+	if m.picker.switching {
+		return lipgloss.NewStyle().Foreground(th.accent3).Render(m.spinner() + " switching…")
+	}
+	return th.key.Render("↑↓") + th.keyHelp.Render(" select  ") + th.key.Render("enter") + th.keyHelp.Render(" switch  ") + th.key.Render("esc") + th.keyHelp.Render(" cancel")
 }
 
 func shortID(id string) string {
