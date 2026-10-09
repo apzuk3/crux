@@ -96,25 +96,39 @@ func (t *Tools) whoisQuery(ctx context.Context, address, query string) (string, 
 // "ReferralServer: whois://host".
 func whoisReferral(response string) string {
 	for _, line := range strings.Split(response, "\n") {
-		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		value, ok := referralValue(line)
 		if !ok {
 			continue
 		}
-		value = strings.TrimSpace(value)
-		switch strings.ToLower(strings.TrimSpace(key)) {
-		case "refer", "whois", "registrar whois server", "referralserver":
-			if value == "" {
-				continue
-			}
-			if strings.Contains(value, "://") {
-				u, err := url.Parse(value)
-				if err != nil || u.Scheme != "whois" {
-					continue
-				}
-				value = u.Host
-			}
-			return value
+		if host := referralHost(value); host != "" {
+			return host
 		}
 	}
 	return ""
+}
+
+// referralValue returns the value of a line whose key names a referral.
+func referralValue(line string) (string, bool) {
+	key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+	if !ok {
+		return "", false
+	}
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "refer", "whois", "registrar whois server", "referralserver":
+		return strings.TrimSpace(value), true
+	}
+	return "", false
+}
+
+// referralHost returns the server a referral value names: the value itself,
+// or the host of a whois:// URL. Other URLs give "".
+func referralHost(value string) string {
+	if !strings.Contains(value, "://") {
+		return value
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme != "whois" {
+		return ""
+	}
+	return u.Host
 }

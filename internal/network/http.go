@@ -84,59 +84,26 @@ func (t *Tools) doHTTP(ctx context.Context, in HTTPRequestInput, publicOnly bool
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return "", fmt.Errorf("url %q must be an http or https URL", in.URL)
 	}
-	if in.Body != "" && in.BodyBase64 != "" {
-		return "", errors.New("give body or body_base64, not both")
+	body, err := httpRequestBody(in)
+	if err != nil {
+		return "", err
 	}
-	body := []byte(in.Body)
-	if in.BodyBase64 != "" {
-		if body, err = base64.StdEncoding.DecodeString(in.BodyBase64); err != nil {
-			return "", fmt.Errorf("decode body_base64: %w", err)
-		}
+	limit, err := optionalLimit(in.MaxBytes, netDefaultHTTPBytes, netMaxHTTPBytes)
+	if err != nil {
+		return "", err
 	}
-	limit := netDefaultHTTPBytes
-	if in.MaxBytes != nil {
-		if *in.MaxBytes < 1 {
-			return "", errors.New("max_bytes must be at least 1")
-		}
-		limit = min(*in.MaxBytes, netMaxHTTPBytes)
-	}
-	timeout := netDefaultTimeout
-	if in.TimeoutMS != nil {
-		if *in.TimeoutMS < 1 {
-			return "", errors.New("timeout_ms must be at least 1")
-		}
-		timeout = time.Duration(*in.TimeoutMS) * time.Millisecond
+	timeout, err := optionalTimeout(in.TimeoutMS, netDefaultTimeout)
+	if err != nil {
+		return "", err
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var reqBody io.Reader
-	if len(body) > 0 {
-		reqBody = strings.NewReader(string(body))
-	}
-	req, err := http.NewRequestWithContext(ctx, cmp.Or(strings.ToUpper(in.Method), http.MethodGet), u.String(), reqBody)
+	req, err := newHTTPRequest(ctx, in, u, body)
 	if err != nil {
 		return "", err
 	}
-	for key, value := range in.Headers {
-		req.Header.Set(key, value)
-	}
-	if req.Header.Get("User-Agent") == "" {
-		req.Header.Set("User-Agent", "crux")
-	}
-	follow := in.FollowRedirects == nil || *in.FollowRedirects
-	client := &http.Client{
-		Transport: t.httpTransport(publicOnly),
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if !follow {
-				return http.ErrUseLastResponse
-			}
-			if len(via) >= 10 {
-				return errors.New("stopped after 10 redirects")
-			}
-			return nil
-		},
-	}
+	client := newHTTPClient(t.httpTransport(publicOnly), in.FollowRedirects == nil || *in.FollowRedirects)
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
@@ -147,14 +114,90 @@ func (t *Tools) doHTTP(ctx context.Context, in HTTPRequestInput, publicOnly bool
 	if err != nil {
 		return "", fmt.Errorf("read response body: %w", err)
 	}
+	return formatHTTPResponse(resp, u.String(), start, data, limit), nil
+}
+
+// optionalLimit returns the max_bytes argument, def when absent, capped at most.
+func optionalLimit(p *int, def, most int) (int, error) {
+	if p == nil {
+		return def, nil
+	}
+	if *p < 1 {
+		return 0, errors.New("max_bytes must be at least 1")
+	}
+	return min(*p, most), nil
+}
+
+// optionalTimeout returns the timeout_ms argument, or def when absent.
+func optionalTimeout(p *int, def time.Duration) (time.Duration, error) {
+	if p == nil {
+		return def, nil
+	}
+	if *p < 1 {
+		return 0, errors.New("timeout_ms must be at least 1")
+	}
+	return time.Duration(*p) * time.Millisecond, nil
+}
+
+func httpRequestBody(in HTTPRequestInput) ([]byte, error) {
+	if in.Body != "" && in.BodyBase64 != "" {
+		return nil, errors.New("give body or body_base64, not both")
+	}
+	if in.BodyBase64 != "" {
+		body, err := base64.StdEncoding.DecodeString(in.BodyBase64)
+		if err != nil {
+			return nil, fmt.Errorf("decode body_base64: %w", err)
+		}
+		return body, nil
+	}
+	return []byte(in.Body), nil
+}
+
+func newHTTPRequest(ctx context.Context, in HTTPRequestInput, u *url.URL, body []byte) (*http.Request, error) {
+	var reqBody io.Reader
+	if len(body) > 0 {
+		reqBody = strings.NewReader(string(body))
+	}
+	req, err := http.NewRequestWithContext(ctx, cmp.Or(strings.ToUpper(in.Method), http.MethodGet), u.String(), reqBody)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range in.Headers {
+		req.Header.Set(key, value)
+	}
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", "crux")
+	}
+	return req, nil
+}
+
+// newHTTPClient returns a client that follows at most 10 redirects, or none
+// when follow is false.
+func newHTTPClient(transport http.RoundTripper, follow bool) *http.Client {
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if !follow {
+				return http.ErrUseLastResponse
+			}
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		},
+	}
+}
+
+// formatHTTPResponse shows the status, headers and at most limit bytes of
+// the body; data holds up to limit+1 bytes so truncation can be detected.
+func formatHTTPResponse(resp *http.Response, requested string, start time.Time, data []byte, limit int) string {
 	truncated := len(data) > limit
 	if truncated {
 		data = data[:limit]
 	}
-
 	var out strings.Builder
 	fmt.Fprintf(&out, "%s %s (%s)\n", resp.Proto, resp.Status, time.Since(start).Round(time.Millisecond))
-	if final := resp.Request.URL.String(); final != u.String() {
+	if final := resp.Request.URL.String(); final != requested {
 		fmt.Fprintf(&out, "Final URL: %s\n", final)
 	}
 	writeHeaders(&out, resp.Header)
@@ -174,7 +217,7 @@ func (t *Tools) doHTTP(ctx context.Context, in HTTPRequestInput, publicOnly bool
 		}
 		fmt.Fprintf(&out, "\n(truncated: showed %s; max_bytes can raise this up to %d)", shown, netMaxHTTPBytes)
 	}
-	return out.String(), nil
+	return out.String()
 }
 
 func writeHeaders(out *strings.Builder, header http.Header) {

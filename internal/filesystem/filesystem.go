@@ -185,82 +185,120 @@ func (t *Tools) readText(ctx context.Context, root *os.Root, name string, line, 
 	if err != nil {
 		return "", err
 	}
-	f, info, err := openRegular(root, rel)
-	if errors.Is(err, errIsDir) {
-		return "", fmt.Errorf("%s is a directory; use list_directory", name)
-	}
+	f, info, err := openTextFile(root, rel, name)
 	if err != nil {
-		return "", fsError(name, err)
+		return "", err
 	}
 	defer f.Close()
 
 	reader := bufio.NewReaderSize(f, 64<<10)
-	head, _ := reader.Peek(fsBinarySniffBytes)
-	if isBinary(head) {
+	if head, _ := reader.Peek(fsBinarySniffBytes); isBinary(head) {
 		return "", fmt.Errorf("%s is a binary file", name)
 	}
 
-	start, maxLines := 1, -1
+	r := &lineReader{name: name, reader: reader, start: 1, maxLines: -1, maxBytes: maxBytes, current: 1}
 	if line != nil {
-		start = *line
+		r.start = *line
 	}
 	if limit != nil {
-		maxLines = *limit
+		r.maxLines = *limit
 	}
+	if r.start == 1 && r.maxLines < 0 {
+		r.out.Grow(int(min(info.Size(), int64(maxBytes))) + 256)
+	}
+	if err := r.copy(ctx); err != nil {
+		return "", err
+	}
+	return r.result(), nil
+}
 
-	var out bytes.Buffer
-	if start == 1 && maxLines < 0 {
-		out.Grow(int(min(info.Size(), int64(maxBytes))) + 256)
+// openTextFile opens a regular file for reading, with errors worded for the
+// model.
+func openTextFile(root *os.Root, rel, name string) (*os.File, fs.FileInfo, error) {
+	f, info, err := openRegular(root, rel)
+	if errors.Is(err, errIsDir) {
+		return nil, nil, fmt.Errorf("%s is a directory; use list_directory", name)
 	}
-	truncated, midLine := false, false
-	current := 1
-	for i := 0; ; i++ {
-		if maxLines >= 0 && current-start >= maxLines {
-			break
-		}
-		if i%fsCtxCheckIterations == 0 {
-			if err := ctx.Err(); err != nil {
-				return "", err
-			}
-		}
-		chunk, readErr := reader.ReadSlice('\n')
-		if len(chunk) > 0 && current >= start {
-			if room := maxBytes - out.Len(); len(chunk) > room {
-				for room > 0 && !utf8.RuneStart(chunk[room]) {
-					room--
-				}
-				out.Write(chunk[:room])
-				truncated = true
-				midLine = room > 0 || out.Len() > 0 && out.Bytes()[out.Len()-1] != '\n'
-				break
-			}
-			out.Write(chunk)
-		}
-		if len(chunk) > 0 && chunk[len(chunk)-1] == '\n' {
-			current++
-		}
-		if errors.Is(readErr, bufio.ErrBufferFull) {
-			continue
-		}
-		if errors.Is(readErr, io.EOF) {
-			break
-		}
-		if readErr != nil {
-			return "", fsError(name, readErr)
-		}
+	if err != nil {
+		return nil, nil, fsError(name, err)
 	}
+	return f, info, nil
+}
 
+// lineReader copies lines start to start+maxLines of a file into out, at
+// most maxBytes of them.
+type lineReader struct {
+	name     string
+	reader   *bufio.Reader
+	start    int
+	maxLines int // negative for no limit
+	maxBytes int
+
+	out       bytes.Buffer
+	current   int // 1-based number of the line being read
+	truncated bool
+	midLine   bool // the cut left part of a line in out
+}
+
+func (r *lineReader) done() bool {
+	return r.maxLines >= 0 && r.current-r.start >= r.maxLines
+}
+
+// copy reads until the requested lines, maxBytes or the file end.
+func (r *lineReader) copy(ctx context.Context) error {
+	for i := 0; !r.done(); i++ {
+		if i%fsCtxCheckIterations == 0 && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		chunk, err := r.reader.ReadSlice('\n')
+		if !r.write(chunk) || errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
+			return fsError(r.name, err)
+		}
+	}
+	return nil
+}
+
+// write appends chunk (a line or part of one) when it is within the
+// requested lines, and reports whether reading can go on.
+func (r *lineReader) write(chunk []byte) bool {
+	if len(chunk) > 0 && r.current >= r.start {
+		if room := r.maxBytes - r.out.Len(); len(chunk) > room {
+			r.writeTruncated(chunk, room)
+			return false
+		}
+		r.out.Write(chunk)
+	}
+	if len(chunk) > 0 && chunk[len(chunk)-1] == '\n' {
+		r.current++
+	}
+	return true
+}
+
+// writeTruncated writes what fits of chunk in room, without cutting a rune.
+func (r *lineReader) writeTruncated(chunk []byte, room int) {
+	for room > 0 && !utf8.RuneStart(chunk[room]) {
+		room--
+	}
+	r.out.Write(chunk[:room])
+	r.truncated = true
+	r.midLine = room > 0 || r.out.Len() > 0 && r.out.Bytes()[r.out.Len()-1] != '\n'
+}
+
+func (r *lineReader) result() string {
 	switch {
-	case truncated && midLine:
-		fmt.Fprintf(&out, "\n[Output truncated at %d bytes, within line %d. The rest of that line is not shown; use line and limit to read later lines.]", maxBytes, current)
-	case truncated:
-		fmt.Fprintf(&out, "\n[Output truncated at %d bytes, before line %d. Use line and limit to read the rest.]", maxBytes, current)
-	case out.Len() == 0 && start > 1:
-		return fmt.Sprintf("No content: %s has fewer than %d lines.", name, start), nil
-	case out.Len() == 0:
-		return fmt.Sprintf("%s is empty.", name), nil
+	case r.truncated && r.midLine:
+		fmt.Fprintf(&r.out, "\n[Output truncated at %d bytes, within line %d. The rest of that line is not shown; use line and limit to read later lines.]", r.maxBytes, r.current)
+	case r.truncated:
+		fmt.Fprintf(&r.out, "\n[Output truncated at %d bytes, before line %d. Use line and limit to read the rest.]", r.maxBytes, r.current)
+	case r.out.Len() == 0 && r.start > 1:
+		return fmt.Sprintf("No content: %s has fewer than %d lines.", r.name, r.start)
+	case r.out.Len() == 0:
+		return fmt.Sprintf("%s is empty.", r.name)
 	}
-	return out.String(), nil
+	return r.out.String()
 }
 
 // ReadMultipleFilesInput holds the arguments of ReadMultipleFiles.
@@ -400,52 +438,73 @@ func readDirLimited(root *os.Root, rel string, limit int) ([]fs.DirEntry, bool, 
 // most fsMaxWalkEntries entries are visited; walkRoot reports whether it
 // stopped because of that budget.
 func walkRoot(ctx context.Context, root *os.Root, start string, fn func(p string, d fs.DirEntry) error) (bool, error) {
-	visited := 0
-	exhausted := false
-	var walk func(dir string) error
-	walk = func(dir string) error {
-		entries, more, err := readDirLimited(root, filepath.FromSlash(dir), fsMaxWalkEntries-visited)
-		if err != nil {
-			if dir == start {
-				return err
-			}
-			return nil
-		}
-		if more {
-			exhausted = true
-		}
-		for _, entry := range entries {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			visited++
-			p := path.Join(dir, entry.Name())
-			err := fn(p, entry)
-			if errors.Is(err, fs.SkipDir) {
-				continue
-			}
-			if err != nil {
-				return err
-			}
-			if entry.IsDir() {
-				if err := walk(p); err != nil {
-					return err
-				}
-			}
-			if exhausted {
-				return fs.SkipAll
-			}
-		}
-		if exhausted {
-			return fs.SkipAll
-		}
-		return nil
-	}
-	err := walk(start)
+	w := &walker{root: root, start: start, fn: fn}
+	err := w.walkDir(ctx, start)
 	if errors.Is(err, fs.SkipAll) {
 		err = nil
 	}
-	return exhausted, err
+	return w.exhausted, err
+}
+
+// walker is the state of one walkRoot call.
+type walker struct {
+	root  *os.Root
+	start string
+	fn    func(p string, d fs.DirEntry) error
+
+	visited   int
+	exhausted bool // the entry budget ran out
+}
+
+// walkDir visits the entries of dir. A directory other than start that
+// cannot be read is skipped.
+func (w *walker) walkDir(ctx context.Context, dir string) error {
+	entries, more, err := readDirLimited(w.root, filepath.FromSlash(dir), fsMaxWalkEntries-w.visited)
+	if err != nil {
+		if dir == w.start {
+			return err
+		}
+		return nil
+	}
+	if more {
+		w.exhausted = true
+	}
+	for _, entry := range entries {
+		err := w.visit(ctx, dir, entry)
+		if errors.Is(err, fs.SkipDir) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if w.exhausted {
+			return fs.SkipAll
+		}
+	}
+	if w.exhausted {
+		return fs.SkipAll
+	}
+	return nil
+}
+
+// visit calls fn for one entry and walks into it when it is a directory.
+func (w *walker) visit(ctx context.Context, dir string, entry fs.DirEntry) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	w.visited++
+	p := path.Join(dir, entry.Name())
+	err := w.fn(p, entry)
+	if errors.Is(err, fs.SkipDir) {
+		return fs.SkipDir
+	}
+	if err != nil {
+		return err
+	}
+	if entry.IsDir() {
+		return w.walkDir(ctx, p)
+	}
+	return nil
 }
 
 func walkBudgetNote() string {
@@ -590,48 +649,13 @@ func (t *Tools) SearchFilesContent(ctx context.Context, in SearchFilesContentInp
 	if len(in.Query) > fsMaxQueryLength {
 		return "", fmt.Errorf("query is longer than %d bytes", fsMaxQueryLength)
 	}
-	include := strings.TrimPrefix(filepath.ToSlash(in.Include), "./")
-	if include != "" {
-		var err error
-		if include, err = cleanGlob(include); err != nil {
-			return "", err
-		}
+	include, excludes, err := searchFilters(in)
+	if err != nil {
+		return "", err
 	}
-	excludes := make([]string, 0, len(in.ExcludePatterns))
-	for _, pattern := range in.ExcludePatterns {
-		pattern, err := cleanGlob(strings.TrimSuffix(strings.TrimPrefix(filepath.ToSlash(pattern), "./"), "/"))
-		if err != nil {
-			return "", err
-		}
-		excludes = append(excludes, pattern)
-	}
-	match := func(line string) (int, int, bool) {
-		i := strings.Index(line, in.Query)
-		return i, i + len(in.Query), i >= 0
-	}
-	longLines := false
-	if in.IsRegex {
-		re, err := compileSearchRegex(in.Query)
-		if err != nil {
-			return "", err
-		}
-		match = func(line string) (int, int, bool) {
-			// Regex work grows with line length times program size, so
-			// only the start of a very long line is searched.
-			if len(line) > fsMaxRegexLine {
-				end := fsMaxRegexLine
-				for end > 0 && !utf8.RuneStart(line[end]) {
-					end--
-				}
-				line = line[:end]
-				longLines = true
-			}
-			loc := re.FindStringIndex(line)
-			if loc == nil {
-				return 0, 0, false
-			}
-			return loc[0], loc[1], true
-		}
+	match, err := newLineMatcher(in.Query, in.IsRegex)
+	if err != nil {
+		return "", err
 	}
 
 	rel, err := t.resolve(in.Path)
@@ -648,90 +672,192 @@ func (t *Tools) SearchFilesContent(ctx context.Context, in SearchFilesContentInp
 		return "", err
 	}
 
-	start := display(rel)
-	var out strings.Builder
-	matches := 0
-	scanned := int64(0)
-	var stopped string
-	exhausted, err := walkRoot(ctx, root, start, func(p string, d fs.DirEntry) error {
-		relPath := relTo(start, p)
-		if d.IsDir() && d.Name() == ".git" || excluded(excludes, relPath, d.Name()) {
-			if d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() || include != "" && !matchGlob(include, relPath) {
-			return nil
-		}
-
-		f, info, err := openRegular(root, filepath.FromSlash(p))
-		if err != nil {
-			return nil
-		}
-		defer f.Close()
-		if info.Size() > fsMaxSearchFile {
-			return nil
-		}
-		if scanned+info.Size() > fsMaxSearchBytes {
-			stopped = fmt.Sprintf("[Stopped after reading %d MB of files; results may be incomplete. Narrow the search with path, include or exclude_patterns.]", fsMaxSearchBytes>>20)
-			return fs.SkipAll
-		}
-		content, err := io.ReadAll(io.LimitReader(f, fsMaxSearchFile+1))
-		scanned += int64(len(content))
-		if err != nil || len(content) > fsMaxSearchFile || isBinary(content[:min(len(content), fsBinarySniffBytes)]) {
-			return nil
-		}
-
-		lineNum, sinceCheck := 0, 0
-		for line := range strings.SplitSeq(string(content), "\n") {
-			lineNum++
-			sinceCheck += len(line)
-			if lineNum%fsCtxCheckIterations == 0 || sinceCheck >= fsMaxRegexLine {
-				sinceCheck = 0
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-			}
-			line = strings.TrimSuffix(line, "\r")
-			from, to, ok := match(line)
-			if !ok {
-				continue
-			}
-			entry := fmt.Sprintf("%s:%d:%d: %s", p, lineNum, from+1, preview(line, from, to))
-			if out.Len()+len(entry)+1 > fsMaxSearchOutput {
-				stopped = "[Output truncated. Narrow the search with a more specific query, path, include or exclude_patterns.]"
-				return fs.SkipAll
-			}
-			if matches > 0 {
-				out.WriteByte('\n')
-			}
-			out.WriteString(entry)
-			matches++
-		}
-		return nil
-	})
+	s := &contentSearch{root: root, start: display(rel), include: include, excludes: excludes, match: match}
+	exhausted, err := walkRoot(ctx, root, s.start, func(p string, d fs.DirEntry) error { return s.visit(ctx, p, d) })
 	if err != nil {
 		return "", fsError(in.Path, err)
 	}
+	return s.result(exhausted), nil
+}
+
+// searchFilters cleans the include and exclude globs of a search.
+func searchFilters(in SearchFilesContentInput) (include string, excludes []string, err error) {
+	include = strings.TrimPrefix(filepath.ToSlash(in.Include), "./")
+	if include != "" {
+		if include, err = cleanGlob(include); err != nil {
+			return "", nil, err
+		}
+	}
+	excludes = make([]string, 0, len(in.ExcludePatterns))
+	for _, pattern := range in.ExcludePatterns {
+		pattern, err := cleanGlob(strings.TrimSuffix(strings.TrimPrefix(filepath.ToSlash(pattern), "./"), "/"))
+		if err != nil {
+			return "", nil, err
+		}
+		excludes = append(excludes, pattern)
+	}
+	return include, excludes, nil
+}
+
+// lineMatcher finds a query in a line, as text or as a regular expression.
+type lineMatcher struct {
+	query     string
+	re        *regexp.Regexp // nil for a text search
+	longLines bool           // a line was cut at fsMaxRegexLine before matching
+}
+
+func newLineMatcher(query string, isRegex bool) (*lineMatcher, error) {
+	m := &lineMatcher{query: query}
+	if !isRegex {
+		return m, nil
+	}
+	re, err := compileSearchRegex(query)
+	if err != nil {
+		return nil, err
+	}
+	m.re = re
+	return m, nil
+}
+
+// match returns the byte range of the first match in line.
+func (m *lineMatcher) match(line string) (int, int, bool) {
+	if m.re == nil {
+		i := strings.Index(line, m.query)
+		return i, i + len(m.query), i >= 0
+	}
+	// Regex work grows with line length times program size, so only the
+	// start of a very long line is searched.
+	if len(line) > fsMaxRegexLine {
+		end := fsMaxRegexLine
+		for end > 0 && !utf8.RuneStart(line[end]) {
+			end--
+		}
+		line = line[:end]
+		m.longLines = true
+	}
+	loc := m.re.FindStringIndex(line)
+	if loc == nil {
+		return 0, 0, false
+	}
+	return loc[0], loc[1], true
+}
+
+// contentSearch is the state of one SearchFilesContent walk.
+type contentSearch struct {
+	root     *os.Root
+	start    string
+	include  string
+	excludes []string
+	match    *lineMatcher
+
+	out     strings.Builder
+	matches int
+	scanned int64  // bytes read so far
+	stopped string // note on why the search ended early
+}
+
+// visit searches one walk entry.
+func (s *contentSearch) visit(ctx context.Context, p string, d fs.DirEntry) error {
+	relPath := relTo(s.start, p)
+	if d.IsDir() && d.Name() == ".git" || excluded(s.excludes, relPath, d.Name()) {
+		if d.IsDir() {
+			return fs.SkipDir
+		}
+		return nil
+	}
+	if d.IsDir() || s.include != "" && !matchGlob(s.include, relPath) {
+		return nil
+	}
+	content, ok, err := s.readFile(p)
+	if !ok {
+		return err
+	}
+	return s.scanFile(ctx, p, content)
+}
+
+// readFile reads a file for searching. ok is false for a file that is not
+// searched: too large, unreadable, binary, or over the read budget, which
+// also ends the walk with fs.SkipAll.
+func (s *contentSearch) readFile(p string) (content []byte, ok bool, err error) {
+	f, info, err := openRegular(s.root, filepath.FromSlash(p))
+	if err != nil {
+		return nil, false, nil
+	}
+	defer f.Close()
+	if info.Size() > fsMaxSearchFile {
+		return nil, false, nil
+	}
+	if s.scanned+info.Size() > fsMaxSearchBytes {
+		s.stopped = fmt.Sprintf("[Stopped after reading %d MB of files; results may be incomplete. Narrow the search with path, include or exclude_patterns.]", fsMaxSearchBytes>>20)
+		return nil, false, fs.SkipAll
+	}
+	content, err = io.ReadAll(io.LimitReader(f, fsMaxSearchFile+1))
+	s.scanned += int64(len(content))
+	if err != nil || len(content) > fsMaxSearchFile || isBinary(content[:min(len(content), fsBinarySniffBytes)]) {
+		return nil, false, nil
+	}
+	return content, true, nil
+}
+
+// scanFile adds the matching lines of one file.
+func (s *contentSearch) scanFile(ctx context.Context, p string, content []byte) error {
+	lineNum, sinceCheck := 0, 0
+	for line := range strings.SplitSeq(string(content), "\n") {
+		lineNum++
+		sinceCheck += len(line)
+		if lineNum%fsCtxCheckIterations == 0 || sinceCheck >= fsMaxRegexLine {
+			sinceCheck = 0
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		line = strings.TrimSuffix(line, "\r")
+		from, to, ok := s.match.match(line)
+		if !ok {
+			continue
+		}
+		if !s.add(fmt.Sprintf("%s:%d:%d: %s", p, lineNum, from+1, preview(line, from, to))) {
+			return fs.SkipAll
+		}
+	}
+	return nil
+}
+
+// add appends one result line and reports whether it fit in the output cap.
+func (s *contentSearch) add(entry string) bool {
+	if s.out.Len()+len(entry)+1 > fsMaxSearchOutput {
+		s.stopped = "[Output truncated. Narrow the search with a more specific query, path, include or exclude_patterns.]"
+		return false
+	}
+	if s.matches > 0 {
+		s.out.WriteByte('\n')
+	}
+	s.out.WriteString(entry)
+	s.matches++
+	return true
+}
+
+// result formats the matches and the notes on an incomplete search.
+func (s *contentSearch) result(exhausted bool) string {
+	stopped := s.stopped
 	if stopped == "" && exhausted {
 		stopped = walkBudgetNote()
 	}
-	if longLines {
+	if s.match.longLines {
 		note := fmt.Sprintf("[Lines longer than %d KB were searched only in their first %d KB.]", fsMaxRegexLine>>10, fsMaxRegexLine>>10)
 		stopped = strings.TrimPrefix(stopped+"\n"+note, "\n")
 	}
-	if matches == 0 {
+	if s.matches == 0 {
 		if stopped != "" {
-			return "No results found\n" + stopped, nil
+			return "No results found\n" + stopped
 		}
-		return "No results found", nil
+		return "No results found"
 	}
 	if stopped != "" {
-		out.WriteString("\n")
-		out.WriteString(stopped)
+		s.out.WriteString("\n")
+		s.out.WriteString(stopped)
 	}
-	return out.String(), nil
+	return s.out.String()
 }
 
 // compileSearchRegex compiles a search_files_content query, rejecting one
