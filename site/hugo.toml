@@ -73,6 +73,7 @@ enableEmoji = true
     displayToggle = true
 
   [params.footer]
+    enable = true
     displayCopyright = false
     displayPoweredBy = false
     width = "normal"
