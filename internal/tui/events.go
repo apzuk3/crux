@@ -15,197 +15,249 @@ func (m *model) apply(e Event, replay bool) tea.Cmd {
 		m.usage.Out += e.Usage.Out
 		m.usage.CacheRead += e.Usage.CacheRead
 	}
-	top := e.Parent == ""
-	if top && e.FirstToken > 0 {
+	if e.top() && e.FirstToken > 0 {
 		m.run.ttft = e.FirstToken
 	}
-	parent := m.calls[e.Parent]
 
 	switch e.Kind {
-	case EventRunStarted:
-		if top {
-			m.runCount++
-		}
-
-	case EventRunFinished:
-		if !top {
-			return nil
-		}
-		m.run.outcome = e.Outcome
-		m.run.elapsed = time.Since(m.run.started)
-		switch e.Outcome {
-		case "answered":
-			m.run.stage = stageDone
-		case "approval_needed":
-			m.run.stage = stageApproval
-		case "cancelled":
-			m.run.stage = stageCancelled
-		default:
-			m.run.stage = stageFailed
-		}
-		m.barColors.set(m.th, m.run.stage, m.frame)
-		switch m.run.stage {
-		case stageDone, stageFailed:
-			return m.bar.SetPercent(1)
-		}
-
+	case EventRunStarted, EventRunFinished:
+		return m.applyRun(e)
 	case EventTurnStarted:
-		m.turns++
-		if !top {
-			if parent != nil {
-				parent.turns++
-				parent.activity = "thinking"
-				parent.invalidate()
-			}
-			return nil
-		}
-		m.run.turn++
-		m.run.toolsTotal, m.run.toolsDone = 0, 0
-		return m.setStage(stageRequest)
-
-	case EventUser:
-		// Live prompts are shown when sent; a subagent's task shows on its card.
-		if replay && top {
-			m.blocks = append(m.blocks, &block{kind: blockUser, text: e.Text})
-		}
-
-	case EventText:
-		b := m.live(blockAssistant, e.Agent)
-		b.text += e.Text
-		b.invalidate()
-		return m.setStage(stageWriting)
-
-	case EventReasoningText:
-		b := m.live(blockReasoning, e.Agent)
-		b.text += e.Text
-		b.invalidate()
-		return m.setStage(stageThinking)
-
+		return m.applyTurn(e)
+	case EventUser, EventCompacted, EventRefusal:
+		m.applyNotice(e, replay)
+	case EventText, EventReasoningText:
+		return m.applyDelta(e)
 	case EventReasoning:
-		if !top {
-			return nil
-		}
-		if b := m.liveBlock(blockReasoning); b != nil {
-			if e.Text != "" {
-				b.text = e.Text
-			}
-			b.finish()
-			return nil
-		}
-		if e.Text != "" {
-			m.blocks = append(m.blocks, &block{kind: blockReasoning, text: e.Text})
-		}
-
+		m.applyReasoning(e)
 	case EventAssistant:
-		if !top {
-			if parent != nil && e.Text != "" {
-				parent.activity = "answering"
-				parent.invalidate()
-			}
-			return nil
-		}
-		m.finishReasoning()
-		if b := m.liveBlock(blockAssistant); b != nil {
-			b.text = e.Text
-			b.finish()
-			return nil
-		}
-		if e.Text != "" {
-			m.blocks = append(m.blocks, &block{kind: blockAssistant, agent: e.Agent, text: e.Text})
-		}
-
-	case EventCompacted:
-		if top {
-			m.addNotice(noticeInfo, e.Text)
-		}
-
-	case EventRefusal:
-		if top {
-			m.finishLive()
-			m.addNotice(noticeRefusal, e.Text)
-		}
-
+		m.applyAssistant(e)
 	case EventToolCall:
-		m.finishLive()
-		b := &block{kind: blockTool, call: e.Call, state: toolQueued, agent: e.Agent}
-		if t, ok := m.tools[e.Call.Name]; ok {
-			b.subagent = t.IsSubAgent
-		}
-		m.calls[e.Call.ID] = b
-		if parent != nil {
-			parent.children = append(parent.children, b)
-			parent.activity = "calling " + e.Call.Name
-			parent.invalidate()
-		} else {
-			m.blocks = append(m.blocks, b)
-		}
-		if top {
-			m.run.toolsTotal++
-			return m.setStage(stageTools)
-		}
-
+		return m.applyToolCall(e)
 	case EventToolStarted:
-		m.toolCalls++
-		b := m.calls[e.Call.ID]
-		if b == nil {
-			return nil
-		}
-		b.state = toolRunning
-		b.started = time.Now()
-		b.invalidate()
-		m.stat(b.call.Name).running++
-		if parent != nil {
-			parent.activity = "running " + b.call.Name
-			parent.invalidate()
-		}
-		if top {
-			return m.setStage(stageTools)
-		}
-
+		return m.applyToolStarted(e)
 	case EventToolResult:
-		b := m.calls[e.Call.ID]
-		if b == nil {
-			return nil
-		}
-		if b.state == toolRunning {
-			st := m.stat(b.call.Name)
-			st.running = max(0, st.running-1)
-		}
-		if !replay {
-			st := m.stat(b.call.Name)
-			st.calls++
-			st.last = e.Duration
-			if e.Err != "" && !e.Denied {
-				st.failed++
-			}
-		}
-		b.output, b.err, b.dur = e.Output, e.Err, e.Duration
-		b.activity = ""
-		switch {
-		case e.Denied:
-			b.state = toolDenied
-		case e.Err != "":
-			b.state = toolFailed
-		default:
-			b.state = toolOK
-		}
-		b.invalidate()
-		if top {
-			m.run.toolsDone++
-			return m.setStage(stageTools)
-		}
-
+		return m.applyToolResult(e, replay)
 	case EventApproval:
-		if b := m.calls[e.Call.ID]; b != nil {
-			if e.Approved {
-				b.state = toolQueued
-			} else {
-				b.state = toolDenied
-			}
-			b.invalidate()
-		}
+		m.applyApproval(e)
 	}
 	return nil
+}
+
+// top reports whether the event comes from the top-level session rather
+// than a subagent's.
+func (e Event) top() bool { return e.Parent == "" }
+
+func (m *model) applyRun(e Event) tea.Cmd {
+	if !e.top() {
+		return nil
+	}
+	if e.Kind == EventRunStarted {
+		m.runCount++
+		return nil
+	}
+	m.run.outcome = e.Outcome
+	m.run.elapsed = time.Since(m.run.started)
+	m.run.stage = finishedStage(e.Outcome)
+	m.barColors.set(m.th, m.run.stage, m.frame)
+	switch m.run.stage {
+	case stageDone, stageFailed:
+		return m.bar.SetPercent(1)
+	}
+	return nil
+}
+
+func finishedStage(outcome string) stage {
+	switch outcome {
+	case "answered":
+		return stageDone
+	case "approval_needed":
+		return stageApproval
+	case "cancelled":
+		return stageCancelled
+	}
+	return stageFailed
+}
+
+func (m *model) applyTurn(e Event) tea.Cmd {
+	m.turns++
+	if !e.top() {
+		if parent := m.calls[e.Parent]; parent != nil {
+			parent.turns++
+			parent.activity = "thinking"
+			parent.invalidate()
+		}
+		return nil
+	}
+	m.run.turn++
+	m.run.toolsTotal, m.run.toolsDone = 0, 0
+	return m.setStage(stageRequest)
+}
+
+// applyNotice shows the top-level events that become a block of their own.
+func (m *model) applyNotice(e Event, replay bool) {
+	if !e.top() {
+		return
+	}
+	switch e.Kind {
+	case EventUser:
+		// Live prompts are shown when sent; a subagent's task shows on its card.
+		if replay {
+			m.blocks = append(m.blocks, &block{kind: blockUser, text: e.Text})
+		}
+	case EventCompacted:
+		m.addNotice(noticeInfo, e.Text)
+	case EventRefusal:
+		m.finishLive()
+		m.addNotice(noticeRefusal, e.Text)
+	}
+}
+
+// applyDelta appends streamed text to the live block of its kind.
+func (m *model) applyDelta(e Event) tea.Cmd {
+	kind, s := blockAssistant, stageWriting
+	if e.Kind == EventReasoningText {
+		kind, s = blockReasoning, stageThinking
+	}
+	b := m.live(kind, e.Agent)
+	b.text += e.Text
+	b.invalidate()
+	return m.setStage(s)
+}
+
+func (m *model) applyReasoning(e Event) {
+	if !e.top() {
+		return
+	}
+	if b := m.liveBlock(blockReasoning); b != nil {
+		if e.Text != "" {
+			b.text = e.Text
+		}
+		b.finish()
+		return
+	}
+	if e.Text != "" {
+		m.blocks = append(m.blocks, &block{kind: blockReasoning, text: e.Text})
+	}
+}
+
+func (m *model) applyAssistant(e Event) {
+	if !e.top() {
+		if parent := m.calls[e.Parent]; parent != nil && e.Text != "" {
+			parent.activity = "answering"
+			parent.invalidate()
+		}
+		return
+	}
+	m.finishReasoning()
+	if b := m.liveBlock(blockAssistant); b != nil {
+		b.text = e.Text
+		b.finish()
+		return
+	}
+	if e.Text != "" {
+		m.blocks = append(m.blocks, &block{kind: blockAssistant, agent: e.Agent, text: e.Text})
+	}
+}
+
+func (m *model) applyToolCall(e Event) tea.Cmd {
+	m.finishLive()
+	parent := m.calls[e.Parent]
+	b := &block{kind: blockTool, call: e.Call, state: toolQueued, agent: e.Agent}
+	if t, ok := m.tools[e.Call.Name]; ok {
+		b.subagent = t.IsSubAgent
+	}
+	m.calls[e.Call.ID] = b
+	if parent != nil {
+		parent.children = append(parent.children, b)
+		parent.activity = "calling " + e.Call.Name
+		parent.invalidate()
+	} else {
+		m.blocks = append(m.blocks, b)
+	}
+	if e.top() {
+		m.run.toolsTotal++
+		return m.setStage(stageTools)
+	}
+	return nil
+}
+
+func (m *model) applyToolStarted(e Event) tea.Cmd {
+	m.toolCalls++
+	b := m.calls[e.Call.ID]
+	if b == nil {
+		return nil
+	}
+	b.state = toolRunning
+	b.started = time.Now()
+	b.invalidate()
+	m.stat(b.call.Name).running++
+	if parent := m.calls[e.Parent]; parent != nil {
+		parent.activity = "running " + b.call.Name
+		parent.invalidate()
+	}
+	if e.top() {
+		return m.setStage(stageTools)
+	}
+	return nil
+}
+
+func (m *model) applyToolResult(e Event, replay bool) tea.Cmd {
+	b := m.calls[e.Call.ID]
+	if b == nil {
+		return nil
+	}
+	m.recordToolStat(b, e, replay)
+	b.output, b.err, b.dur = e.Output, e.Err, e.Duration
+	b.activity = ""
+	b.state = resultState(e)
+	b.invalidate()
+	if e.top() {
+		m.run.toolsDone++
+		return m.setStage(stageTools)
+	}
+	return nil
+}
+
+// recordToolStat updates the sidebar's counters for a finished call. Replayed
+// results only release the running count.
+func (m *model) recordToolStat(b *block, e Event, replay bool) {
+	if b.state == toolRunning {
+		st := m.stat(b.call.Name)
+		st.running = max(0, st.running-1)
+	}
+	if replay {
+		return
+	}
+	st := m.stat(b.call.Name)
+	st.calls++
+	st.last = e.Duration
+	if e.Err != "" && !e.Denied {
+		st.failed++
+	}
+}
+
+func resultState(e Event) toolState {
+	switch {
+	case e.Denied:
+		return toolDenied
+	case e.Err != "":
+		return toolFailed
+	}
+	return toolOK
+}
+
+func (m *model) applyApproval(e Event) {
+	b := m.calls[e.Call.ID]
+	if b == nil {
+		return
+	}
+	if e.Approved {
+		b.state = toolQueued
+	} else {
+		b.state = toolDenied
+	}
+	b.invalidate()
 }
 
 // setStage moves the top-level run to s and advances the progress bar.
