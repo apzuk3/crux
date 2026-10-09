@@ -788,7 +788,7 @@ func (t *Tools) connectWebSocket(ctx context.Context, in ConnectInput) (string, 
 		return "", err
 	}
 	buf := newNetBuffer()
-	readCtx, cancelRead := context.WithCancel(context.Background())
+	readCtx, cancelRead := context.WithCancel(context.WithoutCancel(ctx))
 	h := webSocketHandle(conn, buf, cancelRead, in.Protocol, in.Address)
 	if err := t.add(in.Protocol, h); err != nil {
 		h.close()

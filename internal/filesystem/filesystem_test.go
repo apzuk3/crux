@@ -99,6 +99,52 @@ func TestReadText(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+// walkCase is one TestWalkRoot case: a walk from start (the root when empty)
+// whose callback returns errAt at path at, with the expected visited paths.
+type walkCase struct {
+	name          string
+	start         string
+	budget        int
+	at            string
+	errAt         error
+	want          []string
+	wantExhausted bool
+	wantErr       error
+}
+
+// callback returns a walk callback that records the visited paths in got and
+// returns the case's error at its path.
+func (tt walkCase) callback(got *[]string) func(p string, d fs.DirEntry) error {
+	return func(p string, d fs.DirEntry) error {
+		*got = append(*got, p)
+		if p == tt.at {
+			return tt.errAt
+		}
+		return nil
+	}
+}
+
+func runWalkCase(t *testing.T, root *os.Root, tt walkCase) {
+	t.Helper()
+	if tt.budget > 0 {
+		defer func(n int) { fsMaxWalkEntries = n }(fsMaxWalkEntries)
+		fsMaxWalkEntries = tt.budget
+	}
+	start := tt.start
+	if start == "" {
+		start = "."
+	}
+	var got []string
+	exhausted, err := walkRoot(t.Context(), root, start, tt.callback(&got))
+	if tt.wantErr != nil {
+		require.ErrorIs(t, err, tt.wantErr)
+	} else {
+		require.NoError(t, err)
+	}
+	require.Equal(t, tt.want, got)
+	require.Equal(t, tt.wantExhausted, exhausted)
+}
+
 func TestWalkRoot(t *testing.T) {
 	_, root := testRoot(t, map[string]string{
 		"a/x.txt": "",
@@ -106,77 +152,17 @@ func TestWalkRoot(t *testing.T) {
 		"c.txt":   "",
 	})
 	errBoom := errors.New("boom")
-	tests := []struct {
-		name          string
-		start         string
-		budget        int
-		fn            func(p string, d fs.DirEntry) error
-		want          []string
-		wantExhausted bool
-		wantErr       error
-	}{
+	tests := []walkCase{
 		{name: "all", want: []string{"a", "a/x.txt", "b", "b/y.txt", "c.txt"}},
-		{
-			name: "skip a directory",
-			fn: func(p string, d fs.DirEntry) error {
-				if p == "a" {
-					return fs.SkipDir
-				}
-				return nil
-			},
-			want: []string{"a", "b", "b/y.txt", "c.txt"},
-		},
-		{
-			name: "skip all",
-			fn: func(p string, d fs.DirEntry) error {
-				if p == "b" {
-					return fs.SkipAll
-				}
-				return nil
-			},
-			want: []string{"a", "a/x.txt", "b"},
-		},
-		{
-			name: "callback error",
-			fn: func(p string, d fs.DirEntry) error {
-				if p == "a/x.txt" {
-					return errBoom
-				}
-				return nil
-			},
-			want:    []string{"a", "a/x.txt"},
-			wantErr: errBoom,
-		},
+		{name: "skip a directory", at: "a", errAt: fs.SkipDir, want: []string{"a", "b", "b/y.txt", "c.txt"}},
+		{name: "skip all", at: "b", errAt: fs.SkipAll, want: []string{"a", "a/x.txt", "b"}},
+		{name: "callback error", at: "a/x.txt", errAt: errBoom, want: []string{"a", "a/x.txt"}, wantErr: errBoom},
 		{name: "subdirectory start", start: "a", want: []string{"a/x.txt"}},
 		{name: "missing start", start: "nope", wantErr: fs.ErrNotExist},
 		{name: "entry budget", budget: 3, want: []string{"a", "a/x.txt", "b"}, wantExhausted: true},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.budget > 0 {
-				defer func(n int) { fsMaxWalkEntries = n }(fsMaxWalkEntries)
-				fsMaxWalkEntries = tt.budget
-			}
-			start := tt.start
-			if start == "" {
-				start = "."
-			}
-			var got []string
-			exhausted, err := walkRoot(t.Context(), root, start, func(p string, d fs.DirEntry) error {
-				got = append(got, p)
-				if tt.fn != nil {
-					return tt.fn(p, d)
-				}
-				return nil
-			})
-			if tt.wantErr != nil {
-				require.ErrorIs(t, err, tt.wantErr)
-			} else {
-				require.NoError(t, err)
-			}
-			require.Equal(t, tt.want, got)
-			require.Equal(t, tt.wantExhausted, exhausted)
-		})
+		t.Run(tt.name, func(t *testing.T) { runWalkCase(t, root, tt) })
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
