@@ -248,29 +248,12 @@ func structSchema(t reflect.Type, visiting map[reflect.Type]bool) map[string]any
 func collectFields(t reflect.Type, depth int, required bool, visiting map[reflect.Type]bool, out *[]schemaField) {
 	for i := range t.NumField() {
 		field := t.Field(i)
-		tag := field.Tag.Get("json")
-		if tag == "-" {
+		if skipField(field) {
 			continue
 		}
-		name, options, _ := strings.Cut(tag, ",")
-
-		if field.Anonymous {
-			ft := field.Type
-			if ft.Kind() == reflect.Pointer {
-				ft = ft.Elem()
-			}
-			if name == "" && ft.Kind() == reflect.Struct {
-				if !visiting[ft] {
-					visiting[ft] = true
-					collectFields(ft, depth+1, required && field.Type.Kind() != reflect.Pointer, visiting, out)
-					delete(visiting, ft)
-				}
-				continue
-			}
-			if !field.IsExported() && ft.Kind() != reflect.Struct {
-				continue
-			}
-		} else if !field.IsExported() {
+		name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if embedded, ok := embeddedStruct(field, name); ok {
+			collectEmbedded(embedded, depth+1, required && field.Type.Kind() != reflect.Pointer, visiting, out)
 			continue
 		}
 
@@ -279,24 +262,67 @@ func collectFields(t reflect.Type, depth int, required bool, visiting map[reflec
 			name = field.Name
 		}
 		opts := strings.Split(options, ",")
-
-		property := schemaOf(field.Type, visiting)
-		if slices.Contains(opts, "string") && isStringEncodable(field.Type) {
-			property = map[string]any{"type": "string"}
-		}
-		if description := field.Tag.Get("description"); description != "" {
-			property["description"] = description
-		}
-
 		*out = append(*out, schemaField{
 			typ:      field.Type,
 			name:     name,
 			depth:    depth,
 			tagged:   tagged,
 			required: required && !slices.Contains(opts, "omitempty") && field.Type.Kind() != reflect.Pointer,
-			schema:   property,
+			schema:   fieldSchema(field, opts, visiting),
 		})
 	}
+}
+
+// skipField reports whether encoding/json ignores field: it is tagged "-", or
+// unexported and not an embedded struct.
+func skipField(field reflect.StructField) bool {
+	if field.Tag.Get("json") == "-" {
+		return true
+	}
+	if !field.Anonymous {
+		return !field.IsExported()
+	}
+	ft := field.Type
+	if ft.Kind() == reflect.Pointer {
+		ft = ft.Elem()
+	}
+	return !field.IsExported() && ft.Kind() != reflect.Struct
+}
+
+// embeddedStruct returns the struct whose fields field promotes, if field is
+// an untagged embedded struct or pointer to one.
+func embeddedStruct(field reflect.StructField, name string) (reflect.Type, bool) {
+	if !field.Anonymous || name != "" {
+		return nil, false
+	}
+	ft := field.Type
+	if ft.Kind() == reflect.Pointer {
+		ft = ft.Elem()
+	}
+	if ft.Kind() != reflect.Struct {
+		return nil, false
+	}
+	return ft, true
+}
+
+func collectEmbedded(t reflect.Type, depth int, required bool, visiting map[reflect.Type]bool, out *[]schemaField) {
+	if visiting[t] {
+		return
+	}
+	visiting[t] = true
+	collectFields(t, depth, required, visiting, out)
+	delete(visiting, t)
+}
+
+func fieldSchema(field reflect.StructField, opts []string, visiting map[reflect.Type]bool) map[string]any {
+	property := schemaOf(field.Type, visiting)
+	if slices.Contains(opts, "string") && isStringEncodable(field.Type) {
+		property = map[string]any{"type": "string"}
+	}
+	if description := field.Tag.Get("description"); description != "" {
+		property["description"] = description
+	}
+	return property
 }
 
 func dominantField(fields []schemaField) (schemaField, bool) {
@@ -438,62 +464,87 @@ func decodeStrictJSON(dec *json.Decoder) (any, error) {
 // follows the Go type rather than the schema, because the
 // schema of a recursive type is cut off.
 func normalizeArgs(value any, t reflect.Type, path string) (any, error) {
+	switch v := value.(type) {
+	case map[string]any:
+		return normalizeObject(v, argType(t, path), path)
+	case []any:
+		return normalizeArray(v, argType(t, path), path)
+	}
+	return value, nil
+}
+
+// argType is the Go type the value at path decodes into, or nil when any
+// JSON is accepted there.
+func argType(t reflect.Type, path string) reflect.Type {
 	for t != nil && t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t != nil && path != "" && decodesItself(t) {
 		// A nested type with its own decoder may read any keys; the
 		// top-level input's own UnmarshalJSON is checked by its fields.
-		t = nil
+		return nil
 	}
-	switch v := value.(type) {
-	case map[string]any:
-		var fields map[string]reflect.Type
-		var elem reflect.Type
-		switch {
-		case t == nil:
-		case t.Kind() == reflect.Struct:
-			fields = jsonFields(t)
-		case t.Kind() == reflect.Map:
-			elem = t.Elem()
-		}
-		for key, item := range v {
-			sub, declared := fields[key]
-			if !declared && fields != nil {
-				for name := range fields {
-					if strings.EqualFold(name, key) {
-						return nil, fmt.Errorf("argument %q must be spelled %q", path+key, path+name)
-					}
-				}
-				return nil, fmt.Errorf("unknown argument %q", path+key)
-			}
-			if item == nil {
-				delete(v, key)
-				continue
-			}
-			if !declared {
-				sub = elem
-			}
-			normalized, err := normalizeArgs(item, sub, path+key+".")
-			if err != nil {
+	return t
+}
+
+func normalizeObject(v map[string]any, t reflect.Type, path string) (any, error) {
+	var fields map[string]reflect.Type
+	var elem reflect.Type
+	switch {
+	case t == nil:
+	case t.Kind() == reflect.Struct:
+		fields = jsonFields(t)
+	case t.Kind() == reflect.Map:
+		elem = t.Elem()
+	}
+	for key, item := range v {
+		sub, declared := fields[key]
+		if !declared {
+			if err := checkKnownKey(fields, key, path); err != nil {
 				return nil, err
 			}
-			v[key] = normalized
+			sub = elem
 		}
-	case []any:
-		var elem reflect.Type
-		if t != nil && (t.Kind() == reflect.Slice || t.Kind() == reflect.Array) {
-			elem = t.Elem()
+		if item == nil {
+			delete(v, key)
+			continue
 		}
-		for i, item := range v {
-			normalized, err := normalizeArgs(item, elem, fmt.Sprintf("%s%d.", path, i))
-			if err != nil {
-				return nil, err
-			}
-			v[i] = normalized
+		normalized, err := normalizeArgs(item, sub, path+key+".")
+		if err != nil {
+			return nil, err
+		}
+		v[key] = normalized
+	}
+	return v, nil
+}
+
+// checkKnownKey rejects a key that names no field of a struct, pointing out
+// the field it matches when case is ignored. A nil fields map accepts any key.
+func checkKnownKey(fields map[string]reflect.Type, key, path string) error {
+	if fields == nil {
+		return nil
+	}
+	for name := range fields {
+		if strings.EqualFold(name, key) {
+			return fmt.Errorf("argument %q must be spelled %q", path+key, path+name)
 		}
 	}
-	return value, nil
+	return fmt.Errorf("unknown argument %q", path+key)
+}
+
+func normalizeArray(v []any, t reflect.Type, path string) (any, error) {
+	var elem reflect.Type
+	if t != nil && (t.Kind() == reflect.Slice || t.Kind() == reflect.Array) {
+		elem = t.Elem()
+	}
+	for i, item := range v {
+		normalized, err := normalizeArgs(item, elem, fmt.Sprintf("%s%d.", path, i))
+		if err != nil {
+			return nil, err
+		}
+		v[i] = normalized
+	}
+	return v, nil
 }
 
 var jsonFieldsCache sync.Map // reflect.Type -> map[string]reflect.Type

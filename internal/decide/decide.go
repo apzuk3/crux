@@ -51,21 +51,12 @@ func Fields(t reflect.Type) ([]Field, error) {
 	var fields []Field
 	seen := make(map[string]bool)
 	for _, sf := range reflect.VisibleFields(t) {
-		if sf.Anonymous {
-			if sf.Type.Kind() == reflect.Pointer {
-				return nil, fmt.Errorf("decision type %s embeds pointer %s; embed the struct instead", t, sf.Type)
-			}
-			continue
+		name, asks, err := fieldName(sf)
+		if err != nil {
+			return nil, fmt.Errorf("decision type %s %w", t, err)
 		}
-		if !sf.IsExported() {
+		if !asks {
 			continue
-		}
-		name, _, _ := strings.Cut(sf.Tag.Get("json"), ",")
-		if name == "-" {
-			continue
-		}
-		if name == "" {
-			name = sf.Name
 		}
 		if seen[name] {
 			return nil, fmt.Errorf("decision type %s has two fields named %q", t, name)
@@ -81,6 +72,29 @@ func Fields(t reflect.Type) ([]Field, error) {
 		return nil, fmt.Errorf("decision type %s has no questions", t)
 	}
 	return fields, nil
+}
+
+// fieldName returns the question name of sf, and false when sf asks no
+// question: an embedded struct (whose fields are visible on their own),
+// an unexported field or one tagged "-". An embedded pointer is an error.
+func fieldName(sf reflect.StructField) (string, bool, error) {
+	if sf.Anonymous {
+		if sf.Type.Kind() == reflect.Pointer {
+			return "", false, fmt.Errorf("embeds pointer %s; embed the struct instead", sf.Type)
+		}
+		return "", false, nil
+	}
+	if !sf.IsExported() {
+		return "", false, nil
+	}
+	name, _, _ := strings.Cut(sf.Tag.Get("json"), ",")
+	if name == "-" {
+		return "", false, nil
+	}
+	if name == "" {
+		name = sf.Name
+	}
+	return name, true, nil
 }
 
 func field(sf reflect.StructField, name string) (Field, error) {
@@ -221,41 +235,7 @@ func OutputSchema(fields []Field, goal string) map[string]any {
 	properties := make(map[string]any, len(fields))
 	required := make([]string, len(fields))
 	for i, f := range fields {
-		var prop map[string]any
-		var guide []string
-		switch f.Kind {
-		case provider.QuestionNoul:
-			prop = map[string]any{"type": "boolean"}
-			if f.True != "" {
-				guide = append(guide, "true: "+f.True)
-			}
-			if f.False != "" {
-				guide = append(guide, "false: "+f.False)
-			}
-		case provider.QuestionChoice:
-			names := make([]any, len(f.Options))
-			for j, o := range f.Options {
-				names[j] = o.Name
-				if o.Description != "" {
-					guide = append(guide, o.Name+": "+o.Description)
-				}
-			}
-			prop = map[string]any{"type": "string", "enum": names}
-		case provider.QuestionScore:
-			// Not an enum: some providers' schema adapters make enums strings.
-			for j, o := range f.Options {
-				guide = append(guide, fmt.Sprintf("%d: %s", j, o.Name))
-			}
-			prop = map[string]any{"type": "integer", "minimum": 0, "maximum": len(f.Options) - 1}
-		}
-		description := f.Instructions
-		if len(guide) > 0 {
-			description = strings.TrimSpace(description + "\n" + strings.Join(guide, "\n"))
-		}
-		if description != "" {
-			prop["description"] = description
-		}
-		properties[f.Name] = prop
+		properties[f.Name] = fieldProperty(f)
 		required[i] = f.Name
 	}
 	schema := map[string]any{
@@ -268,4 +248,63 @@ func OutputSchema(fields []Field, goal string) map[string]any {
 		schema["description"] = goal
 	}
 	return schema
+}
+
+// fieldProperty is the property schema of one question. The guide to its
+// answers, one line each, is appended to the instructions as its description.
+func fieldProperty(f Field) map[string]any {
+	var prop map[string]any
+	var guide []string
+	switch f.Kind {
+	case provider.QuestionNoul:
+		prop, guide = booleanProperty(f)
+	case provider.QuestionChoice:
+		prop, guide = choiceProperty(f)
+	case provider.QuestionScore:
+		prop, guide = scoreProperty(f)
+	}
+	return withDescription(prop, f.Instructions, guide)
+}
+
+func booleanProperty(f Field) (map[string]any, []string) {
+	var guide []string
+	if f.True != "" {
+		guide = append(guide, "true: "+f.True)
+	}
+	if f.False != "" {
+		guide = append(guide, "false: "+f.False)
+	}
+	return map[string]any{"type": "boolean"}, guide
+}
+
+func choiceProperty(f Field) (map[string]any, []string) {
+	names := make([]any, len(f.Options))
+	var guide []string
+	for j, o := range f.Options {
+		names[j] = o.Name
+		if o.Description != "" {
+			guide = append(guide, o.Name+": "+o.Description)
+		}
+	}
+	return map[string]any{"type": "string", "enum": names}, guide
+}
+
+func scoreProperty(f Field) (map[string]any, []string) {
+	// Not an enum: some providers' schema adapters make enums strings.
+	guide := make([]string, len(f.Options))
+	for j, o := range f.Options {
+		guide[j] = fmt.Sprintf("%d: %s", j, o.Name)
+	}
+	return map[string]any{"type": "integer", "minimum": 0, "maximum": len(f.Options) - 1}, guide
+}
+
+func withDescription(prop map[string]any, instructions string, guide []string) map[string]any {
+	description := instructions
+	if len(guide) > 0 {
+		description = strings.TrimSpace(description + "\n" + strings.Join(guide, "\n"))
+	}
+	if description != "" {
+		prop["description"] = description
+	}
+	return prop
 }
