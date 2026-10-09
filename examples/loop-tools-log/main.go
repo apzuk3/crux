@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 // An agent that finds what is taking up space in a directory and suggests

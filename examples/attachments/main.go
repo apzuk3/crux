@@ -18,7 +18,7 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 //go:embed data

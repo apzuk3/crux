@@ -14,7 +14,7 @@ package main
 import (
 	"log"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 // RDAP servers of the registries, from IANA's bootstrap file

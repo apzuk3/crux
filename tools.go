@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apzuk3/crux/internal/schema"
+	"crux.foo/internal/schema"
 	sjs "github.com/santhosh-tekuri/jsonschema/v5"
 )
 

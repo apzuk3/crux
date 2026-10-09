@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/apzuk3/crux/internal/provider"
-	"github.com/apzuk3/crux/internal/schema"
+	"crux.foo/internal/provider"
+	"crux.foo/internal/schema"
 	"github.com/invopop/jsonschema"
 	sjs "github.com/santhosh-tekuri/jsonschema/v5"
 )
@@ -87,12 +87,26 @@ func (a *Agent) step(ctx context.Context, log []Entry, emit chunkSink, first boo
 		return nil, redactURLSecrets(err, a.baseURL)
 	}
 	var sink provider.Emit
+	emitted := false
 	if emit != nil {
 		sink = func(kind provider.ChunkKind, delta string) error {
+			emitted = true
 			return emit(Chunk{Kind: ChunkKind(kind), Delta: delta})
 		}
 	}
-	items, err := spec.step(ctx, req, sink)
+	// The SDKs retry limits reported as HTTP errors. One that comes after the
+	// response started is retried here, unless deltas were already emitted.
+	var items []provider.Item
+	for attempt := 0; ; attempt++ {
+		items, err = spec.step(ctx, req, sink)
+		var limit *provider.LimitError
+		if err == nil || emitted || attempt >= req.Retries() || !errors.As(err, &limit) || limit.StatusCode != 0 || !limit.Kind.Retryable() {
+			break
+		}
+		if provider.Sleep(ctx, provider.RetryDelay(limit.RetryAfter, attempt)) != nil {
+			break
+		}
+	}
 	if err != nil {
 		var refusal *provider.RefusedError
 		if errors.As(err, &refusal) {
@@ -103,6 +117,8 @@ func (a *Agent) step(ctx context.Context, log []Entry, emit chunkSink, first boo
 			}
 		} else if provider.IsContextTooLong(err) {
 			err = fmt.Errorf("%w: %w", ErrContextTooLong, err)
+		} else {
+			err = providerError(a.provider, err)
 		}
 		return nil, redactURLSecrets(err, a.baseURL)
 	}
@@ -111,6 +127,21 @@ func (a *Agent) step(ctx context.Context, log []Entry, emit chunkSink, first boo
 		entries[i] = fromItem(item)
 	}
 	return entries, nil
+}
+
+// providerError returns err as a *ProviderError when the provider reported a
+// limit, and err unchanged otherwise.
+func providerError(p Provider, err error) error {
+	var limit *provider.LimitError
+	if !errors.As(err, &limit) {
+		return err
+	}
+	kind := map[provider.LimitKind]error{
+		provider.LimitRateLimited:         ErrRateLimited,
+		provider.LimitOverloaded:          ErrOverloaded,
+		provider.LimitInsufficientCredits: ErrInsufficientCredits,
+	}[limit.Kind]
+	return &ProviderError{Provider: p, StatusCode: limit.StatusCode, RetryAfter: limit.RetryAfter, Err: err, kind: kind}
 }
 
 // wireRequest describes the agent's next request: its settings and the

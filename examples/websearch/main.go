@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 type providerCase struct {

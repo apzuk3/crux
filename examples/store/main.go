@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 	"github.com/glebarez/sqlite"
 	"github.com/google/uuid"
 	"gorm.io/gorm"

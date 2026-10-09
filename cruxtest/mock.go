@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 // MockOption configures a Mock instance.
@@ -190,6 +190,9 @@ func (m *Mock) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 
+	for key, value := range turn.Header {
+		header.Set(key, value)
+	}
 	resp := &http.Response{
 		StatusCode:    statusCode,
 		Status:        fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode)),

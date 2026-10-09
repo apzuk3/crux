@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apzuk3/crux/internal/schema"
+	"crux.foo/internal/schema"
 	"github.com/google/uuid"
 )
 

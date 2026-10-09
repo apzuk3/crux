@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apzuk3/crux/internal/tui"
+	"crux.foo/internal/tui"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )

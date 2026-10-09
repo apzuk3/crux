@@ -1,6 +1,6 @@
 # crux
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/apzuk3/crux.svg)](https://pkg.go.dev/github.com/apzuk3/crux)
+[![Go Reference](https://pkg.go.dev/badge/crux.foo.svg)](https://pkg.go.dev/crux.foo)
 
 A small Go toolkit for building LLM agents that run the same way on every major provider.
 
@@ -14,10 +14,25 @@ A small Go toolkit for building LLM agents that run the same way on every major 
 ## Install
 
 ```sh
-go get github.com/apzuk3/crux
+go get crux.foo
 ```
 
 Requires Go 1.26+.
+
+### Using crux with coding agents
+
+crux is newer than most models' training data, so coding agents tend to guess
+its API. Give them the guide in [skills/crux](skills/crux/SKILL.md): how crux
+is structured, the rules that matter and a page per topic. Install it as an
+[Agent Skill](https://agentskills.io) in your project:
+
+```sh
+mkdir -p .claude/skills
+cp -r "$(go env GOMODCACHE)/crux.foo@$(go list -m -f '{{.Version}}' crux.foo)/skills/crux" .claude/skills/
+chmod -R u+w .claude/skills/crux
+```
+
+or tell your agent in your own `AGENTS.md` to read it before writing crux code.
 
 ## Quickstart
 
@@ -29,7 +44,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 type WeatherArgs struct {

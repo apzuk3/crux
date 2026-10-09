@@ -4,9 +4,9 @@ import (
 	"errors"
 	"strings"
 
+	"crux.foo/internal/provider"
+	"crux.foo/internal/schema"
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/apzuk3/crux/internal/provider"
-	"github.com/apzuk3/crux/internal/schema"
 	"github.com/openai/openai-go/v3"
 )
 

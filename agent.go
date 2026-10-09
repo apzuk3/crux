@@ -11,7 +11,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/apzuk3/crux/internal/schema"
+	"crux.foo/internal/schema"
 	"github.com/google/uuid"
 	"github.com/invopop/jsonschema"
 )
@@ -377,7 +377,10 @@ func WithHTTPClient(client *http.Client) AgentOption {
 
 // WithMaxRetries sets how many times a failed provider request is retried:
 // connection errors, timeouts, rate limits (429) and server errors, with
-// backoff. The default is 2; zero turns retries off.
+// backoff and the provider's Retry-After. A rate limit or overload reported
+// after the response started is retried too, unless text was already
+// streamed. Credit errors are never retried. The default is 2; zero turns
+// retries off. When retries run out, the error is a *ProviderError.
 func WithMaxRetries(retries int) AgentOption {
 	return func(a *Agent) error {
 		if retries < 0 {

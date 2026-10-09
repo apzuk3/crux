@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 // The session log records the whole lifecycle of a run: when it started and

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/packages/ssestream"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 )
@@ -66,7 +68,7 @@ func newOpenAIClient(req *Request) *openai.Client {
 	if req.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(req.BaseURL))
 	}
-	opts = append(opts, option.WithMaxRetries(req.retries()))
+	opts = append(opts, option.WithMaxRetries(req.Retries()))
 	client := req.HTTPClient
 	if client != nil {
 		opts = append(opts, option.WithHTTPClient(client))
@@ -173,7 +175,7 @@ func OpenAI(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 		response, err = streamOpenAI(ctx, client, params, emit)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s responses: %w", req.Provider, err)
+		return nil, fmt.Errorf("%s responses: %w", req.Provider, openAILimit(err))
 	}
 	// Scan all messages before converting items or executing any local tools.
 	for _, item := range response.Output {
@@ -186,7 +188,9 @@ func OpenAI(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 		}
 	}
 	if response.Error.Code != "" || response.Status == responses.ResponseStatusFailed {
-		return nil, fmt.Errorf("%s response failed: %s: %s", req.Provider, response.Error.Code, response.Error.Message)
+		err := fmt.Errorf("%s response failed: %s: %s", req.Provider, response.Error.Code, response.Error.Message)
+		// OpenRouter adds its canonical error_type next to the error.
+		return nil, bodyLimit(err, []byte(response.RawJSON()), string(response.Error.Code))
 	}
 	if response.Status != responses.ResponseStatusCompleted {
 		// incomplete_details.reason: https://platform.openai.com/docs/api-reference/responses/object
@@ -267,8 +271,8 @@ func streamOpenAI(ctx context.Context, client *openai.Client, params responses.R
 		case "response.completed", "response.failed", "response.incomplete":
 			value := event.Response
 			response = &value
-		case "error":
-			return nil, fmt.Errorf("provider stream error: %s", event.RawJSON())
+		case "error", "response.error":
+			return nil, bodyLimit(fmt.Errorf("provider stream error: %s", event.RawJSON()), []byte(event.RawJSON()))
 		}
 		if err != nil {
 			return nil, err
@@ -548,4 +552,24 @@ func openAIInputItemFromOutputItem(raw []byte) (responses.ResponseInputItemUnion
 	default:
 		return responses.ResponseInputItemUnionParam{}, fmt.Errorf("unsupported OpenAI output item type %q", item.Type)
 	}
+}
+
+// openAILimit returns err as a *LimitError when the server reported a limit:
+// as an HTTP error, or as a stream event the SDK stopped at because it has an
+// "error" field (OpenRouter sends those as "error" and "response.error").
+func openAILimit(err error) error {
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) {
+		_, codes, message := errorFields([]byte(apiErr.RawJSON()))
+		var header http.Header
+		if apiErr.Response != nil {
+			header = apiErr.Response.Header
+		}
+		return limitError(err, apiErr.StatusCode, header, codes, message)
+	}
+	var streamErr *ssestream.StreamError
+	if errors.As(err, &streamErr) {
+		return bodyLimit(err, streamErr.Event.Data)
+	}
+	return err
 }

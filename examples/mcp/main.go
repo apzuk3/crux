@@ -10,7 +10,7 @@ import (
 	"context"
 	"log"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 func main() {

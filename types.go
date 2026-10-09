@@ -285,4 +285,32 @@ var (
 	ErrMaxTurns = errors.New("max turns reached")
 	// ErrRefused is returned by Run when the model refuses the request.
 	ErrRefused = errors.New("model refused the request")
+	// ErrRateLimited is matched by a *ProviderError saying too many requests
+	// or tokens were sent. Retry after its RetryAfter.
+	ErrRateLimited = errors.New("rate limited")
+	// ErrOverloaded is matched by a *ProviderError saying the provider is
+	// temporarily out of capacity or unavailable.
+	ErrOverloaded = errors.New("provider overloaded")
+	// ErrInsufficientCredits is matched by a *ProviderError saying the account
+	// has no credit or quota left. Retrying won't help.
+	ErrInsufficientCredits = errors.New("insufficient credits")
 )
+
+// ProviderError is a provider limit that crux recognised, the same on every
+// provider. errors.Is matches its sentinel (ErrRateLimited, ErrOverloaded or
+// ErrInsufficientCredits) and errors.As the provider's own error.
+type ProviderError struct {
+	Provider Provider
+	// StatusCode is the HTTP status, or 0 when the error came after the
+	// response started, as a stream event or a failed response.
+	StatusCode int
+	// RetryAfter is how long the provider asked to wait; 0 when it didn't say.
+	RetryAfter time.Duration
+	// Err is the provider's error.
+	Err  error
+	kind error
+}
+
+func (e *ProviderError) Error() string { return e.kind.Error() + ": " + e.Err.Error() }
+
+func (e *ProviderError) Unwrap() []error { return []error{e.kind, e.Err} }

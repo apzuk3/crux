@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apzuk3/crux"
+	"crux.foo"
 )
 
 // Fictional data the tools serve.

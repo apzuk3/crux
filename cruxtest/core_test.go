@@ -6,8 +6,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/apzuk3/crux"
-	"github.com/apzuk3/crux/cruxtest"
+	"crux.foo"
+	"crux.foo/cruxtest"
 	"github.com/glebarez/sqlite"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"

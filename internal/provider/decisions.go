@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // Decide asks a decision model typed questions about a state and returns one
@@ -103,6 +102,12 @@ func Decisions(path string) Decide {
 		for attempt := 0; ; attempt++ {
 			resp, err := postJSON(ctx, client, endpoint, req.APIKey, body)
 			if err != nil {
+				if attempt < maxRetries && ctx.Err() == nil {
+					if err := Sleep(ctx, RetryDelay(0, attempt)); err != nil {
+						return nil, err
+					}
+					continue
+				}
 				return nil, fmt.Errorf("%s: %w", req.Provider, err)
 			}
 			raw, err := io.ReadAll(resp.Body)
@@ -114,12 +119,14 @@ func Decisions(path string) Decide {
 				return decodeDecisions(req, raw)
 			}
 			if attempt < maxRetries && retryable(resp.StatusCode) {
-				if err := sleepCtx(ctx, retryDelay(resp.Header.Get("Retry-After"), attempt)); err != nil {
+				if err := Sleep(ctx, RetryDelay(parseRetryAfter(resp.Header), attempt)); err != nil {
 					return nil, err
 				}
 				continue
 			}
-			return nil, fmt.Errorf("%s: %s: %s", req.Provider, resp.Status, bytes.TrimSpace(raw))
+			err = fmt.Errorf("%s: %s: %s", req.Provider, resp.Status, bytes.TrimSpace(raw))
+			_, codes, message := errorFields(raw)
+			return nil, limitError(err, resp.StatusCode, resp.Header, codes, message)
 		}
 	}
 }
@@ -153,24 +160,6 @@ func postJSON(ctx context.Context, client *http.Client, endpoint, apiKey string,
 // overload (529) and server errors.
 func retryable(status int) bool {
 	return status == http.StatusTooManyRequests || status == http.StatusRequestTimeout || status >= 500
-}
-
-func retryDelay(retryAfter string, attempt int) time.Duration {
-	if seconds, err := strconv.Atoi(retryAfter); err == nil && seconds >= 0 {
-		return min(time.Duration(seconds)*time.Second, time.Minute)
-	}
-	return 500 * time.Millisecond << attempt
-}
-
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
 
 type wireQuestion struct {

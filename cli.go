@@ -8,7 +8,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/apzuk3/crux/internal/tui"
+	"crux.foo/internal/tui"
 	"github.com/google/uuid"
 )
 

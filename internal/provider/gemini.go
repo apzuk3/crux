@@ -37,7 +37,7 @@ func newGeminiClient(ctx context.Context, req *Request) (*genai.Client, error) {
 	// genai retries only when asked to. Match the OpenAI and Anthropic SDKs:
 	// two retries of 408, 429, 5xx and connection errors, with backoff.
 	config.HTTPOptions.RetryOptions = &genai.HTTPRetryOptions{
-		Attempts:     genai.Ptr(int32(req.retries() + 1)),
+		Attempts:     genai.Ptr(int32(req.Retries() + 1)),
 		InitialDelay: genai.Ptr(0.5),
 		MaxDelay:     genai.Ptr(8.0),
 	}
@@ -136,7 +136,7 @@ func Gemini(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 		response, err = streamGemini(ctx, client, req.Model, contents, config, emit)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("gemini generate content: %w", err)
+		return nil, fmt.Errorf("gemini generate content: %w", geminiLimit(err))
 	}
 	if len(response.Candidates) == 0 {
 		// A blocked prompt has no candidates, only prompt feedback:
@@ -564,4 +564,25 @@ func toGeminiParts(e Item, calls map[string]*genai.FunctionCall) ([]*genai.Part,
 		return nil, fmt.Errorf("unsupported entry kind %d for Gemini part", e.Kind)
 	}
 	return parts, nil
+}
+
+// geminiLimit returns err as a *LimitError when Gemini reported a limit. Its
+// delay comes from the google.rpc.RetryInfo detail, as there are no headers.
+func geminiLimit(err error) error {
+	var apiErr genai.APIError
+	if !errors.As(err, &apiErr) {
+		return err
+	}
+	limit, ok := limitError(err, apiErr.Code, nil, []string{apiErr.Status}, apiErr.Message).(*LimitError)
+	if !ok {
+		return err
+	}
+	for _, detail := range apiErr.Details {
+		if kind, _ := detail["@type"].(string); strings.HasSuffix(kind, "google.rpc.RetryInfo") {
+			if delay, _ := detail["retryDelay"].(string); delay != "" {
+				limit.RetryAfter, _ = time.ParseDuration(delay)
+			}
+		}
+	}
+	return limit
 }
