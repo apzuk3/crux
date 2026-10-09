@@ -289,8 +289,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *model) key(msg tea.KeyPressMsg) tea.Cmd {
 	k := msg.String()
-	switch k {
-	case "ctrl+c":
+	if k == "ctrl+c" {
 		if m.cancel != nil {
 			m.cancel()
 		}
@@ -299,75 +298,89 @@ func (m *model) key(msg tea.KeyPressMsg) tea.Cmd {
 	if m.picker != nil {
 		return m.pickerKey(msg)
 	}
+	if cmd, ok := m.globalKey(k); ok {
+		return cmd
+	}
+	if len(m.pending) > 0 {
+		return m.approvalKey(k)
+	}
+	if cmd, ok := m.focusKey(k); ok {
+		return cmd
+	}
+	if m.focus == focusSidebar {
+		return m.sidebarKey(k)
+	}
+	return m.inputKey(msg)
+}
+
+// globalKey handles the keys that work wherever the focus is.
+func (m *model) globalKey(k string) (tea.Cmd, bool) {
 	switch k {
 	case "ctrl+o":
-		return m.openPicker("")
+		return m.openPicker(""), true
 	case "ctrl+b":
 		m.showSidebar = !m.showSidebar
 		m.layout()
-		return nil
 	case "ctrl+r":
 		m.showThoughts = !m.showThoughts
 		for _, b := range m.blocks {
 			b.invalidate()
 		}
 		m.dirty = true
-		return nil
 	case "pgup":
 		m.chat.PageUp()
 		m.follow = false
-		return nil
 	case "pgdown":
 		m.chat.PageDown()
 		m.follow = m.chat.AtBottom()
-		return nil
 	case "ctrl+home":
 		m.chat.GotoTop()
 		m.follow = false
-		return nil
 	case "ctrl+end":
 		m.chat.GotoBottom()
 		m.follow = true
-		return nil
+	default:
+		return nil, false
 	}
+	return nil, true
+}
 
-	if len(m.pending) > 0 {
-		return m.approvalKey(k)
-	}
-
+// focusKey handles esc and tab, which interrupt the run or move the focus.
+func (m *model) focusKey(k string) (tea.Cmd, bool) {
 	switch k {
 	case "esc":
 		if m.running && m.cancel != nil {
 			m.cancel()
 			m.flash = "interrupting…"
-			return nil
-		}
-		if m.focus == focusSidebar {
+		} else if m.focus == focusSidebar {
 			m.setFocus(focusInput)
 		}
-		return nil
 	case "tab":
 		if m.focus == focusInput {
 			m.setFocus(focusSidebar)
 		} else {
 			m.setFocus(focusInput)
 		}
-		return nil
+	default:
+		return nil, false
 	}
+	return nil, true
+}
 
-	if m.focus == focusSidebar {
-		switch k {
-		case "up", "k":
-			m.selected = max(0, m.selected-1)
-		case "down", "j":
-			m.selected = min(len(m.sidebarTools())-1, m.selected+1)
-		case "enter":
-			m.setFocus(focusInput)
-		}
-		return nil
-	}
-
+func (m *model) sidebarKey(k string) tea.Cmd {
 	switch k {
+	case "up", "k":
+		m.selected = max(0, m.selected-1)
+	case "down", "j":
+		m.selected = min(len(m.sidebarTools())-1, m.selected+1)
+	case "enter":
+		m.setFocus(focusInput)
+	}
+	return nil
+}
+
+func (m *model) inputKey(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.String() {
 	case "enter":
 		return m.submit()
 	case "up":
