@@ -12,6 +12,12 @@ import (
 // systemDNSServers returns the DNS servers of the network adapters that are
 // up, as Windows reports them.
 func systemDNSServers() []string {
+	return collectDNSServers(adapterAddresses())
+}
+
+// adapterAddresses returns the adapter list, growing the buffer when Windows
+// asks for more room, or nil when it cannot be read.
+func adapterAddresses() *windows.IpAdapterAddresses {
 	size := uint32(15000)
 	for range 3 {
 		buf := make([]byte, size)
@@ -23,26 +29,32 @@ func systemDNSServers() []string {
 		if err != nil {
 			return nil
 		}
-		var servers []string
-		seen := make(map[string]bool)
-		for adapter := first; adapter != nil; adapter = adapter.Next {
-			if adapter.OperStatus != windows.IfOperStatusUp {
-				continue
-			}
-			for dns := adapter.FirstDnsServerAddress; dns != nil; dns = dns.Next {
-				addr, ok := netip.AddrFromSlice(dns.Address.IP())
-				if !ok || deprecatedSiteLocalDNS(addr) {
-					continue
-				}
-				if s := addr.Unmap().String(); !seen[s] {
-					seen[s] = true
-					servers = append(servers, s)
-				}
-			}
-		}
-		return servers
+		return first
 	}
 	return nil
+}
+
+// collectDNSServers returns the distinct DNS servers of the adapters that are
+// up, in adapter order.
+func collectDNSServers(first *windows.IpAdapterAddresses) []string {
+	var servers []string
+	seen := make(map[string]bool)
+	for adapter := first; adapter != nil; adapter = adapter.Next {
+		if adapter.OperStatus != windows.IfOperStatusUp {
+			continue
+		}
+		for dns := adapter.FirstDnsServerAddress; dns != nil; dns = dns.Next {
+			addr, ok := netip.AddrFromSlice(dns.Address.IP())
+			if !ok || deprecatedSiteLocalDNS(addr) {
+				continue
+			}
+			if s := addr.Unmap().String(); !seen[s] {
+				seen[s] = true
+				servers = append(servers, s)
+			}
+		}
+	}
+	return servers
 }
 
 // deprecatedSiteLocalDNS reports the fec0:0:0:ffff::1-3 addresses Windows

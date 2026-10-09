@@ -390,19 +390,13 @@ func (t *Tools) Read(ctx context.Context, in ReadInput) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	wait := netDefaultReadWait
-	if in.TimeoutMS != nil {
-		if *in.TimeoutMS < 0 {
-			return "", errors.New("timeout_ms cannot be negative")
-		}
-		wait = min(time.Duration(*in.TimeoutMS)*time.Millisecond, netMaxReadWait)
+	wait, err := readWait(in.TimeoutMS)
+	if err != nil {
+		return "", err
 	}
-	limit := netDefaultReadBytes
-	if in.MaxBytes != nil {
-		if *in.MaxBytes < 1 {
-			return "", errors.New("max_bytes must be at least 1")
-		}
-		limit = min(*in.MaxBytes, netMaxReadBytes)
+	limit, err := optionalLimit(in.MaxBytes, netDefaultReadBytes, netMaxReadBytes)
+	if err != nil {
+		return "", err
 	}
 	encoding, err := netEncoding(in.Encoding, true)
 	if err != nil {
@@ -410,69 +404,111 @@ func (t *Tools) Read(ctx context.Context, in ReadInput) (string, error) {
 	}
 
 	b := h.buf
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.waitLocked(ctx, wait, in.Until, limit); err != nil {
+		return "", err
+	}
+	var out strings.Builder
+	switch {
+	case len(b.msgs) > 0:
+		b.drainMessagesLocked(&out, encoding, limit)
+	case len(b.data) > 0:
+		b.drainDataLocked(&out, in.Until, encoding, limit)
+	}
+	if out.Len() == 0 {
+		fmt.Fprintf(&out, "(nothing received within %s)", wait)
+	}
+	b.statusNotesLocked(&out)
+	return strings.TrimRight(out.String(), "\n"), nil
+}
+
+func readWait(p *int) (time.Duration, error) {
+	if p == nil {
+		return netDefaultReadWait, nil
+	}
+	if *p < 0 {
+		return 0, errors.New("timeout_ms cannot be negative")
+	}
+	return min(time.Duration(*p)*time.Millisecond, netMaxReadWait), nil
+}
+
+// readyLocked reports whether a read for until and limit has something to
+// return.
+func (b *netBuffer) readyLocked(until string, limit int) bool {
+	if len(b.msgs) > 0 || b.ended != nil {
+		return true
+	}
+	return len(b.data) > 0 && (until == "" || bytes.Contains(b.data, []byte(until)) || len(b.data) >= limit)
+}
+
+// waitLocked waits, with the lock held on entry and on return, until the
+// buffer is ready, wait elapses or ctx ends.
+func (b *netBuffer) waitLocked(ctx context.Context, wait time.Duration, until string, limit int) error {
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
-	ready := func() bool {
-		return len(b.msgs) > 0 || b.ended != nil ||
-			(len(b.data) > 0 && (in.Until == "" || bytes.Contains(b.data, []byte(in.Until)) || len(b.data) >= limit))
-	}
-	b.mu.Lock()
-	for timedOut := false; !timedOut && !ready(); {
+	for !b.readyLocked(until, limit) {
 		wake := b.wake
 		b.mu.Unlock()
 		select {
 		case <-wake:
 		case <-timer.C:
-			timedOut = true
+			b.mu.Lock()
+			return nil
 		case <-ctx.Done():
-			return "", ctx.Err()
+			b.mu.Lock()
+			return ctx.Err()
 		}
 		b.mu.Lock()
 	}
-	var out strings.Builder
-	switch {
-	case len(b.msgs) > 0:
-		n := 0
-		for n < len(b.msgs) {
-			m := b.msgs[n]
-			if n > 0 && out.Len()+len(m.data) > limit {
-				break
-			}
-			fmt.Fprintf(&out, "[%s] %s\n", m.label, renderNetData(m.data, encoding, m.text, limit))
-			b.size -= len(m.data)
-			n++
+	return nil
+}
+
+// drainMessagesLocked takes the messages that fit in limit, at least one.
+func (b *netBuffer) drainMessagesLocked(out *strings.Builder, encoding string, limit int) {
+	n := 0
+	for n < len(b.msgs) {
+		m := b.msgs[n]
+		if n > 0 && out.Len()+len(m.data) > limit {
+			break
 		}
-		b.msgs = b.msgs[n:]
-	case len(b.data) > 0:
-		n := min(len(b.data), limit)
-		if in.Until != "" {
-			if i := bytes.Index(b.data, []byte(in.Until)); i >= 0 && i+len(in.Until) <= limit {
-				n = i + len(in.Until)
-			}
-		}
-		out.WriteString(renderNetData(b.data[:n], encoding, false, limit))
-		b.data = b.data[n:]
-		b.size -= n
-		if len(b.data) == 0 {
-			b.data = nil
-		}
-		b.signalLocked() // room for the reader again
+		fmt.Fprintf(out, "[%s] %s\n", m.label, renderNetData(m.data, encoding, m.text, limit))
+		b.size -= len(m.data)
+		n++
 	}
-	got := out.Len() > 0
-	if !got {
-		fmt.Fprintf(&out, "(nothing received within %s)", wait)
+	b.msgs = b.msgs[n:]
+}
+
+// drainDataLocked takes up to limit bytes of stream data, or up to and
+// including until when it is within the limit.
+func (b *netBuffer) drainDataLocked(out *strings.Builder, until, encoding string, limit int) {
+	n := min(len(b.data), limit)
+	if until != "" {
+		if i := bytes.Index(b.data, []byte(until)); i >= 0 && i+len(until) <= limit {
+			n = i + len(until)
+		}
 	}
+	out.WriteString(renderNetData(b.data[:n], encoding, false, limit))
+	b.data = b.data[n:]
+	b.size -= n
+	if len(b.data) == 0 {
+		b.data = nil
+	}
+	b.signalLocked() // room for the reader again
+}
+
+// statusNotesLocked appends what was dropped, what is left and whether the
+// source ended.
+func (b *netBuffer) statusNotesLocked(out *strings.Builder) {
 	if b.dropped > 0 {
-		fmt.Fprintf(&out, "\n(%d messages were dropped because the buffer was full)", b.dropped)
+		fmt.Fprintf(out, "\n(%d messages were dropped because the buffer was full)", b.dropped)
 		b.dropped = 0
 	}
 	if b.size > 0 {
-		fmt.Fprintf(&out, "\n(%d more bytes buffered; read again)", b.size)
+		fmt.Fprintf(out, "\n(%d more bytes buffered; read again)", b.size)
 	} else if b.ended != nil {
-		fmt.Fprintf(&out, "\n(%s)", endedText(b.ended))
+		fmt.Fprintf(out, "\n(%s)", endedText(b.ended))
 	}
-	b.mu.Unlock()
-	return strings.TrimRight(out.String(), "\n"), nil
 }
 
 func endedText(err error) string {
@@ -636,12 +672,9 @@ type ConnectInput struct {
 
 // Connect opens a connection and returns its handle.
 func (t *Tools) Connect(ctx context.Context, in ConnectInput) (string, error) {
-	timeout := netDefaultTimeout
-	if in.TimeoutMS != nil {
-		if *in.TimeoutMS < 1 {
-			return "", errors.New("timeout_ms must be at least 1")
-		}
-		timeout = time.Duration(*in.TimeoutMS) * time.Millisecond
+	timeout, err := optionalTimeout(in.TimeoutMS, netDefaultTimeout)
+	if err != nil {
+		return "", err
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -750,12 +783,28 @@ func (t *Tools) connHandle(kind string, conn net.Conn, packets bool) *netHandle 
 }
 
 func (t *Tools) connectWebSocket(ctx context.Context, in ConnectInput) (string, error) {
+	conn, resp, err := t.dialWebSocket(ctx, in)
+	if err != nil {
+		return "", err
+	}
+	buf := newNetBuffer()
+	readCtx, cancelRead := context.WithCancel(context.WithoutCancel(ctx))
+	h := webSocketHandle(conn, buf, cancelRead, in.Protocol, in.Address)
+	if err := t.add(in.Protocol, h); err != nil {
+		h.close()
+		return "", err
+	}
+	go pumpWebSocket(readCtx, conn, buf)
+	return fmt.Sprintf("%s: connected to %s (%s)", h.id, in.Address, resp.Status), nil
+}
+
+func (t *Tools) dialWebSocket(ctx context.Context, in ConnectInput) (*websocket.Conn, *http.Response, error) {
 	u, err := url.Parse(in.Address)
 	if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") || u.Host == "" {
-		return "", fmt.Errorf("address %q must be a ws:// or wss:// URL", in.Address)
+		return nil, nil, fmt.Errorf("address %q must be a ws:// or wss:// URL", in.Address)
 	}
 	if u.Scheme != in.Protocol {
-		return "", fmt.Errorf("address %q does not match protocol %q", in.Address, in.Protocol)
+		return nil, nil, fmt.Errorf("address %q does not match protocol %q", in.Address, in.Protocol)
 	}
 	header := make(http.Header)
 	for key, value := range in.Headers {
@@ -772,15 +821,18 @@ func (t *Tools) connectWebSocket(ctx context.Context, in ConnectInput) (string, 
 	})
 	if err != nil {
 		if resp != nil {
-			return "", fmt.Errorf("WebSocket handshake with %s: %s: %w", in.Address, resp.Status, err)
+			return nil, nil, fmt.Errorf("WebSocket handshake with %s: %s: %w", in.Address, resp.Status, err)
 		}
-		return "", fmt.Errorf("WebSocket handshake with %s: %w", in.Address, err)
+		return nil, nil, fmt.Errorf("WebSocket handshake with %s: %w", in.Address, err)
 	}
 	conn.SetReadLimit(netMaxBuffer)
+	return conn, resp, nil
+}
 
-	buf := newNetBuffer()
-	readCtx, cancelRead := context.WithCancel(context.WithoutCancel(ctx))
-	h := &netHandle{kind: in.Protocol, local: "", remote: in.Address, buf: buf}
+// webSocketHandle wraps a WebSocket connection; closing it stops the reader
+// through cancelRead.
+func webSocketHandle(conn *websocket.Conn, buf *netBuffer, cancelRead context.CancelFunc, protocol, address string) *netHandle {
+	h := &netHandle{kind: protocol, local: "", remote: address, buf: buf}
 	var once sync.Once
 	h.close = func() error {
 		var err error
@@ -804,28 +856,26 @@ func (t *Tools) connectWebSocket(ctx context.Context, in ConnectInput) (string, 
 		defer cancel()
 		return conn.Write(ctx, kind, data)
 	}
-	if err := t.add(in.Protocol, h); err != nil {
-		h.close()
-		return "", err
-	}
-	go func() {
-		for {
-			kind, data, err := conn.Read(readCtx)
-			if err != nil {
-				if status := websocket.CloseStatus(err); status != -1 {
-					err = fmt.Errorf("WebSocket closed by the peer with status %d (%s)", int(status), status)
-				}
-				buf.end(err)
-				return
+	return h
+}
+
+// pumpWebSocket buffers each message until the connection ends.
+func pumpWebSocket(ctx context.Context, conn *websocket.Conn, buf *netBuffer) {
+	for {
+		kind, data, err := conn.Read(ctx)
+		if err != nil {
+			if status := websocket.CloseStatus(err); status != -1 {
+				err = fmt.Errorf("WebSocket closed by the peer with status %d (%s)", int(status), status)
 			}
-			if kind == websocket.MessageText {
-				buf.push(netMessage{label: "text", data: data, text: true})
-			} else {
-				buf.push(netMessage{label: "binary", data: data})
-			}
+			buf.end(err)
+			return
 		}
-	}()
-	return fmt.Sprintf("%s: connected to %s (%s)", h.id, in.Address, resp.Status), nil
+		if kind == websocket.MessageText {
+			buf.push(netMessage{label: "text", data: data, text: true})
+		} else {
+			buf.push(netMessage{label: "binary", data: data})
+		}
+	}
 }
 
 // ListenInput holds the arguments of Listen.
