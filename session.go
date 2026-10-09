@@ -17,6 +17,7 @@ import (
 
 	"crux.foo/internal/schema"
 	"github.com/google/uuid"
+	sjs "github.com/santhosh-tekuri/jsonschema/v5"
 )
 
 type Session struct {
@@ -264,50 +265,12 @@ func (s *Session) run(ctx context.Context, inputs []any, emit chunkSink) (text s
 	if len(s.PendingApprovals()) > 0 {
 		return "", ErrApprovalNeeded
 	}
-
-	hasInput := slices.ContainsFunc(inputs, func(v any) bool { return v != nil })
-	if !hasInput && len(s.logs) == 0 {
-		return "", errors.New("cannot run agent with no input and empty history")
-	}
-
-	validator, err := schema.CompileOutput(s.agent.outputSchema)
+	r, err := s.startRun(inputs)
 	if err != nil {
-		return "", fmt.Errorf("invalid output schema: %w", err)
+		return "", err
 	}
-
-	repairsLeft := s.agent.maxRepairs
-	var repair error // a stored answer that fails validation is repaired like a new one
-	if !hasInput {
-		if text, ok := s.FinalOutput(); ok {
-			if validator == nil {
-				return text, nil
-			}
-			valErr := validateOutput(validator, text)
-			if valErr == nil {
-				return text, nil
-			}
-			if repairsLeft == 0 {
-				return "", valErr
-			}
-			repair = valErr
-		}
-	}
-
-	var userEntry *Entry
-	if hasInput {
-		if s.hasUnexecutedToolCalls() {
-			return "", errors.New("cannot run agent with new user input while tool calls are pending execution; call Resume first")
-		}
-		// The user turn is part of the log, so every provider sees one shape and a
-		// resumed session needs nothing but its history.
-		entry, err := NewUserEntry(inputs...)
-		if err != nil {
-			return "", err
-		}
-		if strings.TrimSpace(entry.Text()) == "" && !slices.ContainsFunc(entry.Content, func(p ContentPart) bool { return p.Kind == ContentKindFile }) {
-			return "", errors.New("user input produced empty text")
-		}
-		userEntry = &entry
+	if r.answered {
+		return r.answer, nil
 	}
 
 	// From here the run does work, so it is recorded between a started and a
@@ -315,131 +278,278 @@ func (s *Session) run(ctx context.Context, inputs []any, emit chunkSink) (text s
 	if err := s.appendLogs(ctx, Entry{Kind: KindRunStarted}); err != nil {
 		return "", err
 	}
-	defer func() {
-		status := runStatus(err)
-		if finishErr := s.appendLogs(context.WithoutCancel(ctx), Entry{Kind: KindRunFinished, Run: &status}); finishErr != nil {
-			text, err = "", errors.Join(err, finishErr)
-		}
-	}()
+	defer func() { text, err = s.finishRun(ctx, text, err) }()
 
-	if repair != nil {
-		repairsLeft--
-		if err := s.requestRepair(ctx, repair); err != nil {
-			return "", err
-		}
+	if err := s.openRun(ctx, r); err != nil {
+		return "", err
 	}
-	if userEntry != nil {
-		if err := s.appendLogs(ctx, *userEntry); err != nil {
-			return "", err
-		}
-	}
-
 	// Repair requests do not count against maxTurns.
-	for turn := 0; turn < s.agent.maxTurns+s.agent.maxRepairs-repairsLeft; turn++ {
-		if err := ctx.Err(); err != nil {
+	first := r.userEntry != nil
+	for turn := 0; turn < s.agent.maxTurns+s.agent.maxRepairs-r.repairsLeft; turn++ {
+		if err := s.runTools(ctx); err != nil {
 			return "", err
 		}
-
-		toolResults, err := s.executeUnexecutedToolCalls(ctx)
+		produced, err := s.requestTurn(ctx, turn, first, emit)
 		if err != nil {
 			return "", err
 		}
-		if len(toolResults) > 0 {
-			// The tools have already run, so their results are kept even if ctx
-			// was cancelled meanwhile; otherwise the next Resume would run them again.
-			if err := s.appendLogs(context.WithoutCancel(ctx), toolResults...); err != nil {
-				return "", err
-			}
-		}
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		if len(s.PendingApprovals()) > 0 {
-			return "", ErrApprovalNeeded // a subagent stopped for approval
-		}
-
-		// The request usually still fits when compaction fails, so it is sent
-		// anyway; the failure is reported only if the request fails too.
-		compactErr := s.maybeCompact(ctx)
-		var sink chunkSink
-		var firstToken time.Time
-		if emit != nil {
-			sink = func(chunk Chunk) error {
-				if firstToken.IsZero() {
-					firstToken = time.Now()
-				}
-				chunk.Turn = turn + 1
-				return emit(chunk)
-			}
-		}
-		var start time.Time
-		var produced []Entry
-		for attempt := 0; ; attempt++ {
-			if err := s.appendLogs(ctx, Entry{Kind: KindTurnStarted, Turn: s.agent.turnInfo()}); err != nil {
-				return "", err
-			}
-			start = time.Now()
-			produced, err = s.agent.step(ctx, s.client, s.logs, sink, turn == 0 && userEntry != nil)
-			if err == nil {
-				break
-			}
-			// A request too large for the model is sent again after compacting.
-			retry, err := s.recoverContext(ctx, err, attempt)
-			if !retry {
-				if compactErr != nil {
-					err = errors.Join(err, compactErr)
-				}
-				return "", err
-			}
-		}
-		if len(produced) > 0 {
-			last := &produced[len(produced)-1]
-			last.Duration = time.Since(start)
-			if !firstToken.IsZero() {
-				if last.Response == nil {
-					last.Response = &ResponseInfo{}
-				}
-				last.Response.FirstTokenAfter = firstToken.Sub(start)
-			}
-		}
-
-		// Retain all model entries in history before dispatching local tools.
-		if len(produced) > 0 {
-			if err := s.appendLogs(ctx, produced...); err != nil {
-				return "", err
-			}
-		}
-
-		if len(s.PendingApprovals()) > 0 {
-			return "", ErrApprovalNeeded
-		}
-
-		if refusal, refused := latestRefusal(produced); refused {
-			if refusal != "" {
-				return "", fmt.Errorf("%w: %s", ErrRefused, refusal)
-			}
-			return "", ErrRefused
-		}
-
-		// If the latest turn produced the final answer without requesting further tools:
-		if text, ok := s.FinalOutput(); ok {
-			if validator != nil {
-				if valErr := validateOutput(validator, text); valErr != nil {
-					if repairsLeft > 0 {
-						repairsLeft--
-						if err := s.requestRepair(ctx, valErr); err != nil {
-							return "", err
-						}
-						continue
-					}
-					return "", valErr
-				}
-			}
-			return text, nil
+		first = false
+		answer, done, err := s.checkTurnOutcome(ctx, produced, r)
+		if done {
+			return answer, err
 		}
 	}
-
 	return "", fmt.Errorf("%w (%d)", ErrMaxTurns, s.agent.maxTurns)
+}
+
+// runState is what a run keeps from its start through its turns.
+type runState struct {
+	validator   *sjs.Schema
+	repairsLeft int
+	userEntry   *Entry // the new input, recorded once the run has started
+	repair      error  // a stored answer that failed validation, repaired like a new one
+	answer      string // a stored answer that needs no work
+	answered    bool
+}
+
+// startRun checks the input and compiles the output schema. Without input,
+// a stored final answer is returned as it is when it is valid.
+func (s *Session) startRun(inputs []any) (*runState, error) {
+	hasInput := slices.ContainsFunc(inputs, func(v any) bool { return v != nil })
+	if !hasInput && len(s.logs) == 0 {
+		return nil, errors.New("cannot run agent with no input and empty history")
+	}
+	validator, err := schema.CompileOutput(s.agent.outputSchema)
+	if err != nil {
+		return nil, fmt.Errorf("invalid output schema: %w", err)
+	}
+	r := &runState{validator: validator, repairsLeft: s.agent.maxRepairs}
+	if !hasInput {
+		return r, s.storedAnswer(r)
+	}
+	userEntry, err := s.newUserEntry(inputs)
+	if err != nil {
+		return nil, err
+	}
+	r.userEntry = userEntry
+	return r, nil
+}
+
+// storedAnswer takes the final answer the log already holds, if any: a
+// valid one answers the run, one that fails validation is repaired when
+// repairs are left, and is the run's error otherwise.
+func (s *Session) storedAnswer(r *runState) error {
+	text, ok := s.FinalOutput()
+	if !ok {
+		return nil
+	}
+	if r.validator == nil {
+		r.answer, r.answered = text, true
+		return nil
+	}
+	valErr := validateOutput(r.validator, text)
+	switch {
+	case valErr == nil:
+		r.answer, r.answered = text, true
+	case r.repairsLeft == 0:
+		return valErr
+	default:
+		r.repair = valErr
+	}
+	return nil
+}
+
+// newUserEntry builds the user turn for inputs. It is part of the log, so
+// every provider sees one shape and a resumed session needs nothing but its
+// history.
+func (s *Session) newUserEntry(inputs []any) (*Entry, error) {
+	if s.hasUnexecutedToolCalls() {
+		return nil, errors.New("cannot run agent with new user input while tool calls are pending execution; call Resume first")
+	}
+	entry, err := NewUserEntry(inputs...)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(entry.Text()) == "" && !slices.ContainsFunc(entry.Content, func(p ContentPart) bool { return p.Kind == ContentKindFile }) {
+		return nil, errors.New("user input produced empty text")
+	}
+	return &entry, nil
+}
+
+// openRun records what the run starts from: the repair request for a stored
+// answer, or the new user entry.
+func (s *Session) openRun(ctx context.Context, r *runState) error {
+	if r.repair != nil {
+		r.repairsLeft--
+		if err := s.requestRepair(ctx, r.repair); err != nil {
+			return err
+		}
+	}
+	if r.userEntry != nil {
+		return s.appendLogs(ctx, *r.userEntry)
+	}
+	return nil
+}
+
+// finishRun records how the run ended, even if ctx was cancelled, and
+// returns the run's result, or the write's failure joined to its error.
+func (s *Session) finishRun(ctx context.Context, text string, err error) (string, error) {
+	status := runStatus(err)
+	if finishErr := s.appendLogs(context.WithoutCancel(ctx), Entry{Kind: KindRunFinished, Run: &status}); finishErr != nil {
+		return "", errors.Join(err, finishErr)
+	}
+	return text, err
+}
+
+// runTools runs the open tool calls and records their results, and stops
+// the run when a subagent waits for approval.
+func (s *Session) runTools(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	toolResults, err := s.executeUnexecutedToolCalls(ctx)
+	if err != nil {
+		return err
+	}
+	if len(toolResults) > 0 {
+		// The tools have already run, so their results are kept even if ctx
+		// was cancelled meanwhile; otherwise the next Resume would run them again.
+		if err := s.appendLogs(context.WithoutCancel(ctx), toolResults...); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(s.PendingApprovals()) > 0 {
+		return ErrApprovalNeeded // a subagent stopped for approval
+	}
+	return nil
+}
+
+// requestTurn compacts the session when it has grown, sends the request and
+// records what the model produced, with its timing on the last entry.
+func (s *Session) requestTurn(ctx context.Context, turn int, first bool, emit chunkSink) ([]Entry, error) {
+	// The request usually still fits when compaction fails, so it is sent
+	// anyway; the failure is reported only if the request fails too.
+	compactErr := s.maybeCompact(ctx)
+	sink := &turnSink{emit: emit, turn: turn}
+	produced, start, err := s.stepWithRetry(ctx, sink.sink(), first, compactErr)
+	if err != nil {
+		return nil, err
+	}
+	sink.stampTiming(produced, start)
+	// Retain all model entries in history before dispatching local tools.
+	if len(produced) > 0 {
+		if err := s.appendLogs(ctx, produced...); err != nil {
+			return nil, err
+		}
+	}
+	return produced, nil
+}
+
+// stepWithRetry records the turn's start and sends the request, compacting
+// and sending again when the model finds it too long. start is when the
+// request that succeeded was sent.
+func (s *Session) stepWithRetry(ctx context.Context, sink chunkSink, first bool, compactErr error) (produced []Entry, start time.Time, err error) {
+	for attempt := 0; ; attempt++ {
+		if err := s.appendLogs(ctx, Entry{Kind: KindTurnStarted, Turn: s.agent.turnInfo()}); err != nil {
+			return nil, start, err
+		}
+		start = time.Now()
+		produced, err = s.agent.step(ctx, s.client, s.logs, sink, first)
+		if err == nil {
+			return produced, start, nil
+		}
+		retry, stepErr := s.recoverContext(ctx, err, attempt)
+		if retry {
+			continue
+		}
+		if compactErr != nil {
+			stepErr = errors.Join(stepErr, compactErr)
+		}
+		return nil, start, stepErr
+	}
+}
+
+// turnSink forwards the streamed chunks of one turn and notes when the
+// first arrived.
+type turnSink struct {
+	emit       chunkSink
+	turn       int
+	firstToken time.Time
+}
+
+// sink returns the sink to stream through, or nil when nothing listens.
+func (t *turnSink) sink() chunkSink {
+	if t.emit == nil {
+		return nil
+	}
+	return t.send
+}
+
+func (t *turnSink) send(chunk Chunk) error {
+	if t.firstToken.IsZero() {
+		t.firstToken = time.Now()
+	}
+	chunk.Turn = t.turn + 1
+	return t.emit(chunk)
+}
+
+// stampTiming records the response's duration and, when it was streamed,
+// the time to its first token on the last produced entry.
+func (t *turnSink) stampTiming(produced []Entry, start time.Time) {
+	if len(produced) == 0 {
+		return
+	}
+	last := &produced[len(produced)-1]
+	last.Duration = time.Since(start)
+	if t.firstToken.IsZero() {
+		return
+	}
+	if last.Response == nil {
+		last.Response = &ResponseInfo{}
+	}
+	last.Response.FirstTokenAfter = t.firstToken.Sub(start)
+}
+
+// checkTurnOutcome reports whether the run ends with what the turn
+// produced: with an approval or a refusal, with the final answer, or with
+// the answer's validation error once no repairs are left. An answer that
+// fails validation with repairs left asks the model for a correction.
+func (s *Session) checkTurnOutcome(ctx context.Context, produced []Entry, r *runState) (text string, done bool, err error) {
+	if len(s.PendingApprovals()) > 0 {
+		return "", true, ErrApprovalNeeded
+	}
+	if refusal, refused := latestRefusal(produced); refused {
+		return "", true, refusalError(refusal)
+	}
+	text, ok := s.FinalOutput()
+	if !ok {
+		return "", false, nil
+	}
+	if r.validator == nil {
+		return text, true, nil
+	}
+	valErr := validateOutput(r.validator, text)
+	if valErr == nil {
+		return text, true, nil
+	}
+	if r.repairsLeft == 0 {
+		return "", true, valErr
+	}
+	r.repairsLeft--
+	if err := s.requestRepair(ctx, valErr); err != nil {
+		return "", true, err
+	}
+	return "", false, nil
+}
+
+func refusalError(refusal string) error {
+	if refusal != "" {
+		return fmt.Errorf("%w: %s", ErrRefused, refusal)
+	}
+	return ErrRefused
 }
 
 // runStatus describes how a run that returned err ended.
