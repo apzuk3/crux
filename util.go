@@ -109,11 +109,11 @@ func cloneState(state map[string]any) map[string]any {
 	if state == nil {
 		return nil
 	}
-	copy := make(map[string]any, len(state))
+	out := make(map[string]any, len(state))
 	for key, value := range state {
-		copy[key] = cloneStateValue(value)
+		out[key] = cloneStateValue(value)
 	}
-	return copy
+	return out
 }
 
 func cloneStateValue(value any) any {
@@ -121,11 +121,11 @@ func cloneStateValue(value any) any {
 	case map[string]any:
 		return cloneState(value)
 	case []any:
-		copy := slices.Clone(value)
+		out := slices.Clone(value)
 		for i, item := range value {
-			copy[i] = cloneStateValue(item)
+			out[i] = cloneStateValue(item)
 		}
-		return copy
+		return out
 	case []byte:
 		return slices.Clone(value)
 	case json.RawMessage:

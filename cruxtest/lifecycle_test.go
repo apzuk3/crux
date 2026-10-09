@@ -251,6 +251,7 @@ func TestCancelledRunIsRecorded(t *testing.T) {
 	mock := cruxtest.NewMock()
 	mock.Expect().ReturnToolCall("slow", map[string]any{})
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	reg := crux.NewToolsRegistry()
 	crux.RegisterToolWithRegistry(reg, "slow", "Slow", func(ctx context.Context, in struct{}) (string, *crux.StateDelta, error) {
 		cancel()

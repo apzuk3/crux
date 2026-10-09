@@ -77,21 +77,21 @@ func (t HeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // TailBuffer keeps the last bytes written to it, for a server's stderr.
 type TailBuffer struct {
-	mu  sync.Mutex
-	max int
-	buf []byte
+	mu    sync.Mutex
+	limit int
+	buf   []byte
 }
 
-// NewTailBuffer returns a buffer that keeps the last max bytes.
-func NewTailBuffer(max int) *TailBuffer {
-	return &TailBuffer{max: max}
+// NewTailBuffer returns a buffer that keeps the last limit bytes.
+func NewTailBuffer(limit int) *TailBuffer {
+	return &TailBuffer{limit: limit}
 }
 
 func (b *TailBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.buf = append(b.buf, p...)
-	if over := len(b.buf) - b.max; over > 0 {
+	if over := len(b.buf) - b.limit; over > 0 {
 		b.buf = b.buf[over:]
 	}
 	return len(p), nil
