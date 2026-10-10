@@ -98,3 +98,15 @@ func TestCloneEntriesIsDeep(t *testing.T) {
 	var empty Entry
 	require.Equal(t, []Entry{empty}, cloneEntries([]Entry{empty}), "nil pointers stay nil")
 }
+
+func TestDecodeIntoDuration(t *testing.T) {
+	var out struct {
+		Took time.Duration `json:"took"`
+	}
+	if err := decodeInto("```json\n{\"took\":\"1m30s\"}\n```", &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Took != 90*time.Second {
+		t.Fatalf("Took = %v", out.Took)
+	}
+}

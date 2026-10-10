@@ -12,6 +12,9 @@ All notable changes to crux are listed here. The format follows
 
 ### Fixed
 
+- `time.Duration` fields in tool inputs and `RunInto` targets take strings
+  such as `"90s"` or `"1h30m"`; a bare number used to decode as nanoseconds.
+
 - Tool input and output schemas describe types by what decodes into them:
   types with `UnmarshalText` (`decimal.Decimal`, `uuid.UUID`, `net.IP`) are
   strings, `time.Duration` is a string such as `"90s"`, `*big.Int` an

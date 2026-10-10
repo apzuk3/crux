@@ -59,8 +59,19 @@ func DecodeArgs[In any](name string, args json.RawMessage, validator *sjs.Schema
 	if args[0] == '"' && json.Unmarshal(args, &malformed) == nil {
 		return input, fmt.Errorf("arguments for %q are not valid JSON: %s", name, malformed)
 	}
-	if err := checkToolArgs(args, reflect.TypeFor[In](), validator); err != nil {
+	doc, err := checkToolArgs(args, reflect.TypeFor[In](), validator)
+	if err != nil {
 		return input, fmt.Errorf("invalid arguments for %q: %w", name, err)
+	}
+	if needsCoercion(reflect.TypeFor[In]()) {
+		// Durations are validated as strings and decoded as nanoseconds.
+		doc, err = coerce(doc, reflect.TypeFor[In](), "")
+		if err != nil {
+			return input, fmt.Errorf("invalid arguments for %q: %w", name, err)
+		}
+		if args, err = json.Marshal(doc); err != nil {
+			return input, fmt.Errorf("decode arguments for %q: %w", name, err)
+		}
 	}
 	if err := json.Unmarshal(args, &input); err != nil {
 		return input, fmt.Errorf("decode arguments for %q: %w", name, err)
@@ -388,28 +399,28 @@ func Compile(schema map[string]any) (*sjs.Schema, error) {
 // own UnmarshalJSON or UnmarshalText, accept any key. It then validates the
 // arguments against the input schema, treating null like a missing value as
 // encoding/json does.
-func checkToolArgs(args json.RawMessage, input reflect.Type, validator *sjs.Schema) error {
+func checkToolArgs(args json.RawMessage, input reflect.Type, validator *sjs.Schema) (any, error) {
 	dec := json.NewDecoder(bytes.NewReader(args))
 	dec.UseNumber()
 	doc, err := decodeStrictJSON(dec)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return errors.New("unexpected data after the arguments object")
+		return nil, errors.New("unexpected data after the arguments object")
 	}
 	doc, err = normalizeArgs(doc, input, "")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := validator.Validate(doc); err != nil {
 		var verr *sjs.ValidationError
 		if errors.As(err, &verr) {
-			return errors.New(strings.Join(validationMessages(verr), "; "))
+			return nil, errors.New(strings.Join(validationMessages(verr), "; "))
 		}
-		return err
+		return nil, err
 	}
-	return nil
+	return doc, nil
 }
 
 // decodeStrictJSON decodes one JSON value, failing on a repeated object key.
