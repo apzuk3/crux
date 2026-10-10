@@ -5,7 +5,6 @@ package schema
 
 import (
 	"bytes"
-	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +14,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	sjs "github.com/santhosh-tekuri/jsonschema/v5"
 )
@@ -111,6 +109,9 @@ func jsonSchema(t reflect.Type) map[string]any {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
+	if m, ok := customSchema(t); ok {
+		return m
+	}
 	// An input struct with its own UnmarshalJSON (often to fill in defaults)
 	// still describes its arguments with its fields.
 	if t.Kind() == reflect.Struct && t != timeType && !promotesUnmarshaler(t) &&
@@ -145,12 +146,6 @@ func decodesItself(t reflect.Type) bool {
 	return p.Implements(jsonUnmarshalerType) || p.Implements(textUnmarshalerType)
 }
 
-var (
-	timeType            = reflect.TypeFor[time.Time]()
-	jsonUnmarshalerType = reflect.TypeFor[json.Unmarshaler]()
-	textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
-)
-
 // schemaOf builds the schema for t. visiting holds the struct types being
 // expanded, so a recursive type is cut off instead of recursing forever.
 func schemaOf(t reflect.Type, visiting map[reflect.Type]bool) map[string]any {
@@ -160,13 +155,11 @@ func schemaOf(t reflect.Type, visiting map[reflect.Type]bool) map[string]any {
 
 	// A type with its own decoder, such as an int enum read from names or
 	// slog.Level, is described by what that decoder accepts, not by its kind.
-	switch {
-	case t == timeType:
-		return map[string]any{"type": "string", "format": "date-time"}
-	case reflect.PointerTo(t).Implements(jsonUnmarshalerType):
-		return map[string]any{} // decoded by its own UnmarshalJSON
-	case reflect.PointerTo(t).Implements(textUnmarshalerType):
-		return map[string]any{"type": "string"}
+	if m, ok := customSchema(t); ok {
+		return m
+	}
+	if r, ok := ruleFor(t); ok {
+		return r.asMap()
 	}
 
 	switch t.Kind() {
@@ -320,6 +313,10 @@ func fieldSchema(field reflect.StructField, opts []string, visiting map[reflect.
 		property = map[string]any{"type": "string"}
 	}
 	if description := field.Tag.Get("description"); description != "" {
+		// A duration's note about its format stays after the field's own text.
+		if note, _ := property["description"].(string); note == durationHint {
+			description += ". " + note
+		}
 		property["description"] = description
 	}
 	return property

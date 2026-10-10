@@ -28,6 +28,10 @@ if err := session.RunInto(ctx, &t, emailBody); err != nil { ... }
   rules, so the same type works everywhere.
 - `crux.WithOutputSchema(*jsonschema.Schema)` takes a schema you built.
 - Optional fields (pointers or `omitempty`) also allow `null`.
+- Field types map as for tool inputs ([tools.md](tools.md)): `uuid.UUID`,
+  `net.IP`, `decimal.Decimal` and other text-decoded types are strings,
+  `time.Duration` a string like `"1h30m"`, `*big.Int` an integer. A field that
+  accepts any JSON (`any`, `json.RawMessage`) is rejected by Anthropic.
 - The answer is validated against the schema, and `RunInto` also checks that
   it decodes into the target. Either failure fails with
   `crux.ErrOutputValidation`, unless `crux.WithMaxRepairs(n)` lets the model fix

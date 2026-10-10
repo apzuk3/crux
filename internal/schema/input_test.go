@@ -2,9 +2,12 @@ package schema
 
 import (
 	"encoding/json"
+	"math/big"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/invopop/jsonschema"
 )
 
 type address struct {
@@ -22,6 +25,42 @@ type color int
 func (c *color) UnmarshalText(text []byte) error { return nil }
 
 type blob struct{ Raw json.RawMessage }
+
+// decimalLike has both decoders, like shopspring/decimal: the text one wins.
+type decimalLike struct{ v string }
+
+func (d *decimalLike) UnmarshalJSON(data []byte) error { return nil }
+func (d *decimalLike) UnmarshalText(text []byte) error { return nil }
+
+type withDecimal struct {
+	Price decimalLike `json:"price"`
+}
+
+type withDurations struct {
+	For   time.Duration   `json:"for" description:"How long to wait"`
+	Grace *time.Duration  `json:"grace,omitempty"`
+	All   []time.Duration `json:"all"`
+}
+
+type withBigInt struct {
+	N *big.Int `json:"n"`
+}
+
+type level string
+
+func (level) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{Type: "string", Enum: []any{"low", "high"}}
+}
+
+type withOwnSchema struct {
+	Level level `json:"level"`
+}
+
+type selfDescribed struct{ Q string }
+
+func (selfDescribed) JSONSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{Type: "object", Description: "free-form"}
+}
 
 func (b *blob) UnmarshalJSON(data []byte) error { return nil }
 
@@ -109,6 +148,11 @@ func TestJSONSchemaGolden(t *testing.T) {
 		{"promoted", reflect.TypeFor[promoted](), `{}`},
 		{"map", reflect.TypeFor[map[string]any](), `{"additionalProperties":{},"type":"object"}`},
 		{"text unmarshaler", reflect.TypeFor[color](), `{"type":"string"}`},
+		{"both decoders decode a string", reflect.TypeFor[withDecimal](), `{"properties":{"price":{"type":"string"}},"required":["price"],"type":"object"}`},
+		{"durations", reflect.TypeFor[withDurations](), `{"properties":{"all":{"items":{"description":"Duration such as \"90s\" or \"1h30m\"","type":"string"},"type":"array"},"for":{"description":"How long to wait. Duration such as \"90s\" or \"1h30m\"","type":"string"},"grace":{"description":"Duration such as \"90s\" or \"1h30m\"","type":"string"}},"required":["for","all"],"type":"object"}`},
+		{"big int", reflect.TypeFor[withBigInt](), `{"properties":{"n":{"type":"integer"}},"type":"object"}`},
+		{"own schema", reflect.TypeFor[withOwnSchema](), `{"properties":{"level":{"enum":["low","high"],"type":"string"}},"required":["level"],"type":"object"}`},
+		{"own schema at the top", reflect.TypeFor[selfDescribed](), `{"description":"free-form","type":"object"}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
