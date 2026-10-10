@@ -377,3 +377,39 @@ func TestGeminiMaxTokensClamped(t *testing.T) {
 	require.NoError(t, mock.Requests()[0].UnmarshalBody(&body))
 	require.Equal(t, int64(math.MaxInt32), body.GenerationConfig.MaxOutputTokens)
 }
+
+// Several inputs in one Run are separate parts on every wire; the OpenAI
+// wire used to glue the texts into one string with nothing between them.
+func TestOpenAIKeepsUserTextPartsApart(t *testing.T) {
+	type ticket struct {
+		ID string `json:"id"`
+	}
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnText("ok")
+	mock.Expect().ReturnText("ok")
+	a, err := crux.New("r", crux.OpenAIGPT5_4)
+	require.NoError(t, err)
+	s, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
+	require.NoError(t, err)
+	_, err = s.Run(t.Context(), "Summarise this ticket", ticket{"T-1"}, "Be brief.")
+	require.NoError(t, err)
+	_, err = s.Run(t.Context(), "Thanks")
+	require.NoError(t, err)
+
+	var body struct {
+		Input []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"input"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(mock.Requests()[1].BodyString()), &body))
+	var items []map[string]string
+	require.NoError(t, json.Unmarshal(body.Input[0].Content, &items), "three inputs become a content list")
+	require.Equal(t, []map[string]string{
+		{"type": "input_text", "text": "Summarise this ticket"},
+		{"type": "input_text", "text": `{"id":"T-1"}`},
+		{"type": "input_text", "text": "Be brief."},
+	}, items)
+	var text string
+	require.NoError(t, json.Unmarshal(body.Input[len(body.Input)-1].Content, &text), "one text input stays a string")
+	require.Equal(t, "Thanks", text)
+}
