@@ -2,9 +2,14 @@ package schema
 
 import (
 	"encoding/json"
+	"math/big"
+	"net"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/invopop/jsonschema"
 )
 
@@ -131,6 +136,48 @@ func TestCompileOutput(t *testing.T) {
 		err := ValidateOutput(validator, raw)
 		if (err == nil) != want {
 			t.Errorf("validate %s: err = %v, want ok=%v", raw, err, want)
+		}
+	}
+}
+
+// The output reflector describes types by what their decoder accepts, like
+// tool inputs do, instead of expanding them by their fields.
+func TestOutputMapper(t *testing.T) {
+	type out struct {
+		ID     uuid.UUID       `json:"id"`
+		IP     net.IP          `json:"ip"`
+		D      time.Duration   `json:"d" jsonschema:"description=How long"`
+		Wait   time.Duration   `json:"wait"`
+		N      *big.Int        `json:"n"`
+		Raw    json.RawMessage `json:"raw"`
+		Both   decimalLike     `json:"both"`
+		Custom level           `json:"custom"`
+		When   time.Time       `json:"when"`
+	}
+	raw, err := json.Marshal(ReflectOutput(reflect.TypeFor[out]()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := decodeSchema(t, string(raw))
+	props := schema["properties"].(map[string]any)
+	if defs, _ := json.Marshal(schema["$defs"]); string(defs) != `{"level":{"enum":["low","high"],"type":"string"}}` {
+		t.Errorf("custom type definition: %s", defs)
+	}
+	want := map[string]string{
+		"id":     `{"type":"string"}`,
+		"ip":     `{"type":"string"}`,
+		"d":      `{"description":"How long","type":"string"}`,
+		"wait":   `{"description":"Duration such as \"90s\" or \"1h30m\"","type":"string"}`,
+		"n":      `{"type":"integer"}`,
+		"raw":    `true`,
+		"both":   `{"type":"string"}`,
+		"custom": `{"$ref":"#/$defs/level"}`, // invopop's own JSONSchema handling
+		"when":   `{"format":"date-time","type":"string"}`,
+	}
+	for name, schema := range want {
+		got, _ := json.Marshal(props[name])
+		if string(got) != schema {
+			t.Errorf("%s: got %s, want %s", name, got, schema)
 		}
 	}
 }

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"crux.foo"
 	"crux.foo/cruxtest"
+	"github.com/google/uuid"
 	"github.com/invopop/jsonschema"
 	"github.com/stretchr/testify/require"
 )
@@ -382,4 +384,27 @@ func TestRunIntoTextTargetNeverRepairs(t *testing.T) {
 	require.NoError(t, s.RunInto(t.Context(), &text, "say something"))
 	require.Equal(t, "not json at all", text)
 	mock.AssertTurnCount(t, 1)
+}
+
+// Output schemas describe text-decoded types as strings on the wire, so a
+// model can answer with a UUID or a duration the Go type decodes.
+func TestOutputSchemaTextTypesOnTheWire(t *testing.T) {
+	type record struct {
+		ID uuid.UUID     `json:"id"`
+		D  time.Duration `json:"d"`
+	}
+	for _, provider := range []crux.Provider{crux.ProviderGoogle, crux.ProviderAnthropic, crux.ProviderOpenAI} {
+		t.Run(string(provider), func(t *testing.T) {
+			mock := cruxtest.NewMock(cruxtest.WithProvider(provider))
+			mock.Expect().ReturnText("{}")
+			a, err := crux.New("r", "test-model", crux.WithProvider(provider), crux.WithOutputSchemaFrom[record]())
+			require.NoError(t, err)
+			s := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client())))
+			_, _ = s.Run(t.Context(), "go")
+			body := mock.Requests()[0].BodyString()
+			require.Contains(t, body, `"id":{"type":"string"}`)
+			require.Contains(t, body, `"d":{"description":"Duration such as \"90s\" or \"1h30m\"","type":"string"}`)
+			require.NotContains(t, body, "maxItems", "a UUID is not an array of 16 integers")
+		})
+	}
 }

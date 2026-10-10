@@ -12,6 +12,14 @@ All notable changes to crux are listed here. The format follows
 
 ### Fixed
 
+- Tool input and output schemas describe types by what decodes into them:
+  types with `UnmarshalText` (`decimal.Decimal`, `uuid.UUID`, `net.IP`) are
+  strings, `time.Duration` is a string such as `"90s"`, `*big.Int` an
+  integer, and a `JSONSchema()` method on a type is honoured. Before, a
+  decimal field in an output schema became an empty object that every model
+  answered with `{}`. Schemas of affected tools change, and so do the IDs of
+  agents using them.
+
 - `RunInto` checks that each answer decodes into the target during the run, so
   `WithMaxRepairs` repairs an answer the schema accepts but Go can't decode;
   the error wraps `ErrOutputValidation`.
