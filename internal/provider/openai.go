@@ -143,7 +143,7 @@ func OpenAI(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 		response, err = streamOpenAI(ctx, client, params, emit)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s responses: %w", req.Provider, openAILimit(err))
+		return nil, fmt.Errorf("%s responses: %w", req.Provider, openAILimit(req.Provider, err))
 	}
 	// Scan all messages before converting items or executing any local tools.
 	if err := openAIRefusal(req.Provider, response); err != nil {
@@ -683,7 +683,7 @@ func openAIInputItemFromOutputItem(raw []byte) (responses.ResponseInputItemUnion
 // openAILimit returns err as a *LimitError when the server reported a limit:
 // as an HTTP error, or as a stream event the SDK stopped at because it has an
 // "error" field (OpenRouter sends those as "error" and "response.error").
-func openAILimit(err error) error {
+func openAILimit(provider string, err error) error {
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) {
 		_, codes, message := errorFields([]byte(apiErr.RawJSON()))
@@ -691,7 +691,7 @@ func openAILimit(err error) error {
 		if apiErr.Response != nil {
 			header = apiErr.Response.Header
 		}
-		return limitError(err, apiErr.StatusCode, header, codes, message)
+		return limitError(err, provider, apiErr.StatusCode, header, codes, message)
 	}
 	var streamErr *ssestream.StreamError
 	if errors.As(err, &streamErr) {

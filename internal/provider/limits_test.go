@@ -11,7 +11,7 @@ import (
 
 func TestLimitErrorRetried(t *testing.T) {
 	header := http.Header{"Retry-After": []string{"3"}}
-	err := limitError(errors.New("429"), http.StatusTooManyRequests, header, []string{"rate_limit_error"}, "")
+	err := limitError(errors.New("429"), "anthropic", http.StatusTooManyRequests, header, []string{"rate_limit_error"}, "")
 	var limit *LimitError
 	if !errors.As(err, &limit) || !limit.Retried || limit.RetryAfter != 3*time.Second {
 		t.Fatalf("HTTP limit from an SDK should be retried with Retry-After, got %#v", err)
@@ -39,7 +39,40 @@ func TestErrorFieldsStringError(t *testing.T) {
 	if len(codes) == 0 || codes[0] != "permission-denied" {
 		t.Fatalf("top-level code should be kept, got %v", codes)
 	}
-	if classifyLimit(http.StatusForbidden, codes, "Your team has used all available credits") != LimitInsufficientCredits {
-		t.Fatal("xAI's credit message should classify as insufficient credits")
+}
+
+func TestCreditMessages(t *testing.T) {
+	const xaiCredits = "Your team abc has either used all available credits or reached its monthly spending limit."
+	tests := []struct {
+		name     string
+		provider string
+		status   int
+		codes    []string
+		message  string
+		want     LimitKind
+	}{
+		{"xAI out of credits", "xai", http.StatusForbidden, []string{"permission-denied"}, xaiCredits, LimitInsufficientCredits},
+		{"xAI never had credits", "xai", http.StatusForbidden, []string{"permission-denied"}, "Your team doesn't have any credits yet.", LimitInsufficientCredits},
+		{"xAI credit text with another code", "xai", http.StatusForbidden, []string{"invalid-argument"}, xaiCredits, 0},
+		{"xAI credit text on another status", "xai", http.StatusBadRequest, []string{"permission-denied"}, xaiCredits, 0},
+		{"xAI credit text from another provider", "openai", http.StatusForbidden, []string{"permission-denied"}, xaiCredits, 0},
+		{"Anthropic low balance", "anthropic", http.StatusBadRequest, []string{"invalid_request_error"}, "Your credit balance is too low to access the Anthropic API.", LimitInsufficientCredits},
+		{"Gemini prepaid credits", "google", http.StatusTooManyRequests, []string{"RESOURCE_EXHAUSTED"}, "Your prepayment credits are depleted. Please go to AI Studio.", LimitInsufficientCredits},
+		{"Gemini rate limit", "google", http.StatusTooManyRequests, []string{"RESOURCE_EXHAUSTED"}, "Resource has been exhausted (e.g. check quota).", LimitRateLimited},
+		{"Gemini billing on another provider", "openai", http.StatusBadRequest, nil, "billing details are missing", 0},
+		{"DeepSeek 402", "deepseek", http.StatusPaymentRequired, nil, "Insufficient Balance", LimitInsufficientCredits},
+	}
+	for _, tt := range tests {
+		if got := classifyLimit(tt.provider, tt.status, tt.codes, tt.message); got != tt.want {
+			t.Errorf("%s: classifyLimit = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+
+	apiErr := genai.APIError{Code: http.StatusForbidden, Status: "PERMISSION_DENIED", Message: "Permission denied.", Details: []map[string]any{
+		{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "BILLING_DISABLED", "domain": "googleapis.com"},
+	}}
+	var limit *LimitError
+	if err := geminiLimit(apiErr); !errors.As(err, &limit) || limit.Kind != LimitInsufficientCredits {
+		t.Fatalf("Gemini BILLING_DISABLED should be insufficient credits, got %#v", err)
 	}
 }
