@@ -41,35 +41,36 @@ layout: hextra-home
 {{< tabs >}}
 {{< tab name="Tools" selected=true >}}
 ```go
-crux.RegisterTool("get_weather", "Get the current weather",
+crux.RegisterTool("lookup_order", "Look an order up by its ID",
 	func(ctx context.Context, in struct {
-		City string `json:"city" description:"City name"`
-	}) (string, error) {
-		return "Sunny, 22°C in " + in.City, nil
+		ID string `json:"id" description:"Order ID, like A-1001"`
+	}) (Order, error) {
+		return orders.Get(in.ID)
 	})
 
-agent := crux.Must(crux.New("assistant", crux.ClaudeHaiku4_5,
-	crux.WithTools([]string{"get_weather"})))
+agent := crux.Must(crux.New("support", crux.ClaudeHaiku4_5,
+	crux.WithTools([]string{"lookup_order"})))
 session := crux.MustSession(crux.NewSession(ctx, agent))
 
-answer, err := session.Run(ctx, "What's the weather in Paris?")
-fmt.Println(answer) // It's sunny and 22°C in Paris.
+answer, err := session.Run(ctx, "Where is my order A-1001?")
+// Order A-1001 shipped yesterday and arrives on Friday.
 ```
 {{< /tab >}}
 {{< tab name="Structured output" >}}
 ```go
-type Ticket struct {
-	Title    string `json:"title"`
-	Priority string `json:"priority" jsonschema:"enum=low,enum=high"`
+type Invoice struct {
+	Number string    `json:"number"`
+	Total  float64   `json:"total"`
+	Due    time.Time `json:"due_date"`
 }
 
-agent := crux.Must(crux.New("triage", crux.OpenAIGPT5_4Mini,
-	crux.WithOutputSchemaFrom[Ticket]()))
+agent := crux.Must(crux.New("extractor", crux.Gemini3_5Flash,
+	crux.WithOutputSchemaFrom[Invoice]()))
 session := crux.MustSession(crux.NewSession(ctx, agent))
 
-var t Ticket
-err := session.RunInto(ctx, &t, "The checkout page has been down since 9am!")
-fmt.Println(t.Title, t.Priority) // Checkout page down high
+var inv Invoice
+err := session.RunInto(ctx, &inv, "Extract this invoice.", crux.File("invoice.pdf"))
+// inv.Number == "INV-2026-00917", inv.Total == 828.24
 ```
 {{< /tab >}}
 {{< tab name="Approvals" >}}
@@ -77,22 +78,34 @@ fmt.Println(t.Title, t.Priority) // Checkout page down high
 crux.RegisterTool("refund", "Refund an order", refundOrder,
 	crux.WithApprovalNeeded(true))
 
-agent := crux.Must(crux.New("support", crux.ClaudeHaiku4_5,
-	crux.WithTools([]string{"refund"})))
-session := crux.MustSession(crux.NewSession(ctx, agent))
+answer, err := session.Run(ctx, "The shoes don't fit, please refund order A-1001")
+// err is crux.ErrApprovalNeeded: nothing was refunded yet.
 
-answer, err := session.Run(ctx, "Please refund order 42")
-if errors.Is(err, crux.ErrApprovalNeeded) {
-	call := session.PendingApprovals()[0] // refund {"order_id":"42"}
-	session.Approve(ctx, call.ID)         // or session.Reject
-	answer, err = session.Resume(ctx)
+for _, call := range session.PendingApprovals() {
+	fmt.Println(call.Name, string(call.Args)) // refund {"order_id":"A-1001"}
+	session.Approve(ctx, call.ID)             // or session.Reject(ctx, call.ID, "why")
 }
+answer, err = session.Resume(ctx)
+// Done! I've refunded $129.90 for order A-1001.
+```
+{{< /tab >}}
+{{< tab name="Subagents" >}}
+```go
+researcher := crux.Must(crux.New("researcher", crux.Gemini3_5Flash,
+	crux.WithWebSearch()))
+
+lead := crux.Must(crux.New("lead", crux.ClaudeSonnet5_5,
+	crux.WithSubAgent(researcher, "Researches a question on the web")))
+session := crux.MustSession(crux.NewSession(ctx, lead))
+
+answer, err := session.Run(ctx, "What changed in the latest Go release? Cite sources.")
+// The lead calls agent_researcher, which searches and reports back with URLs.
 ```
 {{< /tab >}}
 {{< tab name="MCP" >}}
 ```go
 linear, err := crux.ConfigureMCP(ctx, "linear",
-	crux.MCPRemote("https://mcp.linear.app/mcp")) // OAuth in the browser
+	crux.MCPRemote("https://mcp.linear.app/mcp")) // OAuth opens in the browser
 if err != nil {
 	return err
 }
@@ -102,21 +115,22 @@ agent := crux.Must(crux.New("pm", crux.ClaudeSonnet5_5,
 	crux.WithMCPs("linear")))
 session := crux.MustSession(crux.NewSession(ctx, agent))
 
-answer, err := session.Run(ctx, "File an issue: checkout is down since 9am")
+answer, err := session.Run(ctx, "File a bug: checkout has been down since 9am")
+// Writes need approval unless the server marks the tool read-only.
 ```
 {{< /tab >}}
 {{< tab name="Decisions" >}}
 ```go
 type Triage struct {
-	Urgent bool   `json:"urgent" description:"Needs help right now?"`
-	Area   string `json:"area" choices:"billing|technical|sales"`
+	Urgent bool   `json:"urgent" description:"Does the customer need help right now?"`
+	Team   string `json:"team" choices:"billing|technical|sales"`
 }
 
-decider := crux.MustDecider(crux.NewDecider(crux.Jev,
-	crux.WithInstructions("You triage support tickets.")))
+decider := crux.MustDecider(crux.NewDecider(crux.Jev))
 res, err := crux.Decide[Triage](ctx, decider,
 	"My payouts have failed for 3 days. I can't pay my staff!")
-fmt.Println(res.Value.Area, res.Confidence["area"]) // billing 0.88
+// res.Value: {Urgent: true, Team: "billing"}
+// res.Confidence["team"]: 0.94
 ```
 {{< /tab >}}
 {{< /tabs >}}
