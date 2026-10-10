@@ -740,4 +740,12 @@ func (a *Agent) dropStaleForkSettings(fork *Agent) {
 	if fork.baseURL == a.baseURL {
 		fork.baseURL = ""
 	}
+	// Providers differ in what they accept here, and a fork should not fail
+	// on a setting chosen for the old one.
+	if fork.reasoning == a.reasoning {
+		fork.reasoning = ""
+	}
+	if fork.parallel != nil && a.parallel != nil && *fork.parallel == *a.parallel {
+		fork.parallel = nil
+	}
 }

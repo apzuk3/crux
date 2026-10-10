@@ -37,7 +37,9 @@ Run `go doc crux.foo | grep -i <provider>` for the full list.
 - `crux.WithMaxTurns(n)`: model requests per run (default 10).
 - `crux.WithMaxTokens(n)`, `crux.WithTemperature(t)`.
 - `crux.WithReasoning(crux.ReasoningOff | ReasoningLow | ReasoningMedium | ReasoningHigh | ReasoningMax)`.
-  On Anthropic, reasoning can't be combined with `WithTemperature`.
+  On Anthropic, reasoning can't be combined with `WithTemperature`. xAI's
+  grok-4.20 models pick reasoning by name (`-reasoning`, `-non-reasoning`)
+  and reject the option.
 - `crux.WithToolChoice(crux.ToolChoiceRequired)` (or `ToolChoiceAuto`,
   `ToolChoiceNone`, `crux.ToolChoiceTool("name")`): applies to the first
   request after new input only, so it can't loop.
