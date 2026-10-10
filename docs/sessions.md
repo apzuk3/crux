@@ -104,6 +104,12 @@ with `crux.WithCompaction(crux.CompactAt(0.7), crux.CompactWith(cheaperModel))`,
 set the window with `crux.WithContextWindow(tokens)`, turn it off with
 `crux.WithoutCompaction()`, or compact now with `session.Compact(ctx)`.
 
+Compaction runs inside the request that needs it, so a long session reopened
+after a gap pays for the summary on its first `Run`, which can take a while.
+Call `session.Compact(ctx)` when a conversation goes idle, or from a
+background job, to pay it early. A summary is asked to fit in a sixteenth of
+the window.
+
 ## Quick terminal chat
 
 `crux.CLI(agent, sessionOpts...)` opens an interactive chat with streaming,

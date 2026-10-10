@@ -16,6 +16,9 @@ All notable changes to crux are listed here. The format follows
 
 ### Fixed
 
+- Compaction summaries get a size target (a sixteenth of the window); one
+  summary of a 3000-entry session used to take 82 s and 25 KB.
+
 - `time.Duration` fields in tool inputs and `RunInto` targets take strings
   such as `"90s"` or `"1h30m"`; a bare number used to decode as nanoseconds.
 
