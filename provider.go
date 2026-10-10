@@ -326,7 +326,7 @@ func wireSchemaFor(s *jsonschema.Schema, provider Provider) (map[string]any, err
 		return m, err
 	}
 	spec, ok := providerSpecs[provider]
-	if !ok {
+	if !ok || spec.schema == nil { // a decision-only provider adapts nothing
 		return m, nil
 	}
 	m, err = spec.schema(m, string(provider))

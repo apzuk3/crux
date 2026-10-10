@@ -178,14 +178,12 @@ func TestOutputSchema_EdgeCases(t *testing.T) {
 					require.Len(t, out.Children, 2)
 				})
 			} else {
-				// For strict providers, we expect early error on dynamic map in schema
+				// Strict providers reject a dynamic map in the schema in New.
 				t.Run("dynamic_map_rejected", func(t *testing.T) {
-					// Dynamic map schemas are tested in cruxtest/schema_test.go.
-					// Strict providers reject them at schema creation time.
-					_, _ = crux.New("map-reject-test", tc.model,
+					_, err := crux.New("map-reject-test", tc.model,
 						crux.WithProvider(tc.provider),
 						crux.WithOutputSchemaFrom[NestedOutput]())
-					// We ignore error here - the point is that it doesn't panic.
+					require.ErrorContains(t, err, "dynamic map schemas")
 				})
 			}
 

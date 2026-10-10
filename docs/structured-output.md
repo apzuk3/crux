@@ -35,8 +35,9 @@ if err := session.RunInto(ctx, &t, emailBody); err != nil { ... }
   without a schema too, decoding whatever JSON the model wrote.
 - An agent with an output schema can still use tools; the schema applies to its
   final answer.
-- OpenAI-style providers need an object at the root: wrap a slice or scalar in a
-  struct field.
+- OpenAI-style providers need an object at the root (wrap a slice or scalar in
+  a struct field) and reject map fields; `crux.New` fails for a schema the
+  provider can't take.
 
 For labels, routing, yes/no or scores, prefer [decisions.md](decisions.md):
 it's cheaper and, on decision models, returns calibrated probabilities.
