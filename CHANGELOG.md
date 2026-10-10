@@ -7,6 +7,9 @@ All notable changes to crux are listed here. The format follows
 
 ### Fixed
 
+- An output schema a provider can't take (a map field on OpenAI-style
+  providers) fails in `crux.New` instead of on the first request.
+
 - Several inputs in one `Run` reach OpenAI-style providers as separate text
   parts instead of one string with nothing between them.
 
