@@ -65,6 +65,9 @@ func TestProviderLimitErrors(t *testing.T) {
 		{"deepseek insufficient balance", crux.ProviderDeepSeek, crux.DeepSeekFlash, 402,
 			`{"error":{"message":"Insufficient Balance","type":"unknown_error","code":"invalid_request_error"}}`,
 			[2]string{}, crux.ErrInsufficientCredits, 0},
+		{"xai credits exhausted, error as a string", crux.ProviderXAI, crux.XAIGrok4_20, 403,
+			`{"code":"permission-denied","error":"Your team 23a96bdc has either used all available credits or reached its monthly spending limit. To continue making API requests, please purchase more credits or raise your spending limit."}`,
+			[2]string{}, crux.ErrInsufficientCredits, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -87,6 +90,21 @@ func TestProviderLimitErrors(t *testing.T) {
 			require.Equal(t, tt.retryAfter, perr.RetryAfter)
 		})
 	}
+}
+
+// xAI sends {"code": ..., "error": "<message>"}, which the OpenAI SDK cannot
+// decode on its own; the message and status must still reach the caller.
+func TestXAIErrorMessageIsKept(t *testing.T) {
+	mock := cruxtest.NewMock(cruxtest.WithProvider(crux.ProviderXAI))
+	mock.Expect().ReturnError(http.StatusBadRequest, `{"code":"invalid-argument","error":"Model grok-4.20-reasoning does not support parameter reasoningEffort."}`)
+	_, err := limitSession(t, mock, crux.XAIGrok4_20, 2).Run(t.Context(), "hi")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not support parameter reasoningEffort")
+	require.Contains(t, err.Error(), "400")
+	require.NotContains(t, err.Error(), "cannot unmarshal")
+	require.Equal(t, 1, mock.Calls(), "a 400 is not retried")
+	var perr *crux.ProviderError
+	require.False(t, errors.As(err, &perr))
 }
 
 func TestProviderErrorUnrelated(t *testing.T) {

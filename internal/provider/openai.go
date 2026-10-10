@@ -1,10 +1,12 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -68,7 +70,7 @@ func newOpenAIClient(req *Request) *openai.Client {
 	if req.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(req.BaseURL))
 	}
-	opts = append(opts, option.WithMaxRetries(req.Retries()))
+	opts = append(opts, option.WithMaxRetries(req.Retries()), option.WithMiddleware(normalizeErrorBody))
 	client := req.HTTPClient
 	if client != nil {
 		opts = append(opts, option.WithHTTPClient(client))
@@ -85,6 +87,48 @@ func newOpenAIClient(req *Request) *openai.Client {
 	return &c
 }
 
+// normalizeErrorBody is a client middleware for error responses whose "error"
+// is a string, as xAI sends them ({"code":"invalid-argument","error":"..."}).
+// The SDK decodes "error" as an object and, when that fails, reports only the
+// decode error, dropping the status, headers and message. Rewriting the body
+// into the object shape keeps them.
+func normalizeErrorBody(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+	resp, err := next(req)
+	if err != nil || resp == nil || resp.StatusCode < http.StatusBadRequest || resp.Body == nil {
+		return resp, err
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr == nil {
+		if fixed, ok := errorObjectBody(body); ok {
+			body = fixed
+		}
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	return resp, nil
+}
+
+// errorObjectBody returns body with a string "error" field replaced by
+// {"message": ..., "code": ...}, and false when the body is not such an object.
+func errorObjectBody(body []byte) ([]byte, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil {
+		return nil, false
+	}
+	var message string
+	if json.Unmarshal(fields["error"], &message) != nil {
+		return nil, false
+	}
+	object := map[string]json.RawMessage{"message": fields["error"]}
+	if code, ok := fields["code"]; ok {
+		object["code"] = code
+	}
+	fields["error"], _ = json.Marshal(object)
+	out, err := json.Marshal(fields)
+	return out, err == nil
+}
+
 // OpenAI sends the log and returns the model's entries with usage attached.
 func OpenAI(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 	params, err := openAIParams(req)
@@ -99,7 +143,7 @@ func OpenAI(ctx context.Context, req *Request, emit Emit) ([]Item, error) {
 		response, err = streamOpenAI(ctx, client, params, emit)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s responses: %w", req.Provider, openAILimit(err))
+		return nil, fmt.Errorf("%s responses: %w", req.Provider, openAILimit(req.Provider, err))
 	}
 	// Scan all messages before converting items or executing any local tools.
 	if err := openAIRefusal(req.Provider, response); err != nil {
@@ -639,7 +683,7 @@ func openAIInputItemFromOutputItem(raw []byte) (responses.ResponseInputItemUnion
 // openAILimit returns err as a *LimitError when the server reported a limit:
 // as an HTTP error, or as a stream event the SDK stopped at because it has an
 // "error" field (OpenRouter sends those as "error" and "response.error").
-func openAILimit(err error) error {
+func openAILimit(provider string, err error) error {
 	var apiErr *openai.Error
 	if errors.As(err, &apiErr) {
 		_, codes, message := errorFields([]byte(apiErr.RawJSON()))
@@ -647,7 +691,7 @@ func openAILimit(err error) error {
 		if apiErr.Response != nil {
 			header = apiErr.Response.Header
 		}
-		return limitError(err, apiErr.StatusCode, header, codes, message)
+		return limitError(err, provider, apiErr.StatusCode, header, codes, message)
 	}
 	var streamErr *ssestream.StreamError
 	if errors.As(err, &streamErr) {

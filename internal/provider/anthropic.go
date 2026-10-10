@@ -598,5 +598,5 @@ func anthropicLimit(err error) error {
 	if apiErr.Response != nil {
 		header = apiErr.Response.Header
 	}
-	return limitError(err, apiErr.StatusCode, header, append(codes, string(apiErr.Type())), message)
+	return limitError(err, "anthropic", apiErr.StatusCode, header, append(codes, string(apiErr.Type())), message)
 }

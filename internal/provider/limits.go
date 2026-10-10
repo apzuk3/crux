@@ -54,6 +54,7 @@ var (
 		"insufficient_credits",         // OpenAI-compatible servers
 		"insufficient_user_quota",      // OpenAI-compatible servers
 		"exceeded_current_quota_error", // OpenAI-compatible servers
+		"billing_disabled",             // Google: google.rpc.ErrorInfo reason
 	}
 	rateCodes = []string{
 		"rate_limit_exceeded", // OpenAI, OpenRouter
@@ -72,23 +73,64 @@ var (
 		"service_unavailable",
 		"engine_overloaded",
 	}
-	// Billing errors some providers send as a plain 400 or 403.
-	creditMessages = []string{
-		"credit balance is too low", // Anthropic
-		"insufficient balance",      // DeepSeek
-		"insufficient credits",
-		"doesn't have any credits", // xAI
-		"billing",                  // Gemini: billing not enabled
+	// Billing errors some providers report with a generic status and code, so
+	// that only the message tells them apart. Each is matched only for its
+	// provider (as crux.Provider spells it), status and, when set, code, so
+	// another provider's wording cannot match by accident. Providers that send
+	// a billing code or a 402 (OpenAI, OpenRouter, DeepSeek) need no entry.
+	creditMessages = map[string][]creditMessage{
+		// Anthropic sends a 400 invalid_request_error, not its billing_error
+		// type, when the credit balance runs out.
+		"anthropic": {{status: http.StatusBadRequest, text: "credit balance is too low"}},
+		// Gemini reports depleted prepaid credits as a 429 RESOURCE_EXHAUSTED,
+		// the status and code of a rate limit, with no ErrorInfo detail. A
+		// project without billing gets a 400 or 403 naming billing; one whose
+		// billing account is disabled is caught by its BILLING_DISABLED reason.
+		"google": {
+			{status: http.StatusTooManyRequests, text: "prepayment credits are depleted"},
+			{status: http.StatusBadRequest, text: "billing"},
+			{status: http.StatusForbidden, text: "billing"},
+		},
+		// xAI documents no billing status or code
+		// (https://docs.x.ai/developers/debugging). Running out of credits is a
+		// 403 with the code permission-denied, the same as a key or team that
+		// lacks a permission, and the message is the only difference. A team
+		// that never had credits gets "... doesn't have any credits ..."; one
+		// that ran out or reached its spending limit gets "... has either used
+		// all available credits or reached its monthly spending limit". Should
+		// xAI reword these, the error stays a non-retryable 403 with its
+		// message, just not classified as credits.
+		"xai": {
+			{status: http.StatusForbidden, code: "permission-denied", text: "doesn't have any credits"},
+			{status: http.StatusForbidden, code: "permission-denied", text: "used all available credits"},
+		},
 	}
 )
 
+// creditMessage is a billing error recognized by its message: the status it
+// comes with, the error code it carries ("" for any) and lowercase text the
+// message contains.
+type creditMessage struct {
+	status int
+	code   string
+	text   string
+}
+
 // classifyLimit returns the limit that a status code (0 when unknown), the
-// provider's error codes or types, and its message describe, or 0.
-func classifyLimit(status int, codes []string, message string) LimitKind {
+// provider's error codes or types, and its message describe, or 0. provider
+// selects the creditMessages to look for.
+func classifyLimit(provider string, status int, codes []string, message string) LimitKind {
 	has := func(list []string) bool {
 		return slices.ContainsFunc(codes, func(code string) bool {
 			return slices.Contains(list, strings.ToLower(strings.TrimSpace(code)))
 		})
+	}
+	message = strings.ToLower(message)
+	// Before the codes: Gemini's credit message comes with a rate limit code.
+	for _, m := range creditMessages[provider] {
+		if m.status == status && (m.code == "" || has([]string{m.code})) && strings.Contains(message, m.text) {
+			return LimitInsufficientCredits
+		}
 	}
 	switch {
 	case has(creditCodes):
@@ -105,22 +147,15 @@ func classifyLimit(status int, codes []string, message string) LimitKind {
 		return LimitRateLimited
 	case http.StatusBadGateway, http.StatusServiceUnavailable, 529:
 		return LimitOverloaded
-	case http.StatusBadRequest, http.StatusForbidden:
-		message = strings.ToLower(message)
-		for _, s := range creditMessages {
-			if strings.Contains(message, s) {
-				return LimitInsufficientCredits
-			}
-		}
 	}
 	return 0
 }
 
-// limitError returns err as a *LimitError when status, codes and message
-// describe a limit, and err unchanged otherwise. The error is marked as
-// retried: HTTP errors come back from the SDKs after their retries.
-func limitError(err error, status int, header http.Header, codes []string, message string) error {
-	kind := classifyLimit(status, codes, message)
+// limitError returns err as a *LimitError when provider's status, codes and
+// message describe a limit, and err unchanged otherwise. The error is marked
+// as retried: HTTP errors come back from the SDKs after their retries.
+func limitError(err error, provider string, status int, header http.Header, codes []string, message string) error {
+	kind := classifyLimit(provider, status, codes, message)
 	if kind == 0 {
 		return err
 	}
@@ -129,10 +164,11 @@ func limitError(err error, status int, header http.Header, codes []string, messa
 
 // bodyLimit is limitError for an error that came in a response the server
 // started with 200: raw is the error event or object, classified by its codes
-// (and a number code as the status), and StatusCode stays 0.
+// (and a number code as the status), and StatusCode stays 0. No provider's
+// credit message comes this way, so none is looked for.
 func bodyLimit(err error, raw []byte, codes ...string) error {
 	status, more, message := errorFields(raw)
-	kind := classifyLimit(status, append(codes, more...), message)
+	kind := classifyLimit("", status, append(codes, more...), message)
 	if kind == 0 {
 		return err
 	}
@@ -143,7 +179,8 @@ func bodyLimit(err error, raw []byte, codes ...string) error {
 // OpenAI, Anthropic and OpenRouter shape them: code, type and, from
 // OpenRouter, error_type (also in metadata). A number code is OpenRouter's
 // HTTP status and is returned as status. raw may be the object itself or an
-// envelope with it under "error".
+// envelope with it under "error"; xAI puts the message itself there, as a
+// string.
 func errorFields(raw []byte) (status int, codes []string, message string) {
 	type object struct {
 		Code      json.RawMessage `json:"code"`
@@ -156,7 +193,7 @@ func errorFields(raw []byte) (status int, codes []string, message string) {
 	}
 	var envelope struct {
 		object
-		Error *object `json:"error"`
+		Error json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(raw, &envelope) != nil {
 		return 0, nil, ""
@@ -173,8 +210,14 @@ func errorFields(raw []byte) (status int, codes []string, message string) {
 			message = o.Message
 		}
 	}
-	if envelope.Error != nil {
-		add(envelope.Error)
+	var text string
+	var inner object
+	switch {
+	case len(envelope.Error) == 0:
+	case json.Unmarshal(envelope.Error, &text) == nil:
+		message = text
+	case json.Unmarshal(envelope.Error, &inner) == nil:
+		add(&inner)
 	}
 	add(&envelope.object)
 	return status, codes, message

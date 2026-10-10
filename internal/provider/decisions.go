@@ -147,7 +147,7 @@ func postDecisionsOnce(ctx context.Context, client *http.Client, endpoint string
 	err = fmt.Errorf("%s: %s: %s", req.Provider, resp.Status, bytes.TrimSpace(raw))
 	_, codes, message := errorFields(raw)
 	return decisionsAttempt{
-		err:   limitError(err, resp.StatusCode, resp.Header, codes, message),
+		err:   limitError(err, req.Provider, resp.StatusCode, resp.Header, codes, message),
 		retry: retryable(resp.StatusCode),
 		after: parseRetryAfter(resp.Header),
 	}

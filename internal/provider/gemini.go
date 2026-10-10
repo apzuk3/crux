@@ -679,15 +679,25 @@ func geminiFunctionResponsePart(r *ToolResult, calls map[string]*genai.FunctionC
 	return []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: call.ID, Name: call.Name, Response: response}}}, nil
 }
 
-// geminiLimit returns err as a *LimitError when Gemini reported a limit. Its
-// delay comes from the google.rpc.RetryInfo detail, as there are no headers.
-// The genai client is told not to retry limits, so the error is not retried.
+// geminiLimit returns err as a *LimitError when Gemini reported a limit,
+// classified by its status and the reasons of its google.rpc.ErrorInfo
+// details. Its delay comes from the google.rpc.RetryInfo detail, as there are
+// no headers. The genai client is told not to retry limits, so the error is
+// not retried.
 func geminiLimit(err error) error {
 	var apiErr genai.APIError
 	if !errors.As(err, &apiErr) {
 		return err
 	}
-	limit, ok := limitError(err, apiErr.Code, nil, []string{apiErr.Status}, apiErr.Message).(*LimitError)
+	codes := []string{apiErr.Status}
+	for _, detail := range apiErr.Details {
+		if kind, _ := detail["@type"].(string); strings.HasSuffix(kind, "google.rpc.ErrorInfo") {
+			if reason, _ := detail["reason"].(string); reason != "" {
+				codes = append(codes, reason)
+			}
+		}
+	}
+	limit, ok := limitError(err, "google", apiErr.Code, nil, codes, apiErr.Message).(*LimitError)
 	if !ok {
 		return err
 	}
