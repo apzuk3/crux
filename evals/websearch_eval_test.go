@@ -87,6 +87,12 @@ func Test_WebSearchEval(t *testing.T) {
 			provider: crux.ProviderXAI,
 			model:    crux.XAIGrok4_20,
 		},
+		{
+			name:     "Gemini_3_5_Flash_with_tool", // search next to tools needs Gemini 3
+			provider: crux.ProviderGoogle,
+			model:    crux.Gemini3_5Flash,
+			withTool: true,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -103,14 +109,22 @@ func runWebSearchCase(t *testing.T, tc providerCase) {
 		t.Skipf("Skipping %s: API key for provider %s not set in environment", tc.name, tc.provider)
 	}
 
-	agent, err := crux.New(
-		"websearch-eval-"+tc.name,
-		tc.model,
+	opts := []crux.AgentOption{
 		crux.WithProvider(tc.provider),
 		crux.WithWebSearch(crux.WithUserLocation(crux.UserLocation{Country: "US"})),
 		crux.WithInstructions(webSearchInstructions),
 		crux.WithMaxTurns(10),
-	)
+	}
+	if tc.withTool {
+		reg := crux.NewToolsRegistry()
+		crux.RegisterToolWithRegistry(reg, "save_note", "Save a research note", func(ctx context.Context, in struct {
+			Title string `json:"title"`
+		}) (string, *crux.StateDelta, error) {
+			return "saved " + in.Title, nil, nil
+		})
+		opts = append(opts, crux.WithToolsRegistry([]string{"save_note"}, reg))
+	}
+	agent, err := crux.New("websearch-eval-"+tc.name, tc.model, opts...)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
