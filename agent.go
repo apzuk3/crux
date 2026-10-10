@@ -553,11 +553,6 @@ var subAgentInputSchema = map[string]any{
 	"required": []string{"task"},
 }
 
-var outputReflector = &jsonschema.Reflector{
-	Anonymous:      true,
-	ExpandedStruct: true,
-}
-
 func makeOptionalNullable(schema *jsonschema.Schema) {
 	if schema == nil {
 		return
@@ -616,7 +611,8 @@ func WithOutputSchemaFrom[T any]() AgentOption {
 		case *string, *any:
 			a.outputSchema = nil
 		default:
-			schema := outputReflector.ReflectFromType(reflect.TypeFor[T]())
+			// The same type rules as tool inputs: a decimal is a string, not {}.
+			schema := schema.ReflectOutput(reflect.TypeFor[T]())
 			schema.Version = ""
 			makeOptionalNullable(schema)
 			a.outputSchema = schema

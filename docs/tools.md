@@ -33,6 +33,12 @@ agent := crux.Must(crux.New("support", crux.OpenAIGPT5_4Mini,
   and a field is optional when it is a pointer or tagged `omitempty`.
 - **Out** can be anything. A `string` or `fmt.Stringer` is sent as text,
   anything else as JSON.
+- Field types follow what decodes into them: `time.Time` is an RFC 3339
+  string, `time.Duration` a string such as `"90s"` or `"1h30m"`, `[]byte`
+  base64, a type with `UnmarshalText` (`uuid.UUID`, `net.IP`,
+  `decimal.Decimal`) a string, `*big.Int` an integer, and a type with only
+  `UnmarshalJSON` any JSON. A `JSONSchema() *jsonschema.Schema` method on a
+  type replaces all of this. Take a `url.URL` as a string.
 - Arguments are validated strictly before `fn` runs: unknown keys, repeated
   keys and keys that only match a field case-insensitively are rejected, and
   the model is told why.
