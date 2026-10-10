@@ -116,6 +116,12 @@ func newAgent(name, model string, opts ...AgentOption) (*Agent, error) {
 			return nil, err
 		}
 	}
+	// A schema the provider can't take fails here, not on the first request.
+	if agent.outputSchema != nil {
+		if _, err := wireSchemaFor(agent.outputSchema, agent.provider); err != nil {
+			return nil, fmt.Errorf("output schema: %w", err)
+		}
+	}
 
 	agent.id = uuid.NewSHA1(agentNamespace, agent.canonicalData())
 

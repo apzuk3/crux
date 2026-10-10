@@ -168,19 +168,16 @@ func TestMapOutputSchemaCompatibility(t *testing.T) {
 		require.NotEqual(t, false, labelsProp["additionalProperties"])
 	})
 
-	t.Run("openai rejects dynamic map schema before request", func(t *testing.T) {
-		mock := cruxtest.NewMock(cruxtest.WithProvider(crux.ProviderOpenAI))
-		a, err := crux.New("map-openai", "test-model",
-			crux.WithProvider(crux.ProviderOpenAI),
-			crux.WithOutputSchemaFrom[withMapAnswer]())
+	t.Run("openai-style providers reject a dynamic map schema in New", func(t *testing.T) {
+		for _, provider := range []crux.Provider{crux.ProviderOpenAI, crux.ProviderOpenrouter, crux.ProviderXAI} {
+			_, err := crux.New("map-"+string(provider), "test-model",
+				crux.WithProvider(provider),
+				crux.WithOutputSchemaFrom[withMapAnswer]())
+			require.ErrorContains(t, err, "does not support dynamic map schemas", provider)
+			require.ErrorContains(t, err, "output schema", provider)
+		}
+		_, err := crux.New("map-google", crux.Gemini2_5Flash, crux.WithOutputSchemaFrom[withMapAnswer]())
 		require.NoError(t, err)
-		sess, err := crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client()))
-		require.NoError(t, err)
-		var res withMapAnswer
-		err = sess.RunInto(context.Background(), &res, "get labels")
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "does not support dynamic map schemas")
-		mock.AssertTurnCount(t, 0)
 	})
 }
 

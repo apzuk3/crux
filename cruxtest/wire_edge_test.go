@@ -293,13 +293,8 @@ type listItem struct {
 func TestNonObjectOutputSchema(t *testing.T) {
 	for _, provider := range []crux.Provider{crux.ProviderOpenAI, crux.ProviderXAI, crux.ProviderOpenrouter, crux.ProviderDeepSeek} {
 		t.Run(string(provider), func(t *testing.T) {
-			mock := cruxtest.NewMock(cruxtest.WithProvider(provider))
-			agent, err := crux.New("list", "test-model", crux.WithProvider(provider), crux.WithOutputSchemaFrom[[]listItem]())
-			require.NoError(t, err)
-			s := crux.MustSession(crux.NewSession(t.Context(), agent, crux.WithHTTPClient(mock.Client())))
-			_, err = s.Run(t.Context(), "list")
-			require.ErrorContains(t, err, "object at the root")
-			require.Equal(t, 0, mock.Calls())
+			_, err := crux.New("list", "test-model", crux.WithProvider(provider), crux.WithOutputSchemaFrom[[]listItem]())
+			require.ErrorContains(t, err, "object at the root", "rejected in New, before any request")
 		})
 	}
 	t.Run("google", func(t *testing.T) {
