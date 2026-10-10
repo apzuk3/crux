@@ -79,8 +79,9 @@ other setup is needed.
   `^[a-zA-Z0-9_-]{1,64}$`.
 - A tool's error or panic is sent to the model as the result; it never fails
   the run.
-- One `Session` per conversation, used from one goroutine at a time. To continue
-  a conversation later, persist it with `WithStore` and reopen it with
+- One `Session` per conversation, used from one goroutine at a time (a second
+  operation while one runs fails with `ErrSessionBusy`). To continue a
+  conversation later, persist it with `WithStore` and reopen it with
   `WithSessionID`.
 - `RunInto(ctx, &target, inputs...)` takes the target **before** the inputs.
 - After a failed `Run`, call `Resume`; calling `Run` again repeats the input.

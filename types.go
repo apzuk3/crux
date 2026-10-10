@@ -302,6 +302,10 @@ var (
 	// appended entries to the session. Load the session again with
 	// WithSessionID and retry.
 	ErrSessionConflict = errors.New("session was changed by another writer")
+	// ErrSessionBusy is returned when Run, Resume, Stream, RunInto, Approve,
+	// Reject, Compact or Fork is called while another of them runs on the
+	// same session; a session serves one operation at a time.
+	ErrSessionBusy = errors.New("session is busy with another operation")
 	// ErrContextTooLong wraps a provider error saying the request exceeds the
 	// model's context window, when compacting the session could not help.
 	ErrContextTooLong = errors.New("context window exceeded")
