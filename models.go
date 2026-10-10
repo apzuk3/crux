@@ -2,6 +2,7 @@ package crux
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"crux.foo/internal/provider"
@@ -885,6 +886,7 @@ func init() {
 		step:          provider.OpenAI,
 		schema:        schema.AdaptOpenAI,
 		contextWindow: xAIWindow,
+		prepare:       prepareXAI,
 	})
 
 	registerProvider(ProviderDeepSeek, providerSpec{
@@ -1434,6 +1436,16 @@ func prepareAnthropic(a *Agent) error {
 	_, forcesTool := a.toolChoice.tool()
 	if (forcesTool || a.toolChoice == ToolChoiceRequired) && reasons {
 		return errors.New("anthropic cannot force a tool call while the model reasons; use WithReasoning(ReasoningOff) or ToolChoiceAuto")
+	}
+	return nil
+}
+
+// prepareXAI rejects a reasoning effort on the grok-4.20 family, which picks
+// reasoning by model name (-reasoning, -non-reasoning) and answers 400 "does
+// not support parameter reasoningEffort" otherwise.
+func prepareXAI(a *Agent) error {
+	if a.reasoning != "" && strings.Contains(a.model, "grok-4.20") {
+		return fmt.Errorf("xai model %s picks reasoning by its name; use a -reasoning or -non-reasoning model instead of WithReasoning", a.model)
 	}
 	return nil
 }
