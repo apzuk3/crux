@@ -5,7 +5,15 @@ All notable changes to crux are listed here. The format follows
 
 ## Unreleased
 
+### Added
+
+- `Kind.String()` names log entry kinds (`tool_call`, `run_finished`, ...) when
+  printed; the stored form stays numeric.
+
 ### Fixed
+
+- An attachment with an extension crux doesn't send (`.xlsx`, `.docx`, ...)
+  fails with "unsupported file type" instead of asking for a name it has.
 
 - An output schema a provider can't take (a map field on OpenAI-style
   providers) fails in `crux.New` instead of on the first request.

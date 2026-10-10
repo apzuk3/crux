@@ -152,6 +152,7 @@ func TestAttachmentErrors(t *testing.T) {
 		{"missing file", []any{crux.File("testdata/missing.png")}, `attachment "missing.png": open testdata/missing.png`},
 		{"binary bytes", []any{"look", pngBytes}, "wrap it in crux.Data"},
 		{"unknown type", []any{crux.Data([]byte{0, 1, 2, 3})}, "can't tell the file type; use WithName or WithMIME"},
+		{"unsupported extension", []any{crux.Data([]byte("PK\x03\x04fake")).WithName("sheet.xlsx")}, `unsupported file type ".xlsx"`},
 		{"empty", []any{crux.Data(nil)}, "file is empty"},
 		{"too large", []any{crux.Reader(strings.NewReader(strings.Repeat("x", 20<<20+1)))}, "larger than 20 MB"},
 		{"bad URL", []any{crux.URL("file:///etc/passwd")}, "not an http or https URL"},
