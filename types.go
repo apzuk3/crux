@@ -42,6 +42,30 @@ const (
 	KindToolStarted // a tool is about to run; ToolCall holds the call's ID and name. Without a result, the tool may have run
 )
 
+var kindNames = [...]string{
+	KindUser:         "user",
+	KindAssistant:    "assistant",
+	KindReasoning:    "reasoning",
+	KindToolCall:     "tool_call",
+	KindToolResult:   "tool_result",
+	KindStateDelta:   "state_delta",
+	KindCompaction:   "compaction",
+	KindProviderTool: "provider_tool",
+	KindApproval:     "approval",
+	KindRunStarted:   "run_started",
+	KindRunFinished:  "run_finished",
+	KindTurnStarted:  "turn_started",
+	KindToolStarted:  "tool_started",
+}
+
+// String names the kind for logs; the stored form stays the number.
+func (k Kind) String() string {
+	if int(k) < len(kindNames) && kindNames[k] != "" {
+		return kindNames[k]
+	}
+	return fmt.Sprintf("Kind(%d)", uint8(k))
+}
+
 type ContentKind string
 
 const (
