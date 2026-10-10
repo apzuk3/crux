@@ -155,6 +155,9 @@ func (a Attachment) resolve() (ContentPart, error) {
 		mimeType = detectMIME(a.name, data)
 	}
 	if mimeType == "" {
+		if ext := path.Ext(a.name); ext != "" {
+			return ContentPart{}, fmt.Errorf("unsupported file type %q; crux sends text, JSON, YAML, images, audio, video and PDF", ext)
+		}
 		return ContentPart{}, errors.New("can't tell the file type; use WithName or WithMIME")
 	}
 	return ContentPart{Kind: ContentKindFile, Name: a.name, MIME: mimeType, Data: data}, nil

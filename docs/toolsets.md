@@ -62,8 +62,10 @@ Toolset name: `crux.ToolsetNetwork` (`"network"`).
   `net_read`, `net_list`, `net_close`.
 - Need approval: `http_request`, `net_connect`, `net_send`, `net_listen`,
   `http_serve`.
-- Options: `crux.WithNetworkPrivate(true)` allows private and loopback
-  addresses; `crux.WithNetworkHosts("*.example.com")` restricts hosts;
+- Private, loopback and link-local addresses (cloud metadata included) are
+  reachable by default, behind approval; `http_get` never reaches them.
+  Options: `crux.WithNetworkPrivate(false)` blocks them for every tool;
+  `crux.WithNetworkHosts("*.example.com")` restricts hosts;
   `crux.WithNetworkApprovalNeeded(needed, tools...)` changes approvals.
 
 ```go
