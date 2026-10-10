@@ -7,6 +7,9 @@ All notable changes to crux are listed here. The format follows
 
 ### Fixed
 
+- Gemini 3 agents can combine `WithWebSearch` with their own tools; the
+  request now asks for server-side tool invocations, which the API requires.
+
 - `WithReasoning` on xAI's grok-4.20 models, which pick reasoning by name and
   reject the effort, now fails in `New` instead of on the first request, and a
   fork to another provider drops reasoning and parallel-call settings.
