@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"crux.foo/internal/schema"
@@ -30,6 +31,17 @@ type Session struct {
 	children map[string]*Session // subagent sessions waiting for approval, by openToolCall.key
 	onEntry  []func(context.Context, *Session, Entry)
 	entryMu  *sync.Mutex // serialises onEntry across the session and its subagents
+	running  atomic.Bool // set while an operation that changes the session runs
+}
+
+// acquire marks the session busy for one operation and returns the release,
+// or ErrSessionBusy when another operation is running. It turns concurrent
+// use, which the session does not support, into an error instead of a race.
+func (s *Session) acquire() (release func(), err error) {
+	if !s.running.CompareAndSwap(false, true) {
+		return nil, ErrSessionBusy
+	}
+	return func() { s.running.Store(false) }, nil
 }
 
 // sessionContextKey carries the session running a tool, so sessions created
@@ -262,6 +274,11 @@ func (s *Session) Run(ctx context.Context, inputs ...any) (string, error) {
 type decodeProbe func(text string) error
 
 func (s *Session) run(ctx context.Context, inputs []any, emit chunkSink, decode decodeProbe) (text string, err error) {
+	release, err := s.acquire()
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -960,6 +977,11 @@ func (s *Session) Reject(ctx context.Context, callID string, reason string) erro
 // decide records a decision in the session that made the call, which is a
 // subagent's session for a call made by a subagent.
 func (s *Session) decide(ctx context.Context, decision Approval) error {
+	release, err := s.acquire()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1261,6 +1283,11 @@ func (s *Session) forkFrom(ctx context.Context, from int, opts ...AgentOption) (
 
 // forkWith is forkFrom with extra options for the new session.
 func (s *Session) forkWith(ctx context.Context, from int, sessionOpts []SessionOption, opts ...AgentOption) (*Session, error) {
+	release, err := s.acquire()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if from < 0 || from > len(s.logs) {
 		return nil, fmt.Errorf("cannot fork at offset %d: must be between 0 and %d", from, len(s.logs))
 	}

@@ -15,6 +15,7 @@ Check errors with `errors.Is`; crux wraps them with context.
 | `crux.ErrToolNotFound` | An agent names a tool or toolset nobody registered (from `crux.New`). | Register it before building the agent. |
 | `crux.ErrSessionNotFound` | A `Store` has no entries for an ID. | `NewSession` with `WithSessionID` already handles this by starting fresh. |
 | `crux.ErrSessionConflict` | Another writer appended to the session first. | Reopen with `WithSessionID` and retry. |
+| `crux.ErrSessionBusy` | `Run`, `Approve`, `Compact`, `Fork`, ... was called while another operation runs on the session. | Wait for it; one session serves one operation at a time. |
 
 Tool errors are not here: they go to the model, not to you
 ([tools.md](tools.md)). Provider and network errors are returned as they are;

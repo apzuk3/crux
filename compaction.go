@@ -104,7 +104,12 @@ func (a *Agent) window() int {
 // size, as a /compact command would. It does nothing when there is nothing
 // to summarise yet.
 func (s *Session) Compact(ctx context.Context) error {
-	_, err := s.summarise(ctx, true)
+	release, err := s.acquire()
+	if err != nil {
+		return err
+	}
+	defer release()
+	_, err = s.summarise(ctx, true)
 	return err
 }
 

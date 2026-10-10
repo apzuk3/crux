@@ -4,8 +4,9 @@ weight: 50
 ---
 
 A `*crux.Session` is one conversation with an agent. Create one per
-conversation and use it from one goroutine at a time; the `*crux.Agent` can be
-shared freely.
+conversation and use it from one goroutine at a time (a second operation
+started while one runs fails with `crux.ErrSessionBusy`); the `*crux.Agent`
+can be shared freely.
 
 ```go
 session, err := crux.NewSession(ctx, agent)
