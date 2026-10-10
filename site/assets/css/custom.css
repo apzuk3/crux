@@ -65,13 +65,13 @@
 }
 .crux-hero-code pre,
 .crux-hero-code pre code {
-  font-size: 0.95rem !important;
+  font-size: 0.84rem !important;
   line-height: 1.6 !important;
 }
 .crux-hero-code pre {
   margin: 0 !important;
-  padding: 1.4rem 1.6rem !important;
-  min-height: 22.6rem;
+  padding: 1.3rem 1.4rem !important;
+  min-height: 19.5rem;
   border-radius: 1rem;
   background-color: hsl(220 14% 92%) !important;
   box-shadow: 0 25px 60px -20px hsl(220 40% 5% / 0.6);
