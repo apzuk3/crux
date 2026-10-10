@@ -48,9 +48,9 @@ crux.RegisterTool("lookup_order", "Look an order up by its ID",
 		return orders.Get(in.ID)
 	})
 
-agent := crux.Must(crux.New("support", crux.ClaudeHaiku4_5,
-	crux.WithTools([]string{"lookup_order"})))
-session := crux.MustSession(crux.NewSession(ctx, agent))
+agent, _ := crux.New("support", crux.ClaudeHaiku4_5,
+	crux.WithTools([]string{"lookup_order"}))
+session, _ := crux.NewSession(ctx, agent)
 
 answer, err := session.Run(ctx, "Where is my order A-1001?")
 // Order A-1001 shipped yesterday and arrives on Friday.
@@ -64,9 +64,9 @@ type Invoice struct {
 	Due    time.Time `json:"due_date"`
 }
 
-agent := crux.Must(crux.New("extractor", crux.Gemini3_5Flash,
-	crux.WithOutputSchemaFrom[Invoice]()))
-session := crux.MustSession(crux.NewSession(ctx, agent))
+agent, _ := crux.New("extractor", crux.Gemini3_5Flash,
+	crux.WithOutputSchemaFrom[Invoice]())
+session, _ := crux.NewSession(ctx, agent)
 
 var inv Invoice
 err := session.RunInto(ctx, &inv, "Extract this invoice.", crux.File("invoice.pdf"))
@@ -91,12 +91,12 @@ answer, err = session.Resume(ctx)
 {{< /tab >}}
 {{< tab name="Subagents" >}}
 ```go
-researcher := crux.Must(crux.New("researcher", crux.Gemini3_5Flash,
-	crux.WithWebSearch()))
+researcher, _ := crux.New("researcher", crux.Gemini3_5Flash,
+	crux.WithWebSearch())
 
-lead := crux.Must(crux.New("lead", crux.ClaudeSonnet5_5,
-	crux.WithSubAgent(researcher, "Researches a question on the web")))
-session := crux.MustSession(crux.NewSession(ctx, lead))
+lead, _ := crux.New("lead", crux.ClaudeSonnet5_5,
+	crux.WithSubAgent(researcher, "Researches a question on the web"))
+session, _ := crux.NewSession(ctx, lead)
 
 answer, err := session.Run(ctx, "What changed in the latest Go release? Cite sources.")
 // The lead calls agent_researcher, which searches and reports back with URLs.
@@ -104,16 +104,13 @@ answer, err := session.Run(ctx, "What changed in the latest Go release? Cite sou
 {{< /tab >}}
 {{< tab name="MCP" >}}
 ```go
-linear, err := crux.ConfigureMCP(ctx, "linear",
+linear, _ := crux.ConfigureMCP(ctx, "linear",
 	crux.MCPRemote("https://mcp.linear.app/mcp")) // OAuth opens in the browser
-if err != nil {
-	return err
-}
 defer linear.Close()
 
-agent := crux.Must(crux.New("pm", crux.ClaudeSonnet5_5,
-	crux.WithMCPs("linear")))
-session := crux.MustSession(crux.NewSession(ctx, agent))
+agent, _ := crux.New("pm", crux.ClaudeSonnet5_5,
+	crux.WithMCPs("linear"))
+session, _ := crux.NewSession(ctx, agent)
 
 answer, err := session.Run(ctx, "File a bug: checkout has been down since 9am")
 // Writes need approval unless the server marks the tool read-only.
@@ -126,7 +123,7 @@ type Triage struct {
 	Team   string `json:"team" choices:"billing|technical|sales"`
 }
 
-decider := crux.MustDecider(crux.NewDecider(crux.Jev))
+decider, _ := crux.NewDecider(crux.Jev)
 res, err := crux.Decide[Triage](ctx, decider,
 	"My payouts have failed for 3 days. I can't pay my staff!")
 // res.Value: {Urgent: true, Team: "billing"}
