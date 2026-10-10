@@ -96,6 +96,14 @@ func TestReasoningOpenAI(t *testing.T) {
 
 	body = reasoningRequest(t, crux.ProviderXAI, "grok-5", crux.WithReasoning(crux.ReasoningHigh))
 	require.Equal(t, map[string]any{"effort": "high"}, body["reasoning"], "summary is OpenAI only")
+
+	// The grok-4.20 family picks reasoning by model name and rejects the effort.
+	for _, model := range []string{crux.XAIGrok4_20Reasoning, crux.XAIGrok4_20, crux.XAIGrok4_20NonReasoning} {
+		_, err := crux.New("r", model, crux.WithReasoning(crux.ReasoningLow))
+		require.ErrorContains(t, err, "-reasoning", model)
+	}
+	_, err := crux.New("r", crux.XAIGrok4_20Reasoning)
+	require.NoError(t, err)
 }
 
 func TestReasoningGemini(t *testing.T) {

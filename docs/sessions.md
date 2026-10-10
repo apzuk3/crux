@@ -91,6 +91,9 @@ Handlers run in order, one at a time, and must not call back into the session.
 
 `session.Fork(ctx, opts...)` copies the history into a new session, optionally
 on another model or provider: `session.Fork(ctx, crux.WithModel(crux.OpenAIGPT5_4))`.
+A fork to another provider drops the settings that belonged to the old one
+(API key, base URL, context window, reasoning, parallel tool calls); pass them
+again if the new provider should have them.
 
 ## Long conversations
 
