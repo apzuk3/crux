@@ -109,11 +109,11 @@ func decodeInto(text string, target any) error {
 
 	candidates := schema.JSONCandidates(text)
 	for _, candidate := range candidates {
-		if json.Unmarshal([]byte(candidate), target) == nil {
+		if schema.Unmarshal([]byte(candidate), target) == nil {
 			return nil
 		}
 	}
-	err := json.Unmarshal([]byte(candidates[0]), target)
+	err := schema.Unmarshal([]byte(candidates[0]), target)
 	return fmt.Errorf("decode agent output as %T: %w", target, err)
 }
 
