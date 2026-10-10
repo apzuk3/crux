@@ -28,7 +28,8 @@ if err := session.RunInto(ctx, &t, emailBody); err != nil { ... }
   rules, so the same type works everywhere.
 - `crux.WithOutputSchema(*jsonschema.Schema)` takes a schema you built.
 - Optional fields (pointers or `omitempty`) also allow `null`.
-- The answer is validated against the schema. A mismatch fails with
+- The answer is validated against the schema, and `RunInto` also checks that
+  it decodes into the target. Either failure fails with
   `crux.ErrOutputValidation`, unless `crux.WithMaxRepairs(n)` lets the model fix
   it (default 0). Repairs don't count as turns.
 - `RunInto(ctx, &target, inputs...)`: target first, then inputs. It works
