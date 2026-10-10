@@ -52,6 +52,14 @@ func newGeminiClient(ctx context.Context, req *Request) (*genai.Client, error) {
 // geminiFunctionCalling maps the tool choice onto the function calling mode.
 // Gemini has no setting for parallel calls; crux rejects one when the agent
 // is created.
+// geminiToolConfig returns the request's tool config, creating it once.
+func geminiToolConfig(config *genai.GenerateContentConfig) *genai.ToolConfig {
+	if config.ToolConfig == nil {
+		config.ToolConfig = &genai.ToolConfig{}
+	}
+	return config.ToolConfig
+}
+
 func geminiFunctionCalling(req *Request) *genai.FunctionCallingConfig {
 	if len(req.Tools) == 0 {
 		return nil
@@ -134,16 +142,13 @@ func geminiConfig(req *Request) (*genai.GenerateContentConfig, error) {
 		config.ThinkingConfig = geminiThinking(req.Model, req.Reasoning)
 	}
 	if req.Search != nil {
-		setGeminiSearch(config, req.Search)
+		setGeminiSearch(config, req)
 	}
 	if req.Instructions != "" {
 		config.SystemInstruction = &genai.Content{Parts: []*genai.Part{genai.NewPartFromText(req.Instructions)}}
 	}
 	if calling := geminiFunctionCalling(req); calling != nil {
-		if config.ToolConfig == nil {
-			config.ToolConfig = &genai.ToolConfig{}
-		}
-		config.ToolConfig.FunctionCallingConfig = calling
+		geminiToolConfig(config).FunctionCallingConfig = calling
 	}
 	if err := applyGeminiOutputSchema(config, req); err != nil {
 		return nil, err
@@ -151,14 +156,19 @@ func geminiConfig(req *Request) (*genai.GenerateContentConfig, error) {
 	return config, nil
 }
 
-func setGeminiSearch(config *genai.GenerateContentConfig, search *Search) {
+// setGeminiSearch adds Google Search. With function tools too, the API needs
+// server-side tool invocations in the response (the search calls and results
+// come back as parts, kept in Opaque and replayed) or it refuses the request.
+func setGeminiSearch(config *genai.GenerateContentConfig, req *Request) {
 	config.Tools = append(config.Tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
-	if location := search.Location; location != nil && location.Latitude != nil && location.Longitude != nil {
-		config.ToolConfig = &genai.ToolConfig{
-			RetrievalConfig: &genai.RetrievalConfig{
-				LatLng: &genai.LatLng{Latitude: location.Latitude, Longitude: location.Longitude},
-			},
+	if location := req.Search.Location; location != nil && location.Latitude != nil && location.Longitude != nil {
+		geminiToolConfig(config).RetrievalConfig = &genai.RetrievalConfig{
+			LatLng: &genai.LatLng{Latitude: location.Latitude, Longitude: location.Longitude},
 		}
+	}
+	if len(req.Tools) > 0 {
+		include := true
+		geminiToolConfig(config).IncludeServerSideToolInvocations = &include
 	}
 }
 

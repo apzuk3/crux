@@ -45,6 +45,7 @@ Run `go doc crux.foo | grep -i <provider>` for the full list.
   request after new input only, so it can't loop.
 - `crux.WithParallelToolCalls(false)`: one tool call per turn (not on Gemini).
 - `crux.WithWebSearch(crux.WithUserLocation(...))`: provider-run web search on
-  OpenAI, Anthropic, Gemini and xAI.
+  OpenAI, Anthropic, Gemini and xAI. It combines with the agent's own tools
+  on all four (on Gemini 3 and later; Gemini 2.5 refuses the combination).
 
 A provider that can't honour a setting fails in `crux.New`, not mid-run.

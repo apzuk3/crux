@@ -33,6 +33,7 @@ type providerCase struct {
 	name     string
 	provider crux.Provider
 	model    string
+	withTool bool // also give the agent a local tool next to web search
 }
 
 // newSessionOrSkip builds the agent and a session for it, skipping the test
