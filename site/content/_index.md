@@ -42,14 +42,11 @@ layout: hextra-home
 {{< tab name="Tools" selected=true >}}
 ```go
 crux.RegisterTool("lookup_order", "Look an order up by its ID",
-	func(ctx context.Context, in struct {
-		ID string `json:"id" description:"Order ID, like A-1001"`
-	}) (Order, error) {
+	func(ctx context.Context, in struct{ ID string `json:"id"` }) (Order, error) {
 		return orders.Get(in.ID)
 	})
 
-agent, _ := crux.New("support", crux.ClaudeHaiku4_5,
-	crux.WithTools([]string{"lookup_order"}))
+agent, _ := crux.New("support", crux.ClaudeHaiku4_5, crux.WithTools([]string{"lookup_order"}))
 session, _ := crux.NewSession(ctx, agent)
 
 answer, err := session.Run(ctx, "Where is my order A-1001?")
@@ -64,8 +61,7 @@ type Invoice struct {
 	Due    time.Time `json:"due_date"`
 }
 
-agent, _ := crux.New("extractor", crux.Gemini3_5Flash,
-	crux.WithOutputSchemaFrom[Invoice]())
+agent, _ := crux.New("extractor", crux.Gemini3_5Flash, crux.WithOutputSchemaFrom[Invoice]())
 session, _ := crux.NewSession(ctx, agent)
 
 var inv Invoice
@@ -75,8 +71,7 @@ err := session.RunInto(ctx, &inv, "Extract this invoice.", crux.File("invoice.pd
 {{< /tab >}}
 {{< tab name="Approvals" >}}
 ```go
-crux.RegisterTool("refund", "Refund an order", refundOrder,
-	crux.WithApprovalNeeded(true))
+crux.RegisterTool("refund", "Refund an order", refundOrder, crux.WithApprovalNeeded(true))
 
 answer, err := session.Run(ctx, "The shoes don't fit, please refund order A-1001")
 // err is crux.ErrApprovalNeeded: nothing was refunded yet.
@@ -91,9 +86,7 @@ answer, err = session.Resume(ctx)
 {{< /tab >}}
 {{< tab name="Subagents" >}}
 ```go
-researcher, _ := crux.New("researcher", crux.Gemini3_5Flash,
-	crux.WithWebSearch())
-
+researcher, _ := crux.New("researcher", crux.Gemini3_5Flash, crux.WithWebSearch())
 lead, _ := crux.New("lead", crux.ClaudeSonnet5_5,
 	crux.WithSubAgent(researcher, "Researches a question on the web"))
 session, _ := crux.NewSession(ctx, lead)
@@ -104,12 +97,10 @@ answer, err := session.Run(ctx, "What changed in the latest Go release? Cite sou
 {{< /tab >}}
 {{< tab name="MCP" >}}
 ```go
-linear, _ := crux.ConfigureMCP(ctx, "linear",
-	crux.MCPRemote("https://mcp.linear.app/mcp")) // OAuth opens in the browser
-defer linear.Close()
+linear, _ := crux.ConfigureMCP(ctx, "linear", crux.MCPRemote("https://mcp.linear.app/mcp"))
+defer linear.Close() // OAuth opens in the browser the first time
 
-agent, _ := crux.New("pm", crux.ClaudeSonnet5_5,
-	crux.WithMCPs("linear"))
+agent, _ := crux.New("pm", crux.ClaudeSonnet5_5, crux.WithMCPs("linear"))
 session, _ := crux.NewSession(ctx, agent)
 
 answer, err := session.Run(ctx, "File a bug: checkout has been down since 9am")
@@ -124,8 +115,7 @@ type Triage struct {
 }
 
 decider, _ := crux.NewDecider(crux.Jev)
-res, err := crux.Decide[Triage](ctx, decider,
-	"My payouts have failed for 3 days. I can't pay my staff!")
+res, err := crux.Decide[Triage](ctx, decider, "My payouts failed for 3 days. I can't pay my staff!")
 // res.Value: {Urgent: true, Team: "billing"}
 // res.Confidence["team"]: 0.94
 ```
