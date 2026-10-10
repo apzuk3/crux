@@ -408,3 +408,26 @@ func TestOutputSchemaTextTypesOnTheWire(t *testing.T) {
 		})
 	}
 }
+
+// A time.Duration argument is a string on the wire and the duration in Go.
+func TestDurationToolArgument(t *testing.T) {
+	type waitArgs struct {
+		For time.Duration `json:"for" description:"How long"`
+	}
+	var got time.Duration
+	reg := crux.NewToolsRegistry()
+	crux.RegisterToolWithRegistry(reg, "wait", "Wait a while", func(ctx context.Context, in waitArgs) (string, *crux.StateDelta, error) {
+		got = in.For
+		return "waited", nil, nil
+	})
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnToolCall("wait", map[string]any{"for": "90s"})
+	mock.Expect().ReturnText("done")
+	a, err := crux.New("waiter", crux.OpenAIGPT5_4, crux.WithToolsRegistry([]string{"wait"}, reg))
+	require.NoError(t, err)
+	s := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client())))
+	_, err = s.Run(t.Context(), "wait 90 seconds")
+	require.NoError(t, err)
+	require.Equal(t, 90*time.Second, got)
+	require.Contains(t, mock.Requests()[0].BodyString(), `"for":{"description":"How long. Duration such as \"90s\" or \"1h30m\"","type":"string"}`)
+}
