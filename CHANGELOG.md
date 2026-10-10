@@ -7,6 +7,10 @@ All notable changes to crux are listed here. The format follows
 
 ### Added
 
+- `ErrSessionBusy`: a `Run`, `Resume`, `Stream`, `RunInto`, `Approve`,
+  `Reject`, `Compact` or `Fork` started while another of them runs on the
+  session fails with it instead of racing.
+
 - `Kind.String()` names log entry kinds (`tool_call`, `run_finished`, ...) when
   printed; the stored form stays numeric.
 
