@@ -2,6 +2,8 @@ package cruxtest_test
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"testing"
 
 	"crux.foo"
@@ -289,4 +291,95 @@ func TestOutputSchemaNumbersStayNumbersOnOpenAI(t *testing.T) {
 	require.Contains(t, body, `"maximum":5`)
 	require.Contains(t, body, `"minimum":1`)
 	require.Contains(t, body, `"enum":[1,3,5]`)
+}
+
+// money decodes from a JSON number only, like a decimal type, while its
+// schema accepts any JSON, so only the Go decode can catch a wrong answer.
+type money struct{ cents int64 }
+
+func (money) JSONSchema() *jsonschema.Schema { return &jsonschema.Schema{} }
+
+func (m *money) UnmarshalJSON(b []byte) error {
+	var f float64
+	if err := json.Unmarshal(b, &f); err != nil {
+		return fmt.Errorf("money must be a number, got %s", b)
+	}
+	m.cents = int64(f * 100)
+	return nil
+}
+
+type invoiceAnswer struct {
+	Amount money `json:"amount"`
+}
+
+func TestRunIntoRepairsDecodeFailure(t *testing.T) {
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnText(`{"amount":{}}`)
+	mock.Expect().ReturnText(`{"amount":12.5}`)
+	a := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithMaxRepairs(1))
+	s := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client())))
+	var inv invoiceAnswer
+	require.NoError(t, s.RunInto(t.Context(), &inv, "extract"))
+	require.Equal(t, int64(1250), inv.Amount.cents)
+	mock.AssertTurnCount(t, 2)
+	repair := mock.Requests()[1].BodyString()
+	require.Contains(t, repair, "Return corrected JSON")
+	require.Contains(t, repair, "money must be a number")
+	logs := s.Logs()
+	require.Equal(t, crux.RunAnswered, logs[len(logs)-1].Run.Outcome)
+}
+
+func TestRunIntoDecodeFailureWithoutRepairs(t *testing.T) {
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnText(`{"amount":{}}`)
+	a := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol)
+	s := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client())))
+	inv := invoiceAnswer{Amount: money{cents: 7}}
+	err := s.RunInto(t.Context(), &inv, "extract")
+	require.ErrorIs(t, err, crux.ErrOutputValidation)
+	require.ErrorContains(t, err, "money must be a number")
+	require.Equal(t, int64(7), inv.Amount.cents, "the target is untouched")
+	mock.AssertTurnCount(t, 1)
+	logs := s.Logs()
+	require.Equal(t, crux.RunFailed, logs[len(logs)-1].Run.Outcome)
+}
+
+func TestRunIntoRepairsStoredAnswer(t *testing.T) {
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnText(`{"amount":{}}`)
+	mock.Expect().ReturnText(`{"amount":3}`)
+	a := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithMaxRepairs(1))
+	s := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client())))
+	out, err := s.Run(t.Context(), "extract")
+	require.NoError(t, err, "plain Run has no target to check against")
+	require.Equal(t, `{"amount":{}}`, out)
+	var inv invoiceAnswer
+	require.NoError(t, s.RunInto(t.Context(), &inv), "no input: the stored answer is checked and repaired")
+	require.Equal(t, int64(300), inv.Amount.cents)
+	mock.AssertTurnCount(t, 2)
+	require.Contains(t, mock.Requests()[1].BodyString(), "Return corrected JSON")
+}
+
+func TestRunIntoWithSchemaRepairsDecodeFailure(t *testing.T) {
+	mock := cruxtest.NewMock(cruxtest.WithProvider(crux.ProviderGoogle))
+	mock.Expect().ReturnText(`{"amount":{}}`)
+	mock.Expect().ReturnText(`{"amount":1}`)
+	a, err := crux.New("extractor", crux.Gemini2_5Flash, crux.WithOutputSchemaFrom[invoiceAnswer](), crux.WithMaxRepairs(1))
+	require.NoError(t, err)
+	s := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client())))
+	var inv invoiceAnswer
+	require.NoError(t, s.RunInto(t.Context(), &inv, "extract"), "the schema accepts {}; the decode drives the repair")
+	require.Equal(t, int64(100), inv.Amount.cents)
+	mock.AssertTurnCount(t, 2)
+}
+
+func TestRunIntoTextTargetNeverRepairs(t *testing.T) {
+	mock := cruxtest.NewMock()
+	mock.Expect().ReturnText("not json at all")
+	a := newMockAgent(t, mock, crux.OpenAIGPT5_6Sol, crux.WithMaxRepairs(2))
+	s := crux.MustSession(crux.NewSession(t.Context(), a, crux.WithHTTPClient(mock.Client())))
+	var text string
+	require.NoError(t, s.RunInto(t.Context(), &text, "say something"))
+	require.Equal(t, "not json at all", text)
+	mock.AssertTurnCount(t, 1)
 }

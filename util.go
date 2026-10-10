@@ -78,6 +78,16 @@ type redactedError struct {
 func (e *redactedError) Error() string { return e.msg }
 func (e *redactedError) Unwrap() error { return e.err }
 
+// isTextTarget reports whether decodeInto takes the answer as it is for
+// target, with no JSON decoding that could fail.
+func isTextTarget(target any) bool {
+	switch target.(type) {
+	case *string, *any, *[]byte, *json.RawMessage:
+		return true
+	}
+	return false
+}
+
 // decodeInto decodes a final answer into target, a non-nil pointer. Text
 // targets take the answer as is; anything else is decoded as JSON, which may
 // be wrapped in a fenced code block.

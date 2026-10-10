@@ -12,6 +12,10 @@ All notable changes to crux are listed here. The format follows
 
 ### Fixed
 
+- `RunInto` checks that each answer decodes into the target during the run, so
+  `WithMaxRepairs` repairs an answer the schema accepts but Go can't decode;
+  the error wraps `ErrOutputValidation`.
+
 - An attachment with an extension crux doesn't send (`.xlsx`, `.docx`, ...)
   fails with "unsupported file type" instead of asking for a name it has.
 

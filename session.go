@@ -254,10 +254,14 @@ func (s *Session) appendLogs(ctx context.Context, entries ...Entry) error {
 // conversation twice. Run must not execute concurrently with other operations
 // on the session.
 func (s *Session) Run(ctx context.Context, inputs ...any) (string, error) {
-	return s.run(ctx, inputs, nil)
+	return s.run(ctx, inputs, nil, nil)
 }
 
-func (s *Session) run(ctx context.Context, inputs []any, emit chunkSink) (text string, err error) {
+// decodeProbe reports whether a final answer decodes into RunInto's target;
+// a failure is treated like a schema violation and repaired when possible.
+type decodeProbe func(text string) error
+
+func (s *Session) run(ctx context.Context, inputs []any, emit chunkSink, decode decodeProbe) (text string, err error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -265,7 +269,7 @@ func (s *Session) run(ctx context.Context, inputs []any, emit chunkSink) (text s
 	if len(s.PendingApprovals()) > 0 {
 		return "", ErrApprovalNeeded
 	}
-	r, err := s.startRun(inputs)
+	r, err := s.startRun(inputs, decode)
 	if err != nil {
 		return "", err
 	}
@@ -305,6 +309,7 @@ func (s *Session) run(ctx context.Context, inputs []any, emit chunkSink) (text s
 // runState is what a run keeps from its start through its turns.
 type runState struct {
 	validator   *sjs.Schema
+	decode      decodeProbe // set by RunInto
 	repairsLeft int
 	userEntry   *Entry // the new input, recorded once the run has started
 	repair      error  // a stored answer that failed validation, repaired like a new one
@@ -312,9 +317,26 @@ type runState struct {
 	answered    bool
 }
 
+// checksOutput reports whether final answers are checked at all.
+func (r *runState) checksOutput() bool { return r.validator != nil || r.decode != nil }
+
+// checkOutput validates text against the output schema, then checks that it
+// decodes into RunInto's target; either failure is an ErrOutputValidation.
+func (r *runState) checkOutput(text string) error {
+	if err := validateOutput(r.validator, text); err != nil {
+		return err
+	}
+	if r.decode != nil {
+		if err := r.decode(text); err != nil {
+			return fmt.Errorf("%w: %v", ErrOutputValidation, err)
+		}
+	}
+	return nil
+}
+
 // startRun checks the input and compiles the output schema. Without input,
 // a stored final answer is returned as it is when it is valid.
-func (s *Session) startRun(inputs []any) (*runState, error) {
+func (s *Session) startRun(inputs []any, decode decodeProbe) (*runState, error) {
 	hasInput := slices.ContainsFunc(inputs, func(v any) bool { return v != nil })
 	if !hasInput && len(s.logs) == 0 {
 		return nil, errors.New("cannot run agent with no input and empty history")
@@ -323,7 +345,7 @@ func (s *Session) startRun(inputs []any) (*runState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid output schema: %w", err)
 	}
-	r := &runState{validator: validator, repairsLeft: s.agent.maxRepairs}
+	r := &runState{validator: validator, decode: decode, repairsLeft: s.agent.maxRepairs}
 	if !hasInput {
 		return r, s.storedAnswer(r)
 	}
@@ -343,11 +365,11 @@ func (s *Session) storedAnswer(r *runState) error {
 	if !ok {
 		return nil
 	}
-	if r.validator == nil {
+	if !r.checksOutput() {
 		r.answer, r.answered = text, true
 		return nil
 	}
-	valErr := validateOutput(r.validator, text)
+	valErr := r.checkOutput(text)
 	switch {
 	case valErr == nil:
 		r.answer, r.answered = text, true
@@ -528,10 +550,10 @@ func (s *Session) checkTurnOutcome(ctx context.Context, produced []Entry, r *run
 	if !ok {
 		return "", false, nil
 	}
-	if r.validator == nil {
+	if !r.checksOutput() {
 		return text, true, nil
 	}
-	valErr := validateOutput(r.validator, text)
+	valErr := r.checkOutput(text)
 	if valErr == nil {
 		return text, true, nil
 	}
@@ -963,7 +985,9 @@ func (s *Session) decide(ctx context.Context, decision Approval) error {
 
 // RunInto runs like Run and decodes the final response into target, which
 // must be a non-nil pointer and comes before the inputs. Anything that is not
-// text is decoded as JSON.
+// text is decoded as JSON. An answer that does not decode fails with
+// ErrOutputValidation, or is repaired like a schema violation when
+// WithMaxRepairs allows.
 func (s *Session) RunInto(ctx context.Context, target any, inputs ...any) error {
 	if target == nil {
 		return errors.New("decode target cannot be nil")
@@ -974,14 +998,19 @@ func (s *Session) RunInto(ctx context.Context, target any, inputs ...any) error 
 		return fmt.Errorf("decode target must be a non-nil pointer, got %T (RunInto takes the target before the inputs)", target)
 	}
 
-	text, err := s.Run(ctx, inputs...)
+	elem := rv.Elem().Type()
+	var probe decodeProbe
+	if !isTextTarget(target) {
+		probe = func(text string) error { return decodeInto(text, reflect.New(elem).Interface()) }
+	}
+	text, err := s.run(ctx, inputs, nil, probe)
 	if err != nil {
 		return err
 	}
 
-	temp := reflect.New(rv.Elem().Type())
+	temp := reflect.New(elem)
 	if err := decodeInto(text, temp.Interface()); err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrOutputValidation, err)
 	}
 	rv.Elem().Set(temp.Elem())
 	return nil
@@ -1331,7 +1360,7 @@ func (s *Session) Stream(ctx context.Context, inputs ...any) iter.Seq2[Chunk, er
 				return ctx.Err()
 			}
 			return ctx.Err()
-		})
+		}, nil)
 		if err != nil && !stopped {
 			yield(Chunk{}, err)
 		}
