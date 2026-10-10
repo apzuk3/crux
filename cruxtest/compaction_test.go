@@ -104,6 +104,12 @@ func TestCompactSummarisesOlderTurns(t *testing.T) {
 			require.Contains(t, summaryRequest, "first question")
 			require.NotContains(t, summaryRequest, "second question", "the latest question is kept, not summarised")
 			require.NotContains(t, summaryRequest, "read_page", "the summary request has no tools")
+			if name == "large window" {
+				require.Contains(t, summaryRequest, "under about 12500 words", "a summary is asked to fit a sixteenth of the window")
+			} else {
+				require.NotContains(t, summaryRequest, "under about", "no window, no target")
+			}
+			require.NotContains(t, summaryRequest, "max_output_tokens", "no token limit: it would cut a model's reasoning")
 
 			last := mock.Requests()[3].BodyString()
 			require.Contains(t, last, "SUMMARY: an earlier exchange.")
