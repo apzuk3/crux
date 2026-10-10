@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -34,12 +35,16 @@ func newGeminiClient(ctx context.Context, req *Request) (*genai.Client, error) {
 		client = DefaultHTTPClient()
 	}
 	config.HTTPClient = client
-	// genai retries only when asked to. Match the OpenAI and Anthropic SDKs:
-	// two retries of 408, 429, 5xx and connection errors, with backoff.
+	// genai retries only when asked to, and its backoff ignores the delay the
+	// server asks for. It retries connection errors and plain server errors
+	// here, as the OpenAI and Anthropic SDKs do; rate limits and overloads
+	// (429, 503) come back at once and are retried by the caller, which waits
+	// for the delay in the error's RetryInfo.
 	config.HTTPOptions.RetryOptions = &genai.HTTPRetryOptions{
-		Attempts:     genai.Ptr(int32(req.Retries() + 1)),
-		InitialDelay: genai.Ptr(0.5),
-		MaxDelay:     genai.Ptr(8.0),
+		Attempts:        genai.Ptr(int32(req.Retries() + 1)),
+		InitialDelay:    genai.Ptr(0.5),
+		MaxDelay:        genai.Ptr(8.0),
+		HTTPStatusCodes: []int32{http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusGatewayTimeout},
 	}
 	return genai.NewClient(ctx, config)
 }
@@ -676,6 +681,7 @@ func geminiFunctionResponsePart(r *ToolResult, calls map[string]*genai.FunctionC
 
 // geminiLimit returns err as a *LimitError when Gemini reported a limit. Its
 // delay comes from the google.rpc.RetryInfo detail, as there are no headers.
+// The genai client is told not to retry limits, so the error is not retried.
 func geminiLimit(err error) error {
 	var apiErr genai.APIError
 	if !errors.As(err, &apiErr) {
@@ -685,6 +691,7 @@ func geminiLimit(err error) error {
 	if !ok {
 		return err
 	}
+	limit.Retried = false
 	for _, detail := range apiErr.Details {
 		if kind, _ := detail["@type"].(string); strings.HasSuffix(kind, "google.rpc.RetryInfo") {
 			if delay, _ := detail["retryDelay"].(string); delay != "" {

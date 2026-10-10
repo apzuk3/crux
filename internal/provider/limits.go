@@ -26,12 +26,15 @@ func (k LimitKind) Retryable() bool {
 
 // LimitError is a provider saying a limit stopped the request. StatusCode is
 // 0 when the error came in a response the server started with 200 (a stream
-// event or a failed response); the SDKs retry only HTTP errors, so those are
-// left to the caller.
+// event or a failed response). Retried says the request was already retried
+// before the error came back: the OpenAI and Anthropic SDKs retry HTTP errors
+// and wait for Retry-After themselves, while limits in a 200 body and Gemini's
+// HTTP limits (whose delay the genai SDK ignores) are left to the caller.
 type LimitError struct {
 	Kind       LimitKind
 	StatusCode int
 	RetryAfter time.Duration // 0 when the provider gave none
+	Retried    bool
 	Err        error
 }
 
@@ -114,13 +117,14 @@ func classifyLimit(status int, codes []string, message string) LimitKind {
 }
 
 // limitError returns err as a *LimitError when status, codes and message
-// describe a limit, and err unchanged otherwise.
+// describe a limit, and err unchanged otherwise. The error is marked as
+// retried: HTTP errors come back from the SDKs after their retries.
 func limitError(err error, status int, header http.Header, codes []string, message string) error {
 	kind := classifyLimit(status, codes, message)
 	if kind == 0 {
 		return err
 	}
-	return &LimitError{Kind: kind, StatusCode: status, RetryAfter: parseRetryAfter(header), Err: err}
+	return &LimitError{Kind: kind, StatusCode: status, RetryAfter: parseRetryAfter(header), Retried: true, Err: err}
 }
 
 // bodyLimit is limitError for an error that came in a response the server
