@@ -505,15 +505,12 @@ func toOpenAIResponseInput(log []Item) (responses.ResponseInputParam, error) {
 	return input, nil
 }
 
-// toOpenAIUserContent renders a user message: a string when it is only text,
-// otherwise a list with images and files.
+// toOpenAIUserContent renders a user message: a string when it is one text
+// part, otherwise a list with one item per part (texts, images and files),
+// as the other wires send them.
 func toOpenAIUserContent(parts []ContentPart) (responses.EasyInputMessageContentUnionParam, error) {
-	if !slices.ContainsFunc(parts, func(p ContentPart) bool { return p.Kind == ContentKindFile }) {
-		var text strings.Builder
-		for _, part := range parts {
-			text.WriteString(part.Text)
-		}
-		return responses.EasyInputMessageContentUnionParam{OfString: param.NewOpt(text.String())}, nil
+	if len(parts) == 1 && parts[0].Kind == ContentKindText {
+		return responses.EasyInputMessageContentUnionParam{OfString: param.NewOpt(parts[0].Text)}, nil
 	}
 	list := make(responses.ResponseInputMessageContentListParam, 0, len(parts))
 	for _, part := range parts {
