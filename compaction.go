@@ -174,7 +174,8 @@ func (s *Session) summarise(ctx context.Context, explicit bool) (bool, error) {
 		return false, err
 	}
 	prompt, err := NewUserEntry("Summarise this conversation:\n\n<conversation>\n" +
-		transcript(latestSummary(s.logs), s.logs[from:cut], transcriptBudget(compactor.window())) + "</conversation>")
+		transcript(latestSummary(s.logs), s.logs[from:cut], transcriptBudget(compactor.window())) + "</conversation>" +
+		summarySizeNote(compactor.window()))
 	if err != nil {
 		return false, err
 	}
@@ -286,6 +287,18 @@ func (a *Agent) compactor() (*Agent, error) {
 	}
 	compactor.maxRetries = a.maxRetries
 	return compactor, nil
+}
+
+// summarySizeNote asks for a summary that takes about a sixteenth of the
+// window, in words: a quarter of the share the latest entries keep. Without
+// a known window there is no target. It is a request, not a token limit: a
+// limit would also cut the reasoning some models spend on the summary and
+// fail the compaction.
+func summarySizeNote(window int) string {
+	if window == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\n\nKeep the whole summary under about %d words.", int(float64(window)*compactTail)/4)
 }
 
 const summaryInstructions = `You summarise a conversation between a user and an AI agent, so the agent can continue the work from your summary alone. The conversation may start with an earlier summary.
