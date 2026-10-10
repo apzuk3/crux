@@ -77,8 +77,10 @@ var (
 		"credit balance is too low", // Anthropic
 		"insufficient balance",      // DeepSeek
 		"insufficient credits",
-		"doesn't have any credits", // xAI
-		"billing",                  // Gemini: billing not enabled
+		"doesn't have any credits",   // xAI
+		"used all available credits", // xAI
+		"monthly spending limit",     // xAI
+		"billing",                    // Gemini: billing not enabled
 	}
 )
 
@@ -143,7 +145,8 @@ func bodyLimit(err error, raw []byte, codes ...string) error {
 // OpenAI, Anthropic and OpenRouter shape them: code, type and, from
 // OpenRouter, error_type (also in metadata). A number code is OpenRouter's
 // HTTP status and is returned as status. raw may be the object itself or an
-// envelope with it under "error".
+// envelope with it under "error"; xAI puts the message itself there, as a
+// string.
 func errorFields(raw []byte) (status int, codes []string, message string) {
 	type object struct {
 		Code      json.RawMessage `json:"code"`
@@ -156,7 +159,7 @@ func errorFields(raw []byte) (status int, codes []string, message string) {
 	}
 	var envelope struct {
 		object
-		Error *object `json:"error"`
+		Error json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(raw, &envelope) != nil {
 		return 0, nil, ""
@@ -173,8 +176,14 @@ func errorFields(raw []byte) (status int, codes []string, message string) {
 			message = o.Message
 		}
 	}
-	if envelope.Error != nil {
-		add(envelope.Error)
+	var text string
+	var inner object
+	switch {
+	case len(envelope.Error) == 0:
+	case json.Unmarshal(envelope.Error, &text) == nil:
+		message = text
+	case json.Unmarshal(envelope.Error, &inner) == nil:
+		add(&inner)
 	}
 	add(&envelope.object)
 	return status, codes, message

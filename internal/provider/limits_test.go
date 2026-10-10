@@ -30,3 +30,16 @@ func TestLimitErrorRetried(t *testing.T) {
 		t.Fatalf("Gemini HTTP limit should not be retried and carry RetryInfo, got %#v", err)
 	}
 }
+
+func TestErrorFieldsStringError(t *testing.T) {
+	status, codes, message := errorFields([]byte(`{"code":"permission-denied","error":"No credits left."}`))
+	if status != 0 || message != "No credits left." {
+		t.Fatalf("errorFields with a string error = %d, %v, %q", status, codes, message)
+	}
+	if len(codes) == 0 || codes[0] != "permission-denied" {
+		t.Fatalf("top-level code should be kept, got %v", codes)
+	}
+	if classifyLimit(http.StatusForbidden, codes, "Your team has used all available credits") != LimitInsufficientCredits {
+		t.Fatal("xAI's credit message should classify as insufficient credits")
+	}
+}
