@@ -21,9 +21,11 @@ import (
 // answer natively, with calibrated probabilities; any other model answers
 // through structured output. It is stateless and safe for concurrent use.
 type Decider struct {
-	agent  *Agent
-	native bool
-	client *http.Client // nil uses the default client
+	connection
+	sampling     // only for models without a decision API
+	instructions string
+	native       bool
+	client       *http.Client // nil uses the default client
 }
 
 // NewDecider returns a Decider for model. It takes the agent options that
@@ -32,6 +34,8 @@ type Decider struct {
 // is asked under. Models without a decision API also take sampling options
 // such as WithTemperature.
 func NewDecider(model string, opts ...AgentOption) (*Decider, error) {
+	// The options are agent options, so an agent collects them; the decider
+	// keeps only what it sends.
 	agent, err := newAgent("decider", model, opts...)
 	if err != nil {
 		return nil, err
@@ -48,8 +52,13 @@ func NewDecider(model string, opts ...AgentOption) (*Decider, error) {
 	case agent.compaction != (CompactionOptions{}) || agent.contextWindow != 0:
 		return nil, errors.New("a decider takes no compaction settings")
 	}
-	d := &Decider{agent: agent, native: providerSpecs[agent.provider].decidesNatively(agent.model)}
-	if d.native && (agent.maxTokens != 0 || agent.temperature != nil || agent.reasoning != "" || agent.parallel != nil) {
+	d := &Decider{
+		connection:   agent.connection,
+		sampling:     agent.sampling,
+		instructions: agent.instructions,
+		native:       providerSpecs[agent.provider].decidesNatively(agent.model),
+	}
+	if d.native && d.sampling != (sampling{}) {
 		return nil, fmt.Errorf("%q is a decision model and takes no sampling settings", model)
 	}
 	return d, nil
@@ -72,8 +81,8 @@ func MustDecider(decider *Decider, err error) *Decider {
 	return decider
 }
 
-func (d *Decider) Model() string      { return d.agent.model }
-func (d *Decider) Provider() Provider { return d.agent.provider }
+func (d *Decider) Model() string      { return d.model }
+func (d *Decider) Provider() Provider { return d.provider }
 
 // Decision is a Decider's answer. Confidence and Probabilities are keyed by
 // question, the field's json name; Probabilities then by answer: "true" and
@@ -122,7 +131,7 @@ func Decide[T any](ctx context.Context, d *Decider, state ...any) (Decision[T], 
 		return out, err
 	}
 	if err := decide.Assign(reflect.ValueOf(&out.Value).Elem(), fields, resp.Answers); err != nil {
-		return out, fmt.Errorf("%s: %w", d.agent.provider, err)
+		return out, fmt.Errorf("%s: %w", d.provider, err)
 	}
 	out.Model, out.Cost = resp.Model, resp.Cost
 	out.Usage = Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens}
@@ -162,24 +171,23 @@ func (d *Decider) decideNatively(ctx context.Context, fields []decide.Field, inp
 	if err != nil {
 		return nil, err
 	}
-	a := d.agent
-	resp, err := providerSpecs[a.provider].decide(ctx, &provider.DecideRequest{
-		Provider:   string(a.provider),
-		Model:      a.model,
-		APIKey:     a.apiKey,
-		BaseURL:    a.baseURL,
+	resp, err := providerSpecs[d.provider].decide(ctx, &provider.DecideRequest{
+		Provider:   string(d.provider),
+		Model:      d.model,
+		APIKey:     d.apiKey,
+		BaseURL:    d.baseURL,
 		HTTPClient: d.client,
-		MaxRetries: a.maxRetries,
+		MaxRetries: d.maxRetries,
 		State:      state,
-		Questions:  decide.Questions(fields, a.instructions),
+		Questions:  decide.Questions(fields, d.instructions),
 	})
 	if err != nil {
 		if provider.IsContextTooLong(err) {
 			err = fmt.Errorf("%w: %w", ErrContextTooLong, err)
 		} else {
-			err = providerError(a.provider, err)
+			err = providerError(d.provider, err)
 		}
-		return nil, redactURLSecrets(err, a.baseURL)
+		return nil, redactURLSecrets(err, d.baseURL)
 	}
 	return resp, nil
 }
@@ -244,13 +252,18 @@ func (d *Decider) decideWithOutput(ctx context.Context, fields []decide.Field, i
 	if err := json.Unmarshal(raw, output); err != nil {
 		return nil, fmt.Errorf("decision schema: %w", err)
 	}
-	agent := *d.agent
-	agent.outputSchema = output
-	if agent.instructions == "" {
-		agent.instructions = "Answer every question about the user's input."
+	instructions := d.instructions
+	if instructions == "" {
+		instructions = "Answer every question about the user's input."
 	}
+	req := wireSettings(&d.connection, &d.sampling, instructions)
+	req.Seq = 1
+	if req.OutputSchema, err = wireSchemaFor(output, d.provider); err != nil {
+		return nil, fmt.Errorf("decision schema: %w", err)
+	}
+	req.Log = wireLog([]Entry{entry})
 
-	entries, err := agent.step(ctx, d.client, []Entry{entry}, nil, true)
+	entries, err := d.connection.step(ctx, d.client, req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +289,7 @@ func (d *Decider) decideWithOutput(ctx context.Context, fields []decide.Field, i
 		return nil, fmt.Errorf("%w: %v", ErrOutputValidation, err)
 	}
 
-	resp := &provider.DecideResponse{Model: agent.model, Answers: make(map[string]provider.Answer, len(fields))}
+	resp := &provider.DecideResponse{Model: d.model, Answers: make(map[string]provider.Answer, len(fields))}
 	if usage != nil {
 		resp.Usage = provider.Usage{InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens}
 	}

@@ -21,12 +21,9 @@ import (
 type Agent struct {
 	id           uuid.UUID
 	name         string
-	model        string
 	instructions string
-	provider     Provider
-	apiKey       string
-	baseURL      string
-	maxRetries   *int // nil uses the default of two retries
+	connection
+	sampling
 
 	// Capabilities & Schemas
 	tools         []Tool
@@ -34,17 +31,31 @@ type Agent struct {
 	outputSchema  *jsonschema.Schema
 
 	// Execution Policies & Limits
-	maxTurns    int
-	maxRepairs  int
-	maxTokens   int             // 0 uses the provider default
-	temperature *float64        // nil uses the provider default
-	reasoning   ReasoningEffort // "" uses the provider default
-	toolChoice  ToolChoice      // "" lets the model decide
-	parallel    *bool           // nil uses the provider default
+	maxTurns   int
+	maxRepairs int
+	toolChoice ToolChoice // "" lets the model decide
 
 	// Context
 	compaction    CompactionOptions
 	contextWindow int // 0 uses the model's known window
+}
+
+// connection is what reaches a provider: the model and how to call it. An
+// Agent and a Decider share it, and the requests they send.
+type connection struct {
+	model      string
+	provider   Provider
+	apiKey     string
+	baseURL    string
+	maxRetries *int // nil uses the default of two retries
+}
+
+// sampling is how a generative model answers.
+type sampling struct {
+	maxTokens   int             // 0 uses the provider default
+	temperature *float64        // nil uses the provider default
+	reasoning   ReasoningEffort // "" uses the provider default
+	parallel    *bool           // nil uses the provider default
 }
 
 // SearchOptions configures provider-executed web search.
@@ -68,10 +79,10 @@ func New(name, model string, opts ...AgentOption) (*Agent, error) {
 // newAgent builds an agent for any model, including decision models.
 func newAgent(name, model string, opts ...AgentOption) (*Agent, error) {
 	agent := &Agent{
-		name:     name,
-		model:    model,
-		maxTurns: 10,
-		tools:    make([]Tool, 0),
+		name:       name,
+		connection: connection{model: model},
+		maxTurns:   10,
+		tools:      make([]Tool, 0),
 	}
 	for _, opt := range opts {
 		if err := opt(agent); err != nil {
@@ -690,17 +701,12 @@ func (a *Agent) clone(opts ...AgentOption) (*Agent, error) {
 func (a *Agent) copyInto(fork *Agent) error {
 	fork.maxTurns = a.maxTurns
 	fork.instructions = a.instructions
+	fork.connection = a.connection
 	fork.provider = ""
-	fork.baseURL = a.baseURL
-	fork.maxRetries = a.maxRetries
+	fork.sampling = a.sampling
 	fork.outputSchema = a.outputSchema
 	fork.maxRepairs = a.maxRepairs
-	fork.maxTokens = a.maxTokens
-	fork.temperature = a.temperature
-	fork.reasoning = a.reasoning
 	fork.toolChoice = a.toolChoice
-	fork.parallel = a.parallel
-	fork.apiKey = a.apiKey
 	fork.tools = slices.Clone(a.tools)
 	fork.searchOptions = cloneSearchOptions(a.searchOptions)
 	fork.compaction = a.compaction

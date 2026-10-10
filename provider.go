@@ -74,18 +74,22 @@ func inferProvider(modelName string) Provider {
 	return matched
 }
 
-// step sends one request to the provider. Credentials a base URL carries are
-// removed from the error, because provider SDKs print the request URL.
-// first reports the first request after new input, the only one WithToolChoice
-// applies to.
+// step sends the agent's next request to the provider. first reports the
+// first request after new input, the only one WithToolChoice applies to.
 func (a *Agent) step(ctx context.Context, client *http.Client, log []Entry, emit chunkSink, first bool) ([]Entry, error) {
-	spec, ok := providerSpecs[a.provider]
-	if !ok {
-		return nil, fmt.Errorf("unsupported provider %q", a.provider)
-	}
 	req, err := a.wireRequest(log, first)
 	if err != nil {
 		return nil, redactURLSecrets(err, a.baseURL)
+	}
+	return a.connection.step(ctx, client, req, emit)
+}
+
+// step sends one request to the provider. Credentials a base URL carries are
+// removed from the error, because provider SDKs print the request URL.
+func (c *connection) step(ctx context.Context, client *http.Client, req *provider.Request, emit chunkSink) ([]Entry, error) {
+	spec, ok := providerSpecs[c.provider]
+	if !ok {
+		return nil, fmt.Errorf("unsupported provider %q", c.provider)
 	}
 	req.HTTPClient = client
 	var sink provider.Emit
@@ -98,7 +102,7 @@ func (a *Agent) step(ctx context.Context, client *http.Client, log []Entry, emit
 	}
 	items, err := stepWithRetries(ctx, spec, req, sink, &emitted)
 	if err != nil {
-		return nil, redactURLSecrets(a.stepError(err), a.baseURL)
+		return nil, redactURLSecrets(c.stepError(err), c.baseURL)
 	}
 	entries := make([]Entry, len(items))
 	for i, item := range items {
@@ -126,7 +130,7 @@ func stepWithRetries(ctx context.Context, spec providerSpec, req *provider.Reque
 // stepError maps a provider error onto crux's errors: refusals wrap
 // ErrRefused, a context too long wraps ErrContextTooLong, and limits become
 // a *ProviderError.
-func (a *Agent) stepError(err error) error {
+func (c *connection) stepError(err error) error {
 	var refusal *provider.RefusedError
 	switch {
 	case errors.As(err, &refusal):
@@ -137,7 +141,7 @@ func (a *Agent) stepError(err error) error {
 	case provider.IsContextTooLong(err):
 		return fmt.Errorf("%w: %w", ErrContextTooLong, err)
 	default:
-		return providerError(a.provider, err)
+		return providerError(c.provider, err)
 	}
 }
 
@@ -160,19 +164,8 @@ func providerError(p Provider, err error) error {
 // entries of log the model sees. The tool choice is sent only on the first
 // request after new input.
 func (a *Agent) wireRequest(log []Entry, first bool) (*provider.Request, error) {
-	req := &provider.Request{
-		Provider:     string(a.provider),
-		Model:        a.model,
-		Instructions: a.instructions,
-		APIKey:       a.apiKey,
-		BaseURL:      a.baseURL,
-		MaxTokens:    a.maxTokens,
-		Temperature:  a.temperature,
-		Reasoning:    string(a.reasoning),
-		Parallel:     a.parallel,
-		MaxRetries:   a.maxRetries,
-		Seq:          len(log),
-	}
+	req := wireSettings(&a.connection, &a.sampling, a.instructions)
+	req.Seq = len(log)
 	if first {
 		a.wireToolChoice(req)
 	}
@@ -189,6 +182,23 @@ func (a *Agent) wireRequest(log []Entry, first bool) (*provider.Request, error) 
 	}
 	req.Log = wireLog(log)
 	return req, nil
+}
+
+// wireSettings starts a request with the connection, the sampling settings
+// and the instructions; the caller adds what the model sees.
+func wireSettings(c *connection, s *sampling, instructions string) *provider.Request {
+	return &provider.Request{
+		Provider:     string(c.provider),
+		Model:        c.model,
+		Instructions: instructions,
+		APIKey:       c.apiKey,
+		BaseURL:      c.baseURL,
+		MaxRetries:   c.maxRetries,
+		MaxTokens:    s.maxTokens,
+		Temperature:  s.temperature,
+		Reasoning:    string(s.reasoning),
+		Parallel:     s.parallel,
+	}
 }
 
 func (a *Agent) wireToolChoice(req *provider.Request) {
