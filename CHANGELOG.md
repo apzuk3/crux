@@ -7,6 +7,9 @@ All notable changes to crux are listed here. The format follows
 
 ### Fixed
 
+- Several inputs in one `Run` reach OpenAI-style providers as separate text
+  parts instead of one string with nothing between them.
+
 - Gemini 3 agents can combine `WithWebSearch` with their own tools; the
   request now asks for server-side tool invocations, which the API requires.
 
